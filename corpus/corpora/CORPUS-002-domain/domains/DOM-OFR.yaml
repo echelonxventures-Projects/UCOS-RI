@@ -1,0 +1,194 @@
+header:
+  id: DOM-OFR
+  title: Offer Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-011-004, CIC-008-001, CIC-007-001, CIC-002-001]
+  traces: [PRIN-002, PRIN-005, PRIN-006, PRIN-013]
+  certification: [CR-OFR-01, CR-OFR-02, CR-OFR-03]
+  validation: [VR-OFR-01, VR-OFR-02]
+
+purpose: >
+  Define the sellable proposition: what a party can acquire, under which terms, eligibility,
+  configuration options, commitments, and price references — the bridge between commercial objects
+  (what exists) and transactions (what is bought). Offers are the unit quoted, ordered, and entitled.
+
+scope:
+  includes:
+    - Offer aggregate (single or composite) referencing commercial objects
+    - Offer terms (commitment, minimum term, renewal, cancellation, trial)
+    - Eligibility and compatibility rules (requires/excludes/upgrade-path)
+    - Configuration options and constraints (configurable bundles, CPQ-style)
+    - Offer publication lifecycle; offer versions bound to quotes/orders
+  excludes:
+    - Commercial object definitions (DOM-COB)
+    - Price facts (DOM-PRC); offers reference price lists/entries or define offer-specific price entries via DOM-PRC
+    - Campaign targeting, budgets, coupons (DOM-CMP)
+
+responsibilities:
+  - Validate configurations against constraints deterministically.
+  - Provide eligibility decisions with reasons.
+  - Keep historical offer versions immutable for contractual traceability.
+
+principles: [PRIN-002, PRIN-005, PRIN-006, PRIN-013, PRIN-016]
+
+boundaries:
+  upstream: [DOM-COB, DOM-PRC, DOM-CTX, DOM-RUL, DOM-POL, DOM-CAT, DOM-PTY, DOM-ENT]
+  downstream: [DOM-QTE, DOM-ORD, DOM-CMP, DOM-SRC, DOM-RCM, DOM-CTR]
+
+ownership:
+  boundedContext: offer
+  owningRole: Chief Product Architect
+  service: offer-service
+  schema: ucos_offer
+
+capabilities:
+  - {id: OFR-C1, name: Define offer, description: "Compose offers from objects with slots, options, terms."}
+  - {id: OFR-C2, name: Configure, description: "Validate and complete configurations (constraint propagation)."}
+  - {id: OFR-C3, name: Eligibility, description: "Decide whether a party may acquire an offer in a context, considering existing entitlements."}
+  - {id: OFR-C4, name: Upgrade/downgrade paths, description: "Define and evaluate transitions between offers for in-life changes."}
+  - {id: OFR-C5, name: Publish, description: "Govern offer versions and effective windows."}
+
+services:
+  - {name: OfferCommandService, kind: application, operations: [CreateOffer, ReviseOffer, SubmitOffer, PublishOffer, WithdrawOffer, DefineOfferTransitions]}
+  - {name: Configurator, kind: domain-service, contract: "configure(offerVersion, partialSelections, ctx) -> {valid, completedSelections, violations[], explanations[]}; constraint propagation over finite domains (AC-3) + CEL constraints; deterministic"}
+  - {name: EligibilityEngine, kind: domain-service, contract: "eligible(offer, party, ctx, existingEntitlements) -> {eligible, reasons[]}; rules factKind 'eligibility', conflict all, deny-overrides"}
+  - {name: OfferQueryService, kind: application, operations: [GetOffer, FindOffers, ConfigureOffer, CheckEligibility, GetOfferTransitions]}
+
+aggregates:
+  - name: Offer
+    identity: "urn:ucos:<tenant>:offer:<ulid>"
+    invariants:
+      - "INV-OFR-1: every referenced object/type is in an active or ready lifecycle category at publish time."
+      - "INV-OFR-2: slot cardinalities feasible (sum of min <= max constraints) and the default configuration is valid."
+      - "INV-OFR-3: published versions immutable; quotes/orders reference (offerId, version)."
+      - "INV-OFR-4: every chargeable slot resolves a price in every context in the offer scope (checked by publish-time price coverage scan over scope's context lattice)."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: code, type: string}
+      - {name: label, type: LocalizedText}
+      - {name: description, type: LocalizedText}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: primaryObject, type: "InstanceUrn?"}
+      - {name: slots, type: "OfferSlot[]"}
+      - {name: terms, type: OfferTerms}
+      - {name: constraints, type: "RuleUrn[] (factKind configuration-constraint)"}
+      - {name: eligibilityRules, type: "RuleUrn[]"}
+      - {name: priceListRefs, type: "InstanceUrn[]"}
+      - {name: lifecycleState, type: string}
+      - {name: version, type: int}
+      - {name: revision, type: long}
+  - name: OfferTransitionMatrix
+    identity: "urn:ucos:<tenant>:offer-transitions:<ulid>"
+    fields:
+      - {name: transitions, type: "[{fromOffer, toOffer, kind: upgrade|downgrade|crossgrade|renewal, timing: immediate|end-of-period, prorationPolicyRef, feesRef?, eligibilityRules[]}]"}
+
+entities:
+  - {name: OfferSlot, within: Offer, fields: [slotCode, label, "allowed (objects[] | types[] | selector)", minQty, maxQty, defaultSelections, "chargeable", "requiresSlots[]", "excludesSlots[]"]}
+
+valueObjects:
+  - {name: OfferTerms, definition: "{commitment: {duration, earlyTerminationFeeRef?}, minimumTerm, renewal: {mode: auto|manual|none, period, noticePeriod}, trial: {duration, convertsTo, requiresPaymentMethod}, cancellation: {allowed, noticePeriod, refundPolicyRef}}"}
+  - {name: Configuration, definition: "{offerRef@version, selections: [{slotCode, objectRef, qty, children: Configuration[]}], attributes: map}"}
+  - {name: Violation, definition: "{constraintRef, slotCode?, messageKey, params}"}
+
+commands:
+  - {name: CreateOffer, input: "{code, label, scope, slots[], terms, constraints[], eligibilityRules[], priceListRefs[], validFrom, validTo?}", emits: [OfferCreated]}
+  - {name: ReviseOffer, input: "{id, expectedRevision, patch}", emits: [OfferRevised]}
+  - {name: SubmitOffer, input: "{id}", emits: [OfferSubmitted], preconditions: ["INV-OFR-1,2,4"]}
+  - {name: PublishOffer, input: "{id, approvalRef, effectiveAt?}", emits: [OfferPublished]}
+  - {name: WithdrawOffer, input: "{id, reason, effectiveAt}", emits: [OfferWithdrawn], note: "Stops new acquisitions; existing contracts/entitlements unaffected"}
+  - {name: DefineOfferTransitions, input: "OfferTransitionMatrix", emits: [OfferTransitionsDefined]}
+
+queries:
+  - {name: GetOffer, input: "{id, version?}", output: Offer}
+  - {name: FindOffers, input: "{context, objectRef?, filter?, eligibleFor?: partyRef, cursor, limit}", output: "page of offers applicable (CIC-011-001 cardinality many) and optionally eligible"}
+  - {name: ConfigureOffer, input: "{offerRef, version?, partialConfiguration, context}", output: "{valid, configuration, violations[], options per slot (remaining domain)}"}
+  - {name: CheckEligibility, input: "{offerRef, partyRef, context}", output: "{eligible, reasons[]}"}
+  - {name: GetOfferTransitions, input: "{fromOffer, partyRef?, context}", output: "allowed transitions with timing and fees"}
+
+apis:
+  - {style: REST, path: "/v1/offer/offers", methods: {POST: CreateOffer, GET: FindOffers}}
+  - {style: REST, path: "/v1/offer/offers/{id}", methods: {GET: GetOffer, PATCH: ReviseOffer}}
+  - {style: REST, path: "/v1/offer/offers/{id}:submit", methods: {POST: SubmitOffer}}
+  - {style: REST, path: "/v1/offer/offers/{id}:publish", methods: {POST: PublishOffer}}
+  - {style: REST, path: "/v1/offer/offers/{id}:withdraw", methods: {POST: WithdrawOffer}}
+  - {style: REST, path: "/v1/offer/offers/{id}:configure", methods: {POST: ConfigureOffer}}
+  - {style: REST, path: "/v1/offer/offers/{id}:check-eligibility", methods: {POST: CheckEligibility}}
+  - {style: REST, path: "/v1/offer/transitions", methods: {POST: DefineOfferTransitions, GET: GetOfferTransitions}}
+
+events:
+  - {type: ucos.offer.offer.created.v1, payload: "{id, code, scope}"}
+  - {type: ucos.offer.offer.revised.v1, payload: "{id, revision}"}
+  - {type: ucos.offer.offer.submitted.v1, payload: "{id}"}
+  - {type: ucos.offer.offer.published.v1, payload: "{id, version, scope, validFrom, validTo, slots summary}", consumers: [search, recommendations, quote, catalog]}
+  - {type: ucos.offer.offer.withdrawn.v1, payload: "{id, version, effectiveAt}"}
+  - {type: ucos.offer.transitions.defined.v1, payload: "{id, count}"}
+
+stateMachines:
+  - name: OfferLifecycle
+    definition: "Interpreted ucos.std:lifecycle:offer"
+    initial: draft
+    states: [draft, in-review, approved, scheduled, published, withdrawn, retired]
+    terminal: [retired]
+    transitions:
+      - {from: draft, to: in-review, command: SubmitOffer}
+      - {from: in-review, to: draft, command: ReviseOffer}
+      - {from: in-review, to: approved, trigger: "ChangeSet approved"}
+      - {from: approved, to: scheduled, command: PublishOffer, guard: "effectiveAt > now"}
+      - {from: [approved, scheduled], to: published, trigger: "effectiveAt reached"}
+      - {from: published, to: withdrawn, command: WithdrawOffer}
+      - {from: withdrawn, to: retired, trigger: "no open quotes/orders reference version"}
+
+rules:
+  - {id: RUL-OFR-1, statement: "Configuration validity is decided only by the Configurator with the offer version's constraints; clients' validations are advisory."}
+  - {id: RUL-OFR-2, statement: "Eligibility uses conflict 'all' with deny-overrides; every deny carries a reason code."}
+  - {id: RUL-OFR-3, statement: "Offer prices resolve through DOM-PRC with context augmented by {offer: offerRef}; offer-specific price entries are scoped by the offer dimension."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:offer.resolution", purpose: "ResolutionConfig for offer applicability"}
+  - {urn: "urn:ucos:ucos.std:policy:eligibility.resolution", purpose: "ResolutionConfig for eligibility rules"}
+  - {urn: "urn:ucos:ucos.std:policy:offer.publish-approval", purpose: "Approval plan inputs for offers"}
+
+decisions:
+  - {id: DEC-OFR-1, question: "Is this configuration valid and complete?", algorithm: "Configurator (AC-3 + CEL constraints)"}
+  - {id: DEC-OFR-2, question: "Is this party eligible?", algorithm: "EligibilityEngine; DecisionRecord type eligibility when adverse"}
+
+security:
+  permissions: [offer.read, offer.author, offer.publish, offer.configure, offer.eligibility.check]
+  dataClassification: "Public offers public; segment/contract offers confidential."
+  threats: ["Eligibility probing -> CheckEligibility for other parties requires offer.eligibility.check on that party"]
+
+governance:
+  changeControl: "Publish via ChangeSet with price coverage scan and margin simulation (DOM-PRF when available)."
+  evidence: "Coverage scan report attached."
+
+runtimeBehavior:
+  consistency: "Strong per offer; read models eventual (1s)."
+  slo: {ConfigureOffer_p99_ms: 50, CheckEligibility_p99_ms: 20, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_offer
+  tables:
+    - {name: offers, columns: "tenant_id uuid, id char(26), version int, code text, body jsonb, scope jsonb, valid_from timestamptz, valid_to timestamptz, state text, revision bigint", pk: "(tenant_id, id, version)", indexes: ["(tenant_id, state, valid_from)", "gin(scope jsonb_path_ops)"]}
+    - {name: offer_object_index, columns: "tenant_id, object_ref, offer_id, version", pk: "(tenant_id, object_ref, offer_id, version)"}
+    - {name: offer_transitions, columns: "tenant_id, from_offer, to_offer, body jsonb", pk: "(tenant_id, from_offer, to_offer)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 32."
+  retention: "Offer versions retained while referenced by contracts + 10 years."
+
+extensionModel:
+  extensionPoints: ["Constraint solver plugins (SAT/CP solvers) for complex configuration", "Eligibility rule effect kinds", "Offer TypeDefinitions with extra attributes"]
+  forbidden: ["Industry-specific offer code (telco plans, insurance products are offers + types + rules)"]
+
+certificationCriteria:
+  - {id: CR-OFR-01, rule: "Configurator matches brute-force enumeration validity on 10^4 random small offers (<= 8 slots).", level: L1}
+  - {id: CR-OFR-02, rule: "Price coverage scan detects 100% of seeded missing-price contexts.", level: L1}
+  - {id: CR-OFR-03, rule: "ConfigureOffer p99 <= 50ms for offers with 30 slots and 200 constraints.", level: L2}
+validationRules:
+  - {id: VR-OFR-01, rule: "Every slot of every ucos.std sample offer references existing objects/types."}
+  - {id: VR-OFR-02, rule: "Every offer transition references published offers."}

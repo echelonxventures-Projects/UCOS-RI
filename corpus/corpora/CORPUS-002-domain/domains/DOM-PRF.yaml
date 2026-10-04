@@ -1,0 +1,156 @@
+header:
+  id: DOM-PRF
+  title: Profitability Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-022-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-006, PRIN-021]
+  certification: [CR-PRF-01, CR-PRF-02, CR-PRF-03]
+  validation: [VR-PRF-01, VR-PRF-02]
+
+purpose: >
+  Compute margin and profitability at any grain — order line, order, customer, product, offer,
+  channel, market, campaign, partner — from recognized revenue, COGS, cost-to-serve, settlement
+  costs, and fees, and provide margin impact simulation for pricing, quotes, offers, and promotions.
+
+scope:
+  includes:
+    - Profitability fact table (event-sourced projection) with context dimensions as analysis axes
+    - Margin computation at transaction time (expected) and after actuals (realized)
+    - Margin impact simulation API for pricing approvals (DOM-PRC), quote approvals (DOM-QTE), offer publish (DOM-OFR), campaigns (DOM-CMP)
+    - Profitability cubes/aggregates for analytics
+  excludes:
+    - Source facts (revenue DOM-REV, cost DOM-CST, settlement DOM-STL, accounting DOM-ACC)
+
+responsibilities:
+  - Reproducible margin numbers traceable to source events.
+  - Fast simulation for approval flows.
+  - Expected vs realized margin variance visibility.
+
+principles: [PRIN-001, PRIN-006, PRIN-021]
+
+boundaries:
+  upstream: [DOM-REV, DOM-CST, DOM-STL, DOM-ACC, DOM-PRC, DOM-ORD, DOM-BIL]
+  downstream: [DOM-PRC, DOM-QTE, DOM-OFR, DOM-CMP, DOM-ANL, DOM-OPT]
+
+ownership:
+  boundedContext: finance
+  owningRole: Chief Product Architect
+  service: profitability-service
+  schema: ucos_finance
+
+capabilities:
+  - {id: PRF-C1, name: Expected margin, description: "Compute expected margin at quote/order time."}
+  - {id: PRF-C2, name: Realized margin, description: "Compute realized margin from actual revenue and costs."}
+  - {id: PRF-C3, name: Simulate, description: "Margin impact of price list, offer, promotion, or quote changes."}
+  - {id: PRF-C4, name: Analyze, description: "Aggregates by any context dimension."}
+
+services:
+  - {name: ProfitabilityProjector, kind: application, contract: "Consumes revenue.recognized, cogs.recognized, settlement.item.accrued, payment fees, cost-to-serve allocations; maintains facts keyed (sourceLine, period)"}
+  - {name: MarginSimulator, kind: domain-service, contract: "simulate(change, sample: historical demand from order lines over window, ctx) -> {revenueDelta, costDelta, marginDelta, marginPercentBefore/After, affectedLines}; uses DOM-PRC Price (simulate mode) and DOM-CST ResolveCost"}
+  - {name: ProfitabilityQueryService, kind: application, operations: [GetExpectedMargin, GetRealizedMargin, SimulateMarginImpact, QueryProfitability]}
+
+aggregates:
+  - name: ProfitabilityFact
+    identity: "(tenant, sourceLineRef, period)"
+    invariants: ["INV-PRF-1: realized margin = recognized revenue - COGS - settlement costs - allocated cost-to-serve - fees, each traceable to source events; recomputable from events."]
+    fields:
+      - {name: sourceLineRef, type: "orderRef#lineId"}
+      - {name: period, type: "accounting period"}
+      - {name: dimensions, type: "{market, channel, territory, segment, offer, objectType, campaign, partner, legalEntity}"}
+      - {name: revenue, type: Money}
+      - {name: cogs, type: Money}
+      - {name: settlementCost, type: Money}
+      - {name: costToServe, type: Money}
+      - {name: fees, type: Money}
+      - {name: margin, type: Money}
+      - {name: expectedMargin, type: Money}
+      - {name: currency, type: "reporting currency"}
+  - name: SimulationRun
+    identity: "urn:ucos:<tenant>:margin-simulation:<ulid>"
+    fields:
+      - {name: change, type: "{kind: price-list|offer|promotion|quote, ref}"}
+      - {name: sampleWindow, type: "{from, to}"}
+      - {name: result, type: "MarginImpact"}
+      - {name: status, type: "running|completed|failed"}
+
+entities: []
+
+valueObjects:
+  - {name: MarginImpact, definition: "{revenueDelta, costDelta, marginDelta, marginPctBefore, marginPctAfter, linesBelowFloor, byDimension[]}"}
+
+commands:
+  - {name: RunMarginSimulation, input: "{change, sampleWindow, dimensions?}", emits: [MarginSimulationCompleted], async: true}
+
+queries:
+  - {name: GetExpectedMargin, input: "{priceResult | quoteRef | orderRef, context}", output: "{margin, marginPct, components}"}
+  - {name: GetRealizedMargin, input: "{orderRef | customer | product, period}", output: "{revenue, costs, margin, varianceVsExpected}"}
+  - {name: SimulateMarginImpact, input: "{change, sampleWindow}", output: MarginImpact, note: "Synchronous for small samples (<= 100k lines), else use RunMarginSimulation"}
+  - {name: QueryProfitability, input: "{groupBy: [dimensions], filters, period, currency}", output: "rows"}
+
+apis:
+  - {style: REST, path: "/v1/profitability:expected-margin", methods: {POST: GetExpectedMargin}}
+  - {style: REST, path: "/v1/profitability:realized-margin", methods: {GET: GetRealizedMargin}}
+  - {style: REST, path: "/v1/profitability:simulate", methods: {POST: SimulateMarginImpact}}
+  - {style: REST, path: "/v1/profitability/simulations", methods: {POST: RunMarginSimulation}}
+  - {style: REST, path: "/v1/profitability:query", methods: {POST: QueryProfitability}}
+
+events:
+  - {type: ucos.finance.margin-simulation.completed.v1, payload: "{id, change, marginDelta, linesBelowFloor}", consumers: [governance impact panels, pricing approvals]}
+  - {type: ucos.finance.margin.variance-detected.v1, payload: "{sourceLineRef, expected, realized, variancePct}", note: "Emitted when |variance| > policy profitability.variance-threshold"}
+
+stateMachines:
+  - name: SimulationRunLifecycle
+    initial: running
+    states: [running, completed, failed]
+    terminal: [completed, failed]
+    transitions:
+      - {from: running, to: completed, trigger: "sample processed"}
+      - {from: running, to: failed, trigger: "error or timeout"}
+
+rules:
+  - {id: RUL-PRF-1, statement: "Margins are reported in reporting currency using accounting FX rates of the period; cross-currency comparisons always state rate type."}
+  - {id: RUL-PRF-2, statement: "Profitability data is never exposed to customer/partner audiences (inherits cost confidentiality)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:profitability.variance-threshold", purpose: "Variance percent that triggers variance events"}
+
+decisions:
+  - {id: DEC-PRF-1, question: "What is the margin impact of change X?", algorithm: "MarginSimulator over historical sample"}
+
+security:
+  permissions: [profitability.read, profitability.simulate]
+  dataClassification: "Confidential."
+  threats: ["Margin exposure -> internal audiences only"]
+
+governance:
+  changeControl: "Fact definitions and cost-to-serve inclusion via ChangeSet."
+  evidence: "Simulation results attached to pricing/offer ChangeSets."
+
+runtimeBehavior:
+  consistency: "Eventual projection (p99 5 min after source events)."
+  slo: {SimulateMarginImpact_100k_p95_s: 10, QueryProfitability_p95_s: 3, availability: "99.9%"}
+
+persistenceModel:
+  store: "Columnar analytics store via AnalyticsStorePort (reference implementations ClickHouse- or DuckDB-compatible) + PostgreSQL ucos_finance for simulations"
+  tables:
+    - {name: profitability_facts, columns: "tenant_id, source_line_ref, period, dimensions (columns), revenue_minor, cogs_minor, settlement_minor, cts_minor, fees_minor, margin_minor, expected_margin_minor, currency", pk: "(tenant_id, source_line_ref, period)"}
+    - {name: margin_simulations, columns: "tenant_id, id, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "profitability_facts by (tenant_id, period)."
+  retention: "Rebuildable projection; aggregated history 10 years."
+
+extensionModel:
+  extensionPoints: ["Additional analysis dimensions from context dimension registry", "Custom margin definitions (contribution margin levels) as metadata"]
+  forbidden: ["Exposing facts outside internal audiences"]
+
+certificationCriteria:
+  - {id: CR-PRF-01, rule: "Rebuild from events reproduces facts exactly (counts and sums per period).", level: L1}
+  - {id: CR-PRF-02, rule: "Realized margin reconciles to GL revenue and COGS per legal entity and period within rounding.", level: L1}
+  - {id: CR-PRF-03, rule: "SimulateMarginImpact for 100k lines p95 <= 10s.", level: L2}
+validationRules:
+  - {id: VR-PRF-01, rule: "Every analysis dimension is a registered context dimension."}
+  - {id: VR-PRF-02, rule: "Every margin component maps to a source event type."}

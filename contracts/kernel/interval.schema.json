@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-ucos-id": "urn:ucos:ucos.kernel:schema:interval@1.0.0",
+  "title": "Interval",
+  "description": "Half-open UTC interval [from, to); to = null means open-ended.",
+  "type": "object",
+  "required": [
+    "from"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "from": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "to": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  }
+}

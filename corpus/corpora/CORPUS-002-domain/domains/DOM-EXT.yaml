@@ -1,0 +1,198 @@
+header:
+  id: DOM-EXT
+  title: Extension Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-028-001, CIC-029-001, CIC-000-004, CIC-014-001, CIC-002-001]
+  traces: [PRIN-013, PRIN-012, PRIN-022, CIC-028-001]
+  certification: [CR-EXT-01, CR-EXT-02, CR-EXT-03]
+  validation: [VR-EXT-01, VR-EXT-02]
+
+purpose: >
+  Operate the plugin ecosystem defined by CIC-028-001: plugin registry, submission and scanning,
+  certification linkage, listing, per-tenant activation and configuration, permission grants,
+  runtime hosting for I1/I2/I3 plugins, and revocation — the only path by which non-platform code
+  extends UCOS behavior.
+
+scope:
+  includes:
+    - Plugin registry (manifests, versions, digests, signatures, isolation)
+    - Submission pipeline (manifest lint, SBOM, vulnerability, license, malware scans)
+    - Listings and publisher verification
+    - Activations per tenant/scope with configuration (validated against configSchema) and secret bindings
+    - Plugin host runtimes (WASM sandbox host, sidecar/remote gateway, UI sandbox bridge)
+    - Port registry (port names and interface versions)
+  excludes:
+    - Metadata packs (DOM-META)
+    - Certification records themselves (DOM-CRT)
+
+responsibilities:
+  - Only certified, signed plugins run.
+  - Permission enforcement exactly as declared in manifests.
+  - Revocation and kill within 5 minutes everywhere.
+
+principles: [PRIN-012, PRIN-013, PRIN-022, PRIN-010]
+
+boundaries:
+  upstream: [DOM-CRT, DOM-TRST, DOM-SEC, DOM-GOV, DOM-ORG, DOM-CFG]
+  downstream: [DOM-PAY, DOM-TAX, DOM-PRC, DOM-LFC, DOM-ONT, DOM-AGT, DOM-CUS]
+
+ownership:
+  boundedContext: extension
+  owningRole: Chief Platform Architect
+  service: extension-service
+  schema: ucos_extension
+
+capabilities:
+  - {id: EXT-C1, name: Registry, description: "Register plugins and ports; version catalog."}
+  - {id: EXT-C2, name: Submission & scan, description: "Automated scanning and certification hand-off."}
+  - {id: EXT-C3, name: Activation, description: "Per-tenant activation with configuration, permissions, secrets."}
+  - {id: EXT-C4, name: Hosting, description: "Run plugins in the isolation model their kind requires."}
+  - {id: EXT-C5, name: Revocation, description: "Suspend/revoke plugins and propagate deactivation."}
+
+services:
+  - {name: PluginRegistryService, kind: application, operations: [SubmitPlugin, ListPlugin, DelistPlugin, RegisterPort]}
+  - {name: ActivationService, kind: application, operations: [ActivatePlugin, ReconfigurePlugin, DeactivatePlugin]}
+  - {name: PluginHost, kind: infrastructure, contract: "I1 WASM (Wasmtime, fuel-metered), I2 sidecar/remote over mTLS gRPC with egress policy, I3 iframe bridge; enforces manifest permissions; emits telemetry"}
+  - {name: ExtensionQueryService, kind: application, operations: [GetPlugin, FindPlugins, GetActivation, ListActivations, GetPort]}
+
+aggregates:
+  - name: Plugin
+    identity: "urn:ucos:global:plugin:<id>@<version>"
+    invariants:
+      - "INV-EXT-1: manifest valid (VR-028-001-01); digest signed by verified publisher (DOM-TRST purpose plugin-signing)."
+      - "INV-EXT-2: listed only with CertificationRecord at required level for its isolation (CR-028-001-01)."
+    fields:
+      - {name: id, type: string}
+      - {name: version, type: SemVer}
+      - {name: manifest, type: "ucos-plugin.yaml (CIC-028-001 §2)"}
+      - {name: digest, type: Sha256}
+      - {name: publisher, type: OrganizationUrn}
+      - {name: scanResults, type: "{sbomRef, vulns, licenses, malware}"}
+      - {name: certificationRef, type: "InstanceUrn?"}
+      - {name: status, type: string}
+  - name: PluginActivation
+    identity: "urn:ucos:<tenant>:plugin-activation:<pluginId>"
+    invariants:
+      - "INV-EXT-3: configuration validates against configSchema; secrets bound by reference only."
+      - "INV-EXT-4: granted permissions ⊆ manifest permissions; activation requires approved ChangeSet (CR-028-001-05)."
+    fields:
+      - {name: pluginRef, type: "id@version"}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: configuration, type: json}
+      - {name: secretRefs, type: "map<name, secretManagerRef>"}
+      - {name: grantedPermissions, type: json}
+      - {name: status, type: "pending-approval|active|suspended|deactivated"}
+  - name: Port
+    identity: "urn:ucos:global:port:<name>@<version>"
+    fields:
+      - {name: name, type: "e.g. PaymentProviderPort, TaxEnginePort, PriceModelPort, GeocoderPort"}
+      - {name: version, type: SemVer}
+      - {name: contract, type: "proto/IDL ref"}
+      - {name: conformanceSuiteRef, type: string}
+
+entities: []
+
+valueObjects:
+  - {name: PermissionGrant, definition: "{egress[], ucosApis[{api, purpose, fields}], events{consume, produce}, secrets[]}"}
+
+commands:
+  - {name: SubmitPlugin, input: "{artifactRef, manifest, signature}", emits: [PluginSubmitted, PluginScanned], async: true}
+  - {name: ListPlugin, input: "{id, version}", emits: [PluginListed], preconditions: ["INV-EXT-2"]}
+  - {name: DelistPlugin, input: "{id, version, reason (deprecated|revoked|security)}", emits: [PluginDelisted]}
+  - {name: RegisterPort, input: "Port + changeSetRef", emits: [PortRegistered]}
+  - {name: ActivatePlugin, input: "{pluginRef, scope, configuration, secretRefs, permissions, changeSetRef}", emits: [PluginActivated]}
+  - {name: ReconfigurePlugin, input: "{activationId, configuration?, scope?, changeSetRef}", emits: [PluginReconfigured]}
+  - {name: DeactivatePlugin, input: "{activationId, reason}", emits: [PluginDeactivated]}
+
+queries:
+  - {name: GetPlugin, input: "{id, version}", output: Plugin}
+  - {name: FindPlugins, input: "{kind?, port?, publisher?, listed?}", output: "page"}
+  - {name: GetActivation, input: "{activationId}", output: PluginActivation}
+  - {name: ListActivations, input: "{tenant, port?}", output: "PluginActivation[]"}
+  - {name: GetPort, input: "{name, version?}", output: Port}
+
+apis:
+  - {style: REST, path: "/v1/extensions/plugins", methods: {POST: SubmitPlugin, GET: FindPlugins}}
+  - {style: REST, path: "/v1/extensions/plugins/{id}/versions/{version}", methods: {GET: GetPlugin}}
+  - {style: REST, path: "/v1/extensions/plugins/{id}/versions/{version}:list", methods: {POST: ListPlugin}}
+  - {style: REST, path: "/v1/extensions/plugins/{id}/versions/{version}:delist", methods: {POST: DelistPlugin}}
+  - {style: REST, path: "/v1/extensions/ports", methods: {POST: RegisterPort}}
+  - {style: REST, path: "/v1/extensions/ports/{name}", methods: {GET: GetPort}}
+  - {style: REST, path: "/v1/extensions/activations", methods: {POST: ActivatePlugin, GET: ListActivations}}
+  - {style: REST, path: "/v1/extensions/activations/{activationId}", methods: {GET: GetActivation, PATCH: ReconfigurePlugin}}
+  - {style: REST, path: "/v1/extensions/activations/{activationId}:deactivate", methods: {POST: DeactivatePlugin}}
+
+events:
+  - {type: ucos.extension.plugin.submitted.v1, payload: "{id, version, digest, kind}"}
+  - {type: ucos.extension.plugin.scanned.v1, payload: "{id, version, critical, high, licenseViolations, malware}"}
+  - {type: ucos.extension.plugin.listed.v1, payload: "{id, version, certificationLevel}"}
+  - {type: ucos.extension.plugin.delisted.v1, payload: "{id, version, reason}", consumers: [plugin hosts (deactivate within 5 min), activations]}
+  - {type: ucos.extension.port.registered.v1, payload: "{name, version}"}
+  - {type: ucos.extension.activation.activated.v1, payload: "{activationId, tenant, pluginRef, scope}"}
+  - {type: ucos.extension.activation.reconfigured.v1, payload: "{activationId}"}
+  - {type: ucos.extension.activation.deactivated.v1, payload: "{activationId, reason}"}
+
+stateMachines:
+  - name: PluginLifecycle
+    initial: submitted
+    states: [submitted, scanned, certified, listed, suspended, revoked, deprecated, removed]
+    terminal: [revoked, removed]
+    transitions:
+      - {from: submitted, to: scanned, trigger: "scans complete without blocking findings"}
+      - {from: scanned, to: certified, trigger: "CertificationRecord issued (DOM-CRT)"}
+      - {from: certified, to: listed, command: ListPlugin}
+      - {from: listed, to: suspended, trigger: "certification suspended or security event"}
+      - {from: suspended, to: listed, trigger: "certification reinstated"}
+      - {from: [listed, suspended], to: revoked, command: DelistPlugin, guard: "reason in [revoked, security]"}
+      - {from: listed, to: deprecated, command: DelistPlugin, guard: "reason = deprecated"}
+      - {from: deprecated, to: removed, trigger: "no active activations"}
+
+rules:
+  - {id: RUL-EXT-1, statement: "Plugin selection among multiple activations for one port is decided by the consuming domain's policy (e.g. payment.routing), never by the plugin."}
+  - {id: RUL-EXT-2, statement: "On revocation, hosts stop invoking the plugin within 5 minutes and callers apply declared fallbacks (CR-028-001-04)."}
+  - {id: RUL-EXT-3, statement: "I2 plugins receive only data fields declared in permissions for the declared purpose (CIC-028-001 §4)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:extensions.activation", purpose: "Who may activate which plugin kinds; approval requirements by isolation level"}
+
+decisions:
+  - {id: DEC-EXT-1, question: "May plugin P be activated in tenant T with permissions G?", algorithm: "Listed + certification level + G ⊆ manifest + policy extensions.activation + approved ChangeSet"}
+
+security:
+  permissions: [extensions.read, extensions.submit, extensions.list, extensions.activate, extensions.port.register]
+  dataClassification: "Manifests public; activation configs confidential; secrets never stored here."
+  threats: ["Supply-chain attack via plugin -> signatures, scans, certification, isolation, egress control", "Permission creep on upgrade -> new permissions require re-approval"]
+
+governance:
+  changeControl: "Activations and reconfigurations via ChangeSet; ports via constitutional-level ChangeSet for kernel ports."
+  evidence: "Scan reports and SBOMs captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Activation state streamed to hosts; deactivation within 5 min p99."
+  slo: {I1_invocation_overhead_p99_us: 200, I2_gateway_overhead_p99_ms: 3, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_extension + OCI registry for artifacts
+  tables:
+    - {name: plugins, columns: "id, version, digest, publisher, manifest jsonb, scan jsonb, certification_ref, status", pk: "(id, version)", global: true}
+    - {name: activations, columns: "tenant_id, activation_id, plugin_id, plugin_version, scope jsonb, configuration jsonb, secret_refs jsonb, permissions jsonb, status", pk: "(tenant_id, activation_id)"}
+    - {name: ports, columns: "name, version, body jsonb", pk: "(name, version)", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "activations hash(tenant_id) 16."
+  retention: "Indefinite (audit)."
+
+extensionModel:
+  extensionPoints: ["New ports via governed registration", "Additional isolation runtimes certified against CR-028-001-02"]
+  forbidden: ["Unsigned or uncertified code execution"]
+
+certificationCriteria:
+  - {id: CR-EXT-01, rule: "Passes CIC-028-001 CR-028-001-01..05.", level: L2}
+  - {id: CR-EXT-02, rule: "Upgrade adding permissions is blocked until re-approved (negative test).", level: L1}
+  - {id: CR-EXT-03, rule: "Plugin host enforces fuel/memory limits and egress allow-lists under fuzzed plugins.", level: L2}
+validationRules:
+  - {id: VR-EXT-01, rule: "Every port referenced in specs (PaymentProviderPort, TaxEnginePort, PriceModelPort, GeocoderPort, EmbeddingPort, ModelPort, WorkflowEnginePort, EventBusPort …) is registered."}
+  - {id: VR-EXT-02, rule: "Every certified port adapter listed in CIC-021-001 §1 has a Port registration and conformance suite reference."}

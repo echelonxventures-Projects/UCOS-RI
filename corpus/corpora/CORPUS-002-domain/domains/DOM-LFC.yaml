@@ -1,0 +1,218 @@
+header:
+  id: DOM-LFC
+  title: Lifecycle Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-007-001, CIC-002-001, CIC-009-001]
+  traces: [PRIN-004, PRIN-005, PRIN-008, PRIN-016, CIC-007-001]
+  certification: [CR-LFC-01, CR-LFC-02, CR-LFC-03]
+  validation: [VR-LFC-01, VR-LFC-02]
+
+purpose: >
+  Own LifecycleModel definitions and the lifecycle interpreter library so that every stateful
+  commercial aggregate (objects, contracts, entitlements, orders, pack-defined aggregates) follows a
+  metadata-defined, verifiable, versioned state machine with guards, requirements, effects, and timers.
+
+scope:
+  includes:
+    - LifecycleModel definitions, inheritance, versioning, static verification
+    - Effect kind registry and requirement kind registry
+    - Interpreter library (ucos-lifecycle-runtime) embedded in owning contexts
+    - Timer scheduler service
+    - In-flight instance migration to new model MAJOR versions (with CORPUS-026)
+  excludes:
+    - Aggregate storage of lifecycle state (owned by each aggregate's context)
+    - Long-running multi-party workflows (DOM-WFL); lifecycle effects may start them
+
+responsibilities:
+  - Guarantee identical transition semantics in every context (single interpreter).
+  - Reject unsound models at publication (CIC-007-001 §6).
+  - Fire timers reliably.
+
+principles: [PRIN-004, PRIN-005, PRIN-008, PRIN-016]
+
+boundaries:
+  upstream: [DOM-ONT, DOM-POL, DOM-RUL, DOM-GOV]
+  downstream: [DOM-COB, DOM-CTR, DOM-ENT, DOM-ORD, DOM-OFR, DOM-CAT, DOM-PRC, DOM-WFL]
+
+ownership:
+  boundedContext: lifecycle
+  owningRole: Chief Architect
+  service: lifecycle-service
+  schema: ucos_lifecycle
+
+capabilities:
+  - {id: LFC-C1, name: Define model, description: "Author, verify, and publish LifecycleModels."}
+  - {id: LFC-C2, name: Interpret, description: "Embedded Fire() per CIC-007-001 §2.1."}
+  - {id: LFC-C3, name: Schedule, description: "Persist and fire state timers."}
+  - {id: LFC-C4, name: Migrate instances, description: "Map in-flight instances to a new MAJOR model version."}
+  - {id: LFC-C5, name: Visualize, description: "Render model as statechart (SCXML export, SVG) for review."}
+
+services:
+  - {name: LifecycleModelService, kind: application, operations: [DraftLifecycleModel, ReviseLifecycleModel, SubmitLifecycleModel, PublishLifecycleModel, DeprecateLifecycleModel, RegisterEffectKind]}
+  - {name: ModelCompiler, kind: domain-service, contract: "compile(model) -> CompiledModel | violations; implements CIC-007-001 §6"}
+  - {name: LifecycleInterpreter, kind: library, contract: "Fire(aggregateView, transition, cmd, ctx) -> {newState, events[], effects[]} | error; pure apart from PDP port"}
+  - {name: TimerScheduler, kind: application, operations: [ScheduleTimer, CancelTimer], contract: "CIC-007-001 §4"}
+  - {name: InstanceMigrationService, kind: application, operations: [StartLifecycleMigration, GetLifecycleMigration]}
+
+aggregates:
+  - name: LifecycleModel
+    kernel: true
+    identity: "urn:ucos:<namespace>:lifecycle:<name>@<semver>"
+    invariants:
+      - "INV-LFC-1: passes all static verification rules of CIC-007-001 §6."
+      - "INV-LFC-2: child model (extends) preserves all parent states and transitions."
+      - "INV-LFC-3: every state has a category; terminal states have no outgoing transitions."
+      - "INV-LFC-4: published versions immutable."
+    fields:
+      - {name: urn, type: MetadataUrn}
+      - {name: label, type: LocalizedText}
+      - {name: appliesTo, type: "MetadataUrn[]"}
+      - {name: extends, type: "MetadataUrn?"}
+      - {name: initial, type: string}
+      - {name: states, type: "StateDefinition[]"}
+      - {name: transitions, type: "TransitionDefinition[]"}
+      - {name: regions, type: "Region[]"}
+      - {name: compiled, type: "CompiledModel digest"}
+      - {name: state, type: DefinitionState}
+  - name: LifecycleMigration
+    identity: "urn:ucos:<tenant>:lifecycle-migration:<ulid>"
+    invariants: ["INV-LFC-5: stateMapping covers every non-terminal state of the source model."]
+    fields:
+      - {name: fromModel, type: MetadataUrn}
+      - {name: toModel, type: MetadataUrn}
+      - {name: stateMapping, type: "map<string,string>"}
+      - {name: selector, type: "CEL?"}
+      - {name: progress, type: "{total, migrated, failed, cursor}"}
+      - {name: status, type: "enum(pending, running, paused, completed, failed)"}
+
+entities:
+  - {name: StateDefinition, within: LifecycleModel, fields: [code, label, category, terminal, editable, parent, onEntry, onExit, timers, invariants]}
+  - {name: TransitionDefinition, within: LifecycleModel, fields: [code, from, to, kind, trigger, guard, policy, requires, effects, reasonRequired, sod]}
+  - {name: LifecycleTimer, within: "owning aggregate (stored by scheduler)", fields: [tenant, aggregateRef, timerId, dueAt, transition, modelVersion, status]}
+
+valueObjects:
+  - {name: StateCategory, definition: "draft|review|ready|active|suspended|winding-down|closed|archived"}
+  - {name: Effect, definition: "{kind (registered), params}"}
+  - {name: Requirement, definition: "{kind: approval|evidence|certification|checklist, params}"}
+  - {name: CompiledModel, definition: "Transition table indexed by (state, transition), precomputed LCA chains, guard CEL programs; digest sha256"}
+
+commands:
+  - {name: DraftLifecycleModel, input: "LifecycleModel draft + changeSetRef", emits: [LifecycleModelDrafted]}
+  - {name: ReviseLifecycleModel, input: "{urn, expectedRevision, patch}", emits: [LifecycleModelRevised]}
+  - {name: SubmitLifecycleModel, input: "{urn}", emits: [LifecycleModelSubmitted], preconditions: ["ModelCompiler ok"]}
+  - {name: PublishLifecycleModel, input: "{urn, approvalRef}", emits: [LifecycleModelPublished]}
+  - {name: DeprecateLifecycleModel, input: "{urn, successor?}", emits: [LifecycleModelDeprecated]}
+  - {name: RegisterEffectKind, input: "{kind, paramsSchema, dispatcher: context|plugin}", emits: [EffectKindRegistered]}
+  - {name: ScheduleTimer, input: "{aggregateRef, timerId, dueAt, transition}", emits: [TimerScheduled], note: "Called by interpreter on state entry"}
+  - {name: CancelTimer, input: "{aggregateRef, timerId}", emits: [TimerCancelled]}
+  - {name: StartLifecycleMigration, input: "{fromModel, toModel, stateMapping, selector?}", emits: [LifecycleMigrationStarted, LifecycleMigrationCompleted], async: true}
+
+queries:
+  - {name: GetLifecycleModel, input: "{urn}", output: LifecycleModel}
+  - {name: FindLifecycleModels, input: "{appliesTo?, state?, cursor, limit}", output: "page of LifecycleModel"}
+  - {name: GetCompiledModel, input: "{urn (pinned)}", output: CompiledModel, consistency: "immutable; infinite cache"}
+  - {name: ExportStatechart, input: "{urn, format: scxml|svg|mermaid}", output: document}
+  - {name: GetLifecycleMigration, input: "{id}", output: LifecycleMigration}
+  - {name: FindDueTimers, input: "{shard, until, limit}", output: "LifecycleTimer[]", note: "Internal (scheduler)"}
+
+apis:
+  - {style: REST, path: "/v1/lifecycle/models", methods: {POST: DraftLifecycleModel, GET: FindLifecycleModels}}
+  - {style: REST, path: "/v1/lifecycle/models/{urn}", methods: {GET: GetLifecycleModel, PATCH: ReviseLifecycleModel}}
+  - {style: REST, path: "/v1/lifecycle/models/{urn}:submit", methods: {POST: SubmitLifecycleModel}}
+  - {style: REST, path: "/v1/lifecycle/models/{urn}:publish", methods: {POST: PublishLifecycleModel}}
+  - {style: REST, path: "/v1/lifecycle/models/{urn}:deprecate", methods: {POST: DeprecateLifecycleModel}}
+  - {style: REST, path: "/v1/lifecycle/models/{urn}/compiled", methods: {GET: GetCompiledModel}}
+  - {style: REST, path: "/v1/lifecycle/models/{urn}/statechart", methods: {GET: ExportStatechart}}
+  - {style: REST, path: "/v1/lifecycle/effect-kinds", methods: {POST: RegisterEffectKind}}
+  - {style: REST, path: "/v1/lifecycle/migrations", methods: {POST: StartLifecycleMigration}}
+  - {style: REST, path: "/v1/lifecycle/migrations/{id}", methods: {GET: GetLifecycleMigration}}
+  - {style: gRPC, service: "ucos.lifecycle.v1.TimerService (internal)", rpcs: [ScheduleTimer, CancelTimer, FindDueTimers]}
+
+events:
+  - {type: ucos.lifecycle.model.drafted.v1, payload: "{urn}"}
+  - {type: ucos.lifecycle.model.revised.v1, payload: "{urn, revision}"}
+  - {type: ucos.lifecycle.model.submitted.v1, payload: "{urn, compiledDigest}"}
+  - {type: ucos.lifecycle.model.published.v1, payload: "{urn, compiledDigest, appliesTo}"}
+  - {type: ucos.lifecycle.model.deprecated.v1, payload: "{urn, successor}"}
+  - {type: ucos.lifecycle.effect-kind.registered.v1, payload: "{kind, dispatcher}"}
+  - {type: ucos.lifecycle.timer.scheduled.v1, payload: "{aggregateRef, timerId, dueAt}"}
+  - {type: ucos.lifecycle.timer.cancelled.v1, payload: "{aggregateRef, timerId}"}
+  - {type: ucos.lifecycle.timer.fired.v1, payload: "{aggregateRef, timerId, transition, firedAt}"}
+  - {type: ucos.lifecycle.migration.started.v1, payload: "{id, fromModel, toModel, total}"}
+  - {type: ucos.lifecycle.migration.completed.v1, payload: "{id, migrated, failed}"}
+
+stateMachines:
+  - name: LifecycleModelDefinition
+    initial: draft
+    states: [draft, in-review, published, deprecated, retired]
+    terminal: [retired]
+    transitions:
+      - {from: draft, to: in-review, command: SubmitLifecycleModel}
+      - {from: in-review, to: draft, command: ReviseLifecycleModel}
+      - {from: in-review, to: published, command: PublishLifecycleModel}
+      - {from: published, to: deprecated, command: DeprecateLifecycleModel}
+      - {from: deprecated, to: retired, command: retire, guard: "zero instances pinned (usage query to owning contexts)"}
+  - name: LifecycleMigrationRun
+    initial: pending
+    states: [pending, running, paused, completed, failed]
+    terminal: [completed, failed]
+    transitions:
+      - {from: pending, to: running, trigger: "worker claims job"}
+      - {from: running, to: paused, command: pause}
+      - {from: paused, to: running, command: resume}
+      - {from: running, to: completed, trigger: "cursor exhausted and failed=0 or within tolerance"}
+      - {from: running, to: failed, trigger: "failure ratio > migration.failure-tolerance"}
+
+rules:
+  - {id: RUL-LFC-1, statement: "Code may depend only on state categories, never on state codes of interpreted models (UCOS-L004)."}
+  - {id: RUL-LFC-2, statement: "Effects with external side effects dispatch after commit via outbox."}
+  - {id: RUL-LFC-3, statement: "Timers fire as system principal; transitions they trigger still evaluate guards and policies."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:lifecycle.model-authoring", purpose: "Who may author models per namespace"}
+  - {urn: "urn:ucos:ucos.std:policy:migration.failure-tolerance", purpose: "Allowed failure ratio before a migration run fails (default 0)"}
+  - {urn: "urn:ucos:ucos.std:policy:<context>.transition", purpose: "Default transition authorization per context"}
+
+decisions:
+  - {id: DEC-LFC-1, question: "May this transition fire now?", algorithm: "CIC-007-001 §2.1 (state, PDP, guard, requirements, SoD)"}
+  - {id: DEC-LFC-2, question: "Is a model sound?", algorithm: "CIC-007-001 §6"}
+
+security:
+  permissions: [lifecycle.model.read, lifecycle.model.author, lifecycle.model.publish, lifecycle.migration.run, lifecycle.effectkind.register]
+  dataClassification: "Models internal. Timers reference aggregates only by URN."
+  threats: ["Guard bypass via timer: timers re-evaluate guards", "Effect escalation: effect dispatch runs under the transition principal's delegated authority, not the scheduler's"]
+
+governance:
+  changeControl: "Model publication via ChangeSet; MAJOR versions require migration plan artifact."
+  evidence: "Compiled digest + statechart export attached to ChangeSet."
+
+runtimeBehavior:
+  consistency: "Interpreter runs inside owning aggregate transaction (strong). Compiled models immutable and cached."
+  slo: {Fire_overhead_p99_ms: 1, timer_skew_p99_s: 5, availability: "99.95% (scheduler)"}
+  failureModes: ["Scheduler down: timers fire late; catch-up on recovery in dueAt order; no missed timers"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_lifecycle
+  tables:
+    - {name: models, columns: "tenant_id uuid, urn text, body jsonb, compiled jsonb, digest bytea, state text, revision bigint", pk: "(tenant_id, urn)"}
+    - {name: lifecycle_timers, columns: "tenant_id uuid, aggregate_ref text, timer_id text, due_at timestamptz, transition text, model_version text, status text, shard int", pk: "(tenant_id, aggregate_ref, timer_id, due_at)", indexes: ["(shard, due_at) WHERE status='scheduled'"]}
+    - {name: migrations, columns: "tenant_id uuid, id char(26), body jsonb, status text, cursor text", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "lifecycle_timers list-partitioned by shard (256), sub-range by due_at month."
+  retention: "Fired/cancelled timers deleted after 30 days; models indefinite."
+
+extensionModel:
+  extensionPoints: ["New models and model inheritance", "New effect kinds (plugin dispatchers)", "New requirement kinds", "Regions for orthogonal concerns"]
+  forbidden: ["Imperative code in guards/effects (CEL and declarative effects only)"]
+
+certificationCriteria:
+  - {id: CR-LFC-01, rule: "Passes CIC-007-001 CR-007-001-01..05.", level: L1}
+  - {id: CR-LFC-02, rule: "Every ucos.std model exports to SCXML that validates against the W3C SCXML schema.", level: L1}
+  - {id: CR-LFC-03, rule: "Scheduler failover test: killing the active scheduler shard owner causes no missed or duplicated observable transitions.", level: L2}
+validationRules:
+  - {id: VR-LFC-01, rule: "Every lifecycleModelRef in ucos.std TypeDefinitions resolves to a published model."}
+  - {id: VR-LFC-02, rule: "Every effect kind referenced in ucos.std models is registered."}

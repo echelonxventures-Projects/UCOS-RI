@@ -1,0 +1,27 @@
+id: ucos.std
+version: 1.0.0
+namespace: ucos.std
+title: UCOS Standard Commercial Pack
+authority: Chief Data Architect
+compatibility: {ucos: ">=1.0 <2.0"}
+dependencies: []
+traces: [CIC-029-001, CIC-002-001, CIC-011-001, CIC-007-001, DOM-ONT, DOM-COB, DOM-CTX, DOM-LFC]
+contents: [attributes.yaml, facets.yaml, types.yaml, reltypes.yaml, lifecycles.yaml, dimensions.yaml, registries.yaml, policies/]
+# Pack-tier domains realized purely by metadata in this pack (VR-029-001-02)
+realizes:
+  DOM-PRD: [Product]
+  DOM-SVC: [Service]
+  DOM-SUB: [Subscription]
+  DOM-MBR: [Membership]
+  DOM-EXP: [Experience]
+# Core-tier structural types also seeded here
+seeds:
+  DOM-COB: [CommercialObject]
+  DOM-BDL: [Bundle]
+  DOM-PKG: [Package]
+  DOM-AST: [Asset]
+  DOM-CAP: [Capability]
+  DOM-LIC: [License]
+  DOM-PTY: [Party, Person, Organization, OrganizationalUnit, Household, Agent, System, Group]
+  DOM-CTR: [Contract, MasterAgreement, FrameworkAgreement, SubscriptionAgreement, LicenseAgreement, ServiceLevelAgreement]
+  DOM-INV: [FulfillmentNode]

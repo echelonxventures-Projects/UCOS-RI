@@ -1,0 +1,221 @@
+header:
+  id: DOM-IDN
+  title: Identity Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Security Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-000-002, CIC-002-001, CIC-009-001, CIC-005-001]
+  traces: [PRIN-010, PRIN-001, PRIN-022, PRIN-015]
+  certification: [CR-IDN-01, CR-IDN-02, CR-IDN-03, CR-IDN-04, CR-IDN-05]
+  validation: [VR-IDN-01, VR-IDN-02]
+
+purpose: >
+  Establish who or what is acting on UCOS — humans, organizations' systems, devices, and AI agents —
+  by federating with external identity providers, binding authenticated identities to Parties,
+  issuing UCOS access tokens, and managing credentials, sessions, and workload identities.
+
+scope:
+  includes:
+    - Identities (human, service, device, agent) and their binding to Parties (DOM-PTY)
+    - Federation with external IdPs (OIDC, SAML 2.0) per tenant
+    - UCOS token service (OAuth 2.1 authorization server facade; token exchange RFC 8693)
+    - Credentials (passkeys/WebAuthn, client certificates, client secrets, signed JWT assertions)
+    - Workload identity (SPIFFE IDs) for services
+    - Agent identity and delegation chains (agent acting on behalf of party)
+    - Sessions and step-up authentication
+  excludes:
+    - Authorization decisions (DOM-POL / PDP)
+    - Party master data and roles in organizations (DOM-PTY, DOM-ORG, DOM-AUTH)
+    - External reference identifiers of objects (DOM-REF)
+
+responsibilities:
+  - Authenticate every request (PRIN-010).
+  - Produce tokens whose claims are the only trusted source of principal for PDP inputs.
+  - Never store passwords when federation is possible; when local credentials exist, store only verifiers.
+
+principles: [PRIN-010, PRIN-001, PRIN-015, PRIN-022]
+
+boundaries:
+  upstream: [DOM-PTY, DOM-ORG, DOM-POL, DOM-SEC]
+  downstream: [DOM-POL, DOM-AUTH, DOM-AUD, DOM-AGT, DOM-PTY]
+  antiCorruption: "External IdP claims are mapped through per-federation ClaimMappings (metadata); raw IdP claims never reach other contexts."
+
+ownership:
+  boundedContext: identity
+  owningRole: Chief Security Architect
+  service: identity-service
+  schema: ucos_identity
+
+capabilities:
+  - {id: IDN-C1, name: Federate, description: "Configure external IdPs per tenant with claim mapping and JIT provisioning."}
+  - {id: IDN-C2, name: Authenticate, description: "Authenticate via federation, passkeys, mTLS, or signed client assertions."}
+  - {id: IDN-C3, name: Issue tokens, description: "Issue short-lived access tokens (DPoP/mTLS bound) and refresh tokens; token exchange for delegation."}
+  - {id: IDN-C4, name: Bind identity to party, description: "Link identities to Parties with assurance level."}
+  - {id: IDN-C5, name: Agent delegation, description: "Issue agent tokens with act claim chains and constrained scopes."}
+  - {id: IDN-C6, name: Session management, description: "Sessions, step-up (acr), revocation, global sign-out."}
+
+services:
+  - {name: IdentityCommandService, kind: application, operations: [RegisterIdentity, BindIdentityToParty, UnbindIdentity, SuspendIdentity, ReinstateIdentity, RegisterCredential, RevokeCredential, ConfigureFederation, RegisterAgentIdentity]}
+  - {name: TokenService, kind: application, operations: [IssueToken, ExchangeToken, IntrospectToken, RevokeToken], contract: "OAuth 2.1 + RFC 8693 + RFC 9449 (DPoP); JWT access tokens per RFC 9068"}
+  - {name: ClaimMapper, kind: domain-service, contract: "map(federation, externalClaims) -> {identityRef, partyRef?, assurance, groups[]} via CEL mapping rules"}
+  - {name: IdentityQueryService, kind: application, operations: [GetIdentity, FindIdentities, GetSessions, GetJwks]}
+
+aggregates:
+  - name: Identity
+    kernel: true
+    identity: "urn:ucos:<tenant>:identity:<ulid>"
+    invariants:
+      - "INV-IDN-1: (federationRef, externalSubject) unique per tenant."
+      - "INV-IDN-2: an identity is bound to at most one Party at a time (bindings are time-bounded)."
+      - "INV-IDN-3: kind=agent identities must have an accountable owner Party and a delegation policy."
+      - "INV-IDN-4: suspended identities cannot obtain tokens; existing tokens revoked within 60s."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: kind, type: "enum(human, service, device, agent)"}
+      - {name: federationRef, type: "InstanceUrn?"}
+      - {name: externalSubject, type: "string? (encrypted, personal)"}
+      - {name: partyBinding, type: "{partyRef, validFrom, validTo, assurance: AAL1|AAL2|AAL3, verifiedBy}"}
+      - {name: status, type: string}
+      - {name: credentials, type: "Credential[]"}
+      - {name: agentProfile, type: "{ownerParty, modelRef?, allowedScopes[], maxDelegationDepth, spendLimit?: Money}?"}
+      - {name: spiffeId, type: "string? (service kind)"}
+      - {name: revision, type: long}
+  - name: Federation
+    identity: "urn:ucos:<tenant>:federation:<ulid>"
+    invariants: ["INV-IDN-5: issuer metadata fetched over TLS and signing keys pinned with rotation window; claim mapping compiles."]
+    fields:
+      - {name: protocol, type: "enum(oidc, saml2)"}
+      - {name: issuer, type: uri}
+      - {name: clientConfig, type: "secret ref (KMS)"}
+      - {name: claimMapping, type: "CEL rules"}
+      - {name: jitProvisioning, type: "{enabled, defaultPartyKind, defaultOrganization?}"}
+      - {name: status, type: "enum(draft, active, disabled)"}
+
+entities:
+  - {name: Credential, within: Identity, fields: [credentialId, "kind (passkey|x509|client-secret|jwt-key)", "publicKey/thumbprint/verifier", createdAt, lastUsedAt, expiresAt, status]}
+  - {name: Session, within: "Identity (stored separately)", fields: [sessionId, acr, amr, createdAt, lastSeenAt, expiresAt, deviceFingerprintDigest, status]}
+
+valueObjects:
+  - {name: AccessTokenClaims, definition: "{iss, sub (identity URN), aud, exp (<=10 min), iat, jti, ucos_tenant, ucos_party, ucos_org?, ucos_roles[] (coarse), scope, acr, cnf (DPoP jkt / x5t#S256), act? (delegation chain: [{sub, kind}])}"}
+  - {name: AssuranceLevel, definition: "NIST SP 800-63B AAL1..AAL3"}
+  - {name: DelegationChain, definition: "Ordered act claims; depth <= agentProfile.maxDelegationDepth; every hop narrows scope"}
+
+commands:
+  - {name: RegisterIdentity, input: "{kind, federationRef?, externalSubject?, partyRef?}", emits: [IdentityRegistered]}
+  - {name: BindIdentityToParty, input: "{identityId, partyRef, assurance, evidenceRef}", emits: [IdentityBoundToParty], preconditions: ["INV-IDN-2", "assurance >= policy identity.binding-assurance"]}
+  - {name: UnbindIdentity, input: "{identityId, reason}", emits: [IdentityUnbound]}
+  - {name: SuspendIdentity, input: "{identityId, reason}", emits: [IdentitySuspended, "TokensRevoked"]}
+  - {name: ReinstateIdentity, input: "{identityId, reason}", emits: [IdentityReinstated]}
+  - {name: RegisterCredential, input: "{identityId, credential (attestation)}", emits: [CredentialRegistered]}
+  - {name: RevokeCredential, input: "{identityId, credentialId, reason}", emits: [CredentialRevoked]}
+  - {name: ConfigureFederation, input: "Federation", emits: [FederationConfigured]}
+  - {name: RegisterAgentIdentity, input: "{ownerParty, agentProfile}", emits: [IdentityRegistered], preconditions: ["INV-IDN-3", "owner holds identity.agent.create"]}
+  - {name: RevokeToken, input: "{jti | sessionId | identityId}", emits: [TokensRevoked]}
+
+queries:
+  - {name: IssueToken, input: "OAuth token request (grant: authorization_code+PKCE | client_credentials | refresh_token | jwt-bearer)", output: "token response", note: "Modeled as query in UCOS (issues credential, no aggregate change); audited"}
+  - {name: ExchangeToken, input: "RFC 8693 request (subject_token, actor_token, requested scope)", output: "delegated token with act chain"}
+  - {name: IntrospectToken, input: "{token}", output: "RFC 7662 response"}
+  - {name: GetIdentity, input: "{id}", output: Identity}
+  - {name: FindIdentities, input: "{partyRef?, kind?, status?, cursor, limit}", output: "page of Identity (personal fields redacted unless identity.read.personal)"}
+  - {name: GetSessions, input: "{identityId}", output: "Session[]"}
+  - {name: GetJwks, input: "{}", output: "JWKS (public keys, rotated every 30 days, overlap 7 days)"}
+
+apis:
+  - {style: REST, path: "/oauth2/token", methods: {POST: IssueToken}, note: "Also handles token exchange via grant_type=urn:ietf:params:oauth:grant-type:token-exchange -> ExchangeToken"}
+  - {style: REST, path: "/oauth2/introspect", methods: {POST: IntrospectToken}}
+  - {style: REST, path: "/oauth2/revoke", methods: {POST: RevokeToken}}
+  - {style: REST, path: "/.well-known/jwks.json", methods: {GET: GetJwks}}
+  - {style: REST, path: "/v1/identity/identities", methods: {POST: RegisterIdentity, GET: FindIdentities}}
+  - {style: REST, path: "/v1/identity/identities/{id}", methods: {GET: GetIdentity}}
+  - {style: REST, path: "/v1/identity/identities/{id}:bind", methods: {POST: BindIdentityToParty}}
+  - {style: REST, path: "/v1/identity/identities/{id}:unbind", methods: {POST: UnbindIdentity}}
+  - {style: REST, path: "/v1/identity/identities/{id}:suspend", methods: {POST: SuspendIdentity}}
+  - {style: REST, path: "/v1/identity/identities/{id}:reinstate", methods: {POST: ReinstateIdentity}}
+  - {style: REST, path: "/v1/identity/identities/{id}/credentials", methods: {POST: RegisterCredential}}
+  - {style: REST, path: "/v1/identity/identities/{id}/credentials/{credentialId}:revoke", methods: {POST: RevokeCredential}}
+  - {style: REST, path: "/v1/identity/identities/{id}/sessions", methods: {GET: GetSessions}}
+  - {style: REST, path: "/v1/identity/agents", methods: {POST: RegisterAgentIdentity}}
+  - {style: REST, path: "/v1/identity/federations", methods: {POST: ConfigureFederation}}
+
+events:
+  - {type: ucos.identity.identity.registered.v1, payload: "{id, kind, federationRef, partyRef?}"}
+  - {type: ucos.identity.identity.bound-to-party.v1, payload: "{id, partyRef, assurance, validFrom}"}
+  - {type: ucos.identity.identity.unbound.v1, payload: "{id, partyRef, reason}"}
+  - {type: ucos.identity.identity.suspended.v1, payload: "{id, reason}"}
+  - {type: ucos.identity.identity.reinstated.v1, payload: "{id}"}
+  - {type: ucos.identity.credential.registered.v1, payload: "{identityId, credentialId, kind}"}
+  - {type: ucos.identity.credential.revoked.v1, payload: "{identityId, credentialId, reason}"}
+  - {type: ucos.identity.federation.configured.v1, payload: "{id, protocol, issuer, status}"}
+  - {type: ucos.identity.token.revoked.v1, payload: "{scope: jti|session|identity, ref, revokedAt}", consumers: [all gateways - revocation cache]}
+
+stateMachines:
+  - name: IdentityStatus
+    initial: pending
+    states: [pending, active, suspended, deactivated]
+    terminal: [deactivated]
+    transitions:
+      - {from: pending, to: active, trigger: "first successful authentication or admin activation"}
+      - {from: active, to: suspended, command: SuspendIdentity}
+      - {from: suspended, to: active, command: ReinstateIdentity}
+      - {from: [active, suspended], to: deactivated, command: deactivate, effect: "credentials revoked, bindings ended, crypto-shred externalSubject after retention"}
+
+rules:
+  - {id: RUL-IDN-1, statement: "Access tokens live <= 10 minutes and are sender-constrained (DPoP or mTLS); bearer-only tokens are rejected for write scopes."}
+  - {id: RUL-IDN-2, statement: "Token exchange may only narrow scope and audience; act chain depth <= policy limit (default 3)."}
+  - {id: RUL-IDN-3, statement: "Agent tokens always carry act claim with the accountable human/organization party; agents cannot mint tokens for other agents beyond maxDelegationDepth."}
+  - {id: RUL-IDN-4, statement: "Step-up required (acr >= AAL2) for transitions/policies declaring obligation require-mfa."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:identity.binding-assurance", purpose: "Minimum assurance for binding identities to party kinds"}
+  - {urn: "urn:ucos:ucos.std:policy:identity.token-lifetimes", purpose: "Token and session lifetimes per client class"}
+  - {urn: "urn:ucos:ucos.std:policy:identity.agent-delegation", purpose: "Max depth, allowed scopes, spend limits for agent identities"}
+  - {urn: "urn:ucos:ucos.std:policy:identity.federation-admin", purpose: "Who may configure federations"}
+
+decisions:
+  - {id: DEC-IDN-1, question: "Is this caller authenticated, and as whom?", inputs: ["credential proof", "federation assertion", "revocation cache"], output: "principal claims | 401"}
+  - {id: DEC-IDN-2, question: "May this token be exchanged for a delegated token?", inputs: ["subject token", "actor token", "agent-delegation policy"], output: "allow (narrowed scope) | deny"}
+
+security:
+  permissions: [identity.read, identity.read.personal, identity.admin, identity.agent.create, identity.federation.admin, identity.token.revoke]
+  dataClassification: "externalSubject, emails from IdP: personal (encrypted, subject key). Credential public keys: internal. Client secrets: restricted (stored as Argon2id verifiers or KMS refs)."
+  threats: ["Token theft -> sender-constrained tokens + 10-min lifetime + revocation push", "IdP compromise -> per-federation kill switch and assurance downgrade", "Agent runaway -> spend limits, scope narrowing, act-chain audit", "Key compromise -> JWKS rotation, kid-based revocation within 5 minutes"]
+
+governance:
+  changeControl: "Federation configuration and agent profile changes require ChangeSet in tenants with governance.identity-strict=true."
+  evidence: "Identity proofing artifacts referenced (not stored) as Evidence with assurance level."
+  audit: "Every authentication, token issuance, exchange, and revocation audited (CIC-022)."
+
+runtimeBehavior:
+  consistency: "Strong for identity aggregates; revocation propagated to gateways via event within 60s p99 (push), introspection fallback."
+  slo: {IssueToken_p99_ms: 100, IntrospectToken_p99_ms: 10, availability: "99.99%"}
+  scale: "10^9 identities; 20,000 token issuances/s per region."
+  failureModes: ["Identity service down: gateways validate JWT locally with cached JWKS; new logins fail; existing tokens valid until expiry (<=10 min)"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_identity + HSM/KMS for signing keys
+  tables:
+    - {name: identities, columns: "tenant_id uuid, id char(26), kind text, federation_id char(26), external_subject_enc bytea, external_subject_hash bytea, party_ref text, assurance text, status text, agent_profile jsonb, revision bigint", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, federation_id, external_subject_hash)", "(tenant_id, party_ref)"]}
+    - {name: credentials, columns: "tenant_id, identity_id, credential_id, kind, public_material jsonb, verifier bytea, status, expires_at", pk: "(tenant_id, identity_id, credential_id)"}
+    - {name: sessions, columns: "tenant_id, session_id, identity_id, acr, amr, expires_at, status", pk: "(tenant_id, session_id)", note: "Hot copy in CachePort"}
+    - {name: federations, columns: "tenant_id, id, protocol, issuer, config jsonb, status", pk: "(tenant_id, id)"}
+    - {name: revocations, columns: "tenant_id, scope, ref, revoked_at, expires_at", pk: "(tenant_id, scope, ref)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 64."
+  retention: "Deactivated identities: personal fields crypto-shredded after policy identity.retention (default 90 days); audit retained per CIC-003-001 §8."
+
+extensionModel:
+  extensionPoints: ["New federation protocols via IdentityProviderPort plugins", "New credential kinds (e.g. verifiable credentials W3C VC 2.0)", "Claim mapping CEL functions", "External token issuers trusted via federation metadata"]
+  forbidden: ["Storing plaintext passwords or secrets", "Long-lived bearer tokens"]
+
+certificationCriteria:
+  - {id: CR-IDN-01, rule: "OpenID Foundation conformance suite (OIDC Basic/Config/PKCE profiles) passes for the token service.", level: L1}
+  - {id: CR-IDN-02, rule: "Revocation propagation: a suspended identity's token is rejected by all gateways within 60s in 99% of trials.", level: L2}
+  - {id: CR-IDN-03, rule: "Token exchange test suite: no exchanged token ever has broader scope/audience than the subject token.", level: L1}
+  - {id: CR-IDN-04, rule: "Penetration test (OWASP ASVS L3 V2/V3) with no high/critical findings.", level: L2}
+  - {id: CR-IDN-05, rule: "Agent tokens always include act chain with accountable party (100% in conformance suite).", level: L1}
+validationRules:
+  - {id: VR-IDN-01, rule: "Every scope referenced by API contracts (x-ucos-permission) is registered in the token service scope registry."}
+  - {id: VR-IDN-02, rule: "Every federation in reference deployments declares a claim mapping that yields ucos_party or JIT provisioning."}

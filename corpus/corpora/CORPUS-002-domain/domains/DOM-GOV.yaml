@@ -1,0 +1,213 @@
+header:
+  id: DOM-GOV
+  title: Governance Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-015-001, CIC-000-001, CIC-004-001, CIC-009-001, CIC-002-001]
+  traces: [PRIN-011, PRIN-012, PRIN-004, CIC-015-001]
+  certification: [CR-GOV-01, CR-GOV-02, CR-GOV-03]
+  validation: [VR-GOV-01, VR-GOV-02]
+
+purpose: >
+  Operate the ChangeSet process of CIC-015-001: every behavior-changing metadata change, pack or
+  plugin activation, and constitutional amendment is drafted, impact-analyzed, risk-classified,
+  approved with segregation of duties, scheduled, applied as a compensating saga, and recorded — plus
+  constitutional defect intake (CIC-000-001 §4).
+
+scope:
+  includes:
+    - ChangeSet aggregate, items, approvals, schedules, apply/rollback saga
+    - Impact analysis orchestration (KG impact, compatibility, simulations, certification status)
+    - Risk classification and approval plan computation (policy governance.approval)
+    - Freeze windows and emergency changes
+    - Constitutional defect register
+  excludes:
+    - Definitions being changed (owning domains), certification records (DOM-CRT), controls (DOM-CMPL), audit storage (DOM-AUD)
+
+responsibilities:
+  - No governed subject reaches active/published without an applied ChangeSet (CR-015-001-01).
+  - Approvals reflect exactly the approved content (digest-bound).
+  - Apply is all-or-compensated.
+
+principles: [PRIN-004, PRIN-011, PRIN-012]
+
+boundaries:
+  upstream: [DOM-KGR, DOM-VER, DOM-CRT, DOM-POL, DOM-AUTH, DOM-PRF, DOM-PRI]
+  downstream: [DOM-ONT, DOM-LFC, DOM-CTX, DOM-POL, DOM-RUL, DOM-PRC, DOM-CAT, DOM-OFR, DOM-META, DOM-EXT, DOM-AUD]
+
+ownership:
+  boundedContext: governance
+  owningRole: Chief Governance Architect
+  service: governance-service
+  schema: ucos_governance
+
+capabilities:
+  - {id: GOV-C1, name: Draft, description: "Assemble ChangeSets from draft definitions across domains."}
+  - {id: GOV-C2, name: Analyze, description: "Compute impact, compatibility, simulations, risk class."}
+  - {id: GOV-C3, name: Approve, description: "Run staged approvals with SoD and evidence."}
+  - {id: GOV-C4, name: Apply, description: "Schedule and apply in dependency order with compensation."}
+  - {id: GOV-C5, name: Defects, description: "Register and resolve constitutional defects."}
+
+services:
+  - {name: ChangeSetCommandService, kind: application, operations: [CreateChangeSet, AddChangeSetItem, RemoveChangeSetItem, SubmitChangeSet, DecideApproval, ScheduleChangeSet, ApplyChangeSet, RollbackChangeSet, CancelChangeSet, RaiseConstitutionalDefect, ResolveConstitutionalDefect]}
+  - {name: ImpactAnalyzer, kind: domain-service, contract: "analyze(items) -> ImpactReport (CIC-015-001 §3): KG impact, DOM-VER pins, compatibility classes, simulations (POL/RUL/PRC/PRF), certification status, regulatory flags"}
+  - {name: ApplySaga, kind: process-manager, contract: "topological apply of items via owning-domain publish/activate commands with changeSetRef; on failure compensate completed items per rollbackPlan"}
+  - {name: GovernanceQueryService, kind: application, operations: [GetChangeSet, FindChangeSets, GetApprovalInbox, GetImpactReport, GetFreezeWindows, GetConstitutionalDefect]}
+
+aggregates:
+  - name: ChangeSet
+    identity: "urn:ucos:<tenant>:changeset:<ulid>"
+    invariants:
+      - "INV-GOV-1: approvals bind to contentDigest; any item change after first approval resets approvals."
+      - "INV-GOV-2: approvers satisfy plan stages; approver != author; one person counted once unless plan allows."
+      - "INV-GOV-3: apply only in state approved/scheduled, outside freeze windows unless emergency plan."
+    fields:
+      - {name: schema, type: "CIC-015-001 §2 ChangeSet"}
+      - {name: contentDigest, type: Sha256}
+  - name: FreezeWindow
+    identity: "urn:ucos:<tenant|platform>:freeze-window:<ulid>"
+    fields:
+      - {name: from, type: Instant}
+      - {name: to, type: Instant}
+      - {name: scope, type: "contexts/subject kinds"}
+      - {name: reason, type: string}
+  - name: ConstitutionalDefect
+    identity: "urn:ucos:platform:constitutional-defect:<ulid>"
+    fields:
+      - {name: artifacts, type: "Artifact IDs in conflict"}
+      - {name: description, type: string}
+      - {name: amendmentChangeSetRef, type: "InstanceUrn?"}
+      - {name: status, type: "raised|accepted|resolved|rejected"}
+
+entities:
+  - {name: ChangeSetItem, within: ChangeSet, fields: [itemId, subjectKind, subjectRef, operation, compatibility, dependsOn, appliedAt, compensation]}
+  - {name: Approval, within: ChangeSet, fields: [stage, approver, decision, comment, at, contentDigest, evidenceRef]}
+
+valueObjects:
+  - {name: ImpactReport, definition: "CIC-015-001 §3"}
+  - {name: ApprovalPlan, definition: "stages [{approverRoles, quorum, sod}] + coolOffHours"}
+
+commands:
+  - {name: CreateChangeSet, input: "{title, rationale, items?}", emits: [ChangeSetCreated]}
+  - {name: AddChangeSetItem, input: "{id, item}", emits: [ChangeSetItemAdded]}
+  - {name: RemoveChangeSetItem, input: "{id, itemId}", emits: [ChangeSetItemRemoved]}
+  - {name: SubmitChangeSet, input: "{id}", emits: [ChangeSetSubmitted], note: "Runs ImpactAnalyzer and computes approval plan"}
+  - {name: DecideApproval, input: "{id, stage, decision, comment}", emits: [ChangeSetApprovalDecided, ChangeSetApproved, ChangeSetRejected], preconditions: ["acr >= AAL2", "INV-GOV-2"]}
+  - {name: ScheduleChangeSet, input: "{id, effectiveAt}", emits: [ChangeSetScheduled]}
+  - {name: ApplyChangeSet, input: "{id}", emits: [ChangeSetApplying, ChangeSetApplied, ChangeSetApplyFailed]}
+  - {name: RollbackChangeSet, input: "{id, reason}", emits: [ChangeSetRolledBack]}
+  - {name: CancelChangeSet, input: "{id}", emits: [ChangeSetCancelled]}
+  - {name: RaiseConstitutionalDefect, input: "{artifacts, description}", emits: [ConstitutionalDefectRaised]}
+  - {name: ResolveConstitutionalDefect, input: "{id, outcome, amendmentChangeSetRef?}", emits: [ConstitutionalDefectResolved]}
+
+queries:
+  - {name: GetChangeSet, input: "{id}", output: ChangeSet}
+  - {name: FindChangeSets, input: "{state?, author?, subjectRef?, cursor}", output: "page"}
+  - {name: GetApprovalInbox, input: "{approver}", output: "ChangeSets awaiting the approver's stage"}
+  - {name: GetImpactReport, input: "{id}", output: ImpactReport}
+  - {name: GetFreezeWindows, input: "{from, to}", output: "FreezeWindow[]"}
+  - {name: GetConstitutionalDefect, input: "{id}", output: ConstitutionalDefect}
+
+apis:
+  - {style: REST, path: "/v1/governance/changesets", methods: {POST: CreateChangeSet, GET: FindChangeSets}}
+  - {style: REST, path: "/v1/governance/changesets/{id}", methods: {GET: GetChangeSet}}
+  - {style: REST, path: "/v1/governance/changesets/{id}/items", methods: {POST: AddChangeSetItem}}
+  - {style: REST, path: "/v1/governance/changesets/{id}/items/{itemId}", methods: {DELETE: RemoveChangeSetItem}}
+  - {style: REST, path: "/v1/governance/changesets/{id}:submit", methods: {POST: SubmitChangeSet}}
+  - {style: REST, path: "/v1/governance/changesets/{id}/approvals", methods: {POST: DecideApproval}}
+  - {style: REST, path: "/v1/governance/changesets/{id}:schedule", methods: {POST: ScheduleChangeSet}}
+  - {style: REST, path: "/v1/governance/changesets/{id}:apply", methods: {POST: ApplyChangeSet}}
+  - {style: REST, path: "/v1/governance/changesets/{id}:rollback", methods: {POST: RollbackChangeSet}}
+  - {style: REST, path: "/v1/governance/changesets/{id}:cancel", methods: {POST: CancelChangeSet}}
+  - {style: REST, path: "/v1/governance/changesets/{id}/impact", methods: {GET: GetImpactReport}}
+  - {style: REST, path: "/v1/governance/approval-inbox", methods: {GET: GetApprovalInbox}}
+  - {style: REST, path: "/v1/governance/freeze-windows", methods: {GET: GetFreezeWindows}}
+  - {style: REST, path: "/v1/governance/constitutional-defects", methods: {POST: RaiseConstitutionalDefect}}
+  - {style: REST, path: "/v1/governance/constitutional-defects/{id}", methods: {GET: GetConstitutionalDefect}}
+  - {style: REST, path: "/v1/governance/constitutional-defects/{id}:resolve", methods: {POST: ResolveConstitutionalDefect}}
+
+events:
+  - {type: ucos.governance.changeset.created.v1, payload: "{id, author}"}
+  - {type: ucos.governance.changeset.item-added.v1, payload: "{id, itemId, subjectKind, subjectRef}"}
+  - {type: ucos.governance.changeset.item-removed.v1, payload: "{id, itemId}"}
+  - {type: ucos.governance.changeset.submitted.v1, payload: "{id, riskClass, contentDigest}"}
+  - {type: ucos.governance.changeset.approval-decided.v1, payload: "{id, stage, approver, decision}"}
+  - {type: ucos.governance.changeset.approved.v1, payload: "{id, items[{subjectKind, subjectRef}], contentDigest}", consumers: [owning domains (lifecycle triggers, e.g. ucos.std offer model)]}
+  - {type: ucos.governance.changeset.rejected.v1, payload: "{id, stage}"}
+  - {type: ucos.governance.changeset.scheduled.v1, payload: "{id, effectiveAt}"}
+  - {type: ucos.governance.changeset.applying.v1, payload: "{id}"}
+  - {type: ucos.governance.changeset.applied.v1, payload: "{id, appliedItems}", consumers: [audit, versioning, evidence]}
+  - {type: ucos.governance.changeset.apply-failed.v1, payload: "{id, failedItem, compensated}"}
+  - {type: ucos.governance.changeset.rolled-back.v1, payload: "{id, reason}"}
+  - {type: ucos.governance.changeset.cancelled.v1, payload: "{id}"}
+  - {type: ucos.governance.defect.raised.v1, payload: "{id, artifacts}", note: "Referenced by CIC-000-001 §4"}
+  - {type: ucos.governance.defect.resolved.v1, payload: "{id, outcome, amendmentChangeSetRef}"}
+
+stateMachines:
+  - name: ChangeSetLifecycle
+    initial: draft
+    states: [draft, submitted, in-approval, approved, rejected, scheduled, applying, applied, failed, rolled-back, cancelled]
+    terminal: [rejected, applied, rolled-back, cancelled]
+    transitions:
+      - {from: draft, to: submitted, command: SubmitChangeSet}
+      - {from: submitted, to: in-approval, kind: automatic}
+      - {from: in-approval, to: approved, command: DecideApproval, guard: "all stages satisfied (+ cool-off elapsed)"}
+      - {from: in-approval, to: rejected, command: DecideApproval, guard: "reject"}
+      - {from: [submitted, in-approval], to: draft, command: AddChangeSetItem, note: "revision resets approvals (INV-GOV-1)"}
+      - {from: approved, to: scheduled, command: ScheduleChangeSet}
+      - {from: [approved, scheduled], to: applying, command: ApplyChangeSet}
+      - {from: applying, to: applied, trigger: "all items applied"}
+      - {from: applying, to: failed, trigger: "item failed; compensation done"}
+      - {from: applied, to: rolled-back, command: RollbackChangeSet}
+      - {from: [draft, submitted, in-approval, approved, scheduled, failed], to: cancelled, command: CancelChangeSet}
+
+rules:
+  - {id: RUL-GOV-1, statement: "Emergency ChangeSets (riskClass critical + emergency flag) may apply during freeze with post-hoc review within 2 business days."}
+  - {id: RUL-GOV-2, statement: "AI-drafted items are labeled (provenance) and always require at least one human approval stage (CIC-017-001 §2.4)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:governance.risk-classification", purpose: "Rules mapping impact to risk class"}
+  - {urn: "urn:ucos:ucos.std:policy:governance.freeze-windows", purpose: "Default freeze windows and exemptions"}
+
+decisions:
+  - {id: DEC-GOV-1, question: "What risk class and approval plan does this ChangeSet need?", algorithm: "governance.risk-classification over ImpactReport -> governance.approval plan"}
+
+security:
+  permissions: [governance.read, governance.changeset.author, governance.changeset.approve, governance.changeset.apply, governance.defect.manage]
+  dataClassification: "Internal/confidential."
+  threats: ["Approval of different content than reviewed -> digest binding", "Collusion -> SoD across identities bound to same party (CR-015-001-02)"]
+
+governance:
+  changeControl: "Governance policies themselves change only via constitutional-class ChangeSets."
+  evidence: "Approvals and impact reports captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per ChangeSet; saga eventual across domains."
+  slo: {SubmitChangeSet_impact_p95_s: 60, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_governance (event-sourced)
+  tables:
+    - {name: changesets, columns: "tenant_id, id, author, state, risk_class, content_digest, body jsonb, revision", pk: "(tenant_id, id)", indexes: ["(tenant_id, state)"]}
+    - {name: changeset_items, columns: "tenant_id, changeset_id, item_id, subject_kind, subject_ref, operation, status", pk: "(tenant_id, changeset_id, item_id)", indexes: ["(tenant_id, subject_ref)"]}
+    - {name: approvals, columns: "tenant_id, changeset_id, stage, approver, decision, content_digest, at", pk: "(tenant_id, changeset_id, stage, approver)"}
+    - {name: freeze_windows, columns: "scope text, id, body jsonb", pk: "(scope, id)"}
+    - {name: constitutional_defects, columns: "id text pk, body jsonb, status", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Indefinite (change history)."
+
+extensionModel:
+  extensionPoints: ["Subject kinds registered by domains", "Impact analyzers per subject kind"]
+  forbidden: ["Publishing governed subjects without ChangeSet"]
+
+certificationCriteria:
+  - {id: CR-GOV-01, rule: "Passes CIC-015-001 CR-015-001-01..04.", level: L1}
+  - {id: CR-GOV-02, rule: "Freeze windows block non-emergency applies (negative test).", level: L1}
+  - {id: CR-GOV-03, rule: "Impact report lists all dependents found by KG impact for golden change scenarios.", level: L1}
+validationRules:
+  - {id: VR-GOV-01, rule: "Every governed subject kind (CIC-015-001 §1) has an apply command and compensation in its owning domain."}
+  - {id: VR-GOV-02, rule: "Every policy changing governance itself is in the constitutional layer."}

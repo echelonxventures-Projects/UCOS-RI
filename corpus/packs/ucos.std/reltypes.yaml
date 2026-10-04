@@ -1,0 +1,23 @@
+# ucos.std RelationshipTypeDefinitions (DOM-ONT; instances in DOM-REL).
+# Endpoint types are TypeDefinitions of this pack or kernel kinds written as "kind:<kind>".
+reltypes:
+  - {name: COMPOSED_OF, sourceTypes: [Bundle, Asset], targetTypes: [CommercialObject], cardinality: "N:M", hierarchical: true, acyclic: true, semantics: composition, inverseName: {default: component of},
+     edgeAttributes: [{code: slotCode, datatype: string}, {code: minQty, datatype: integer}, {code: maxQty, datatype: integer}, {code: defaultQty, datatype: integer}, {code: optional, datatype: boolean}]}
+  - {name: VARIANT_OF, sourceTypes: [CommercialObject], targetTypes: [CommercialObject], cardinality: "N:1", hierarchical: true, acyclic: true, semantics: aggregation, inverseName: {default: has variant},
+     edgeAttributes: [{code: axes, datatype: json}]}
+  - {name: REQUIRES, sourceTypes: [CommercialObject], targetTypes: [CommercialObject, Capability], cardinality: "N:M", hierarchical: false, acyclic: true, semantics: requires, inverseName: {default: required by}}
+  - {name: EXCLUDES, sourceTypes: [CommercialObject], targetTypes: [CommercialObject], cardinality: "N:M", hierarchical: false, acyclic: false, semantics: exclusion, inverseName: {default: excluded by}}
+  - {name: REPLACES, sourceTypes: [CommercialObject], targetTypes: [CommercialObject], cardinality: "N:M", hierarchical: false, acyclic: true, semantics: substitution, inverseName: {default: replaced by}}
+  - {name: COMPATIBLE_WITH, sourceTypes: [CommercialObject], targetTypes: [CommercialObject], cardinality: "N:M", hierarchical: false, acyclic: false, semantics: association, inverseName: {default: compatible with}}
+  - {name: ACCESSORY_OF, sourceTypes: [CommercialObject], targetTypes: [CommercialObject], cardinality: "N:M", hierarchical: false, acyclic: true, semantics: association, inverseName: {default: has accessory}}
+  - {name: PROVIDES_CAPABILITY, sourceTypes: [CommercialObject], targetTypes: [Capability], cardinality: "N:M", hierarchical: false, acyclic: true, semantics: dependency, inverseName: {default: provided by},
+     edgeAttributes: [{code: quantity, datatype: decimal}, {code: meterCode, datatype: string}]}
+  - {name: OWNS_ASSET, sourceTypes: [Party], targetTypes: [Asset], cardinality: "1:N", hierarchical: false, acyclic: true, semantics: association, inverseName: {default: owned by}}
+  - {name: MEMBER_OF, sourceTypes: [Party], targetTypes: [Organization, OrganizationalUnit, Household, Group], cardinality: "N:M", hierarchical: false, acyclic: true, semantics: aggregation, inverseName: {default: has member},
+     edgeAttributes: [{code: roleInGroup, datatype: string}, {code: entitlementInheritance, datatype: boolean}]}
+  - {name: EMPLOYED_BY, sourceTypes: [Person], targetTypes: [Organization, OrganizationalUnit], cardinality: "N:M", hierarchical: false, acyclic: true, semantics: association, inverseName: {default: employs}}
+  - {name: PART_OF, sourceTypes: [Organization, OrganizationalUnit], targetTypes: [Organization, OrganizationalUnit], cardinality: "N:1", hierarchical: true, acyclic: true, semantics: composition, inverseName: {default: has part}}
+  - {name: CALL_OFF_OF, sourceTypes: [Contract], targetTypes: [MasterAgreement, FrameworkAgreement], cardinality: "N:1", hierarchical: true, acyclic: true, semantics: dependency, inverseName: {default: has call-off}}
+  - {name: NODE_PARENT, sourceTypes: [FulfillmentNode], targetTypes: [FulfillmentNode], cardinality: "N:1", hierarchical: true, acyclic: true, semantics: aggregation, inverseName: {default: has child node}}
+  - {name: BROADER, sourceTypes: ["kind:term"], targetTypes: ["kind:term"], cardinality: "N:M", hierarchical: true, acyclic: true, semantics: aggregation, inverseName: {default: narrower},
+     description: "SKOS-style broader relation between taxonomy terms; backs hierarchical context dimensions"}

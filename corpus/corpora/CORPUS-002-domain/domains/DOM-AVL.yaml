@@ -1,0 +1,186 @@
+header:
+  id: DOM-AVL
+  title: Availability Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-006, CIC-011-001, CIC-011-003, CIC-008-001, CIC-002-001]
+  traces: [PRIN-006, PRIN-015, PRIN-020, PRIN-021, CIC-011-006]
+  certification: [CR-AVL-01, CR-AVL-02, CR-AVL-03]
+  validation: [VR-AVL-01, VR-AVL-02]
+
+purpose: >
+  Answer "can this be sold to this party, here, now, in this quantity — and when can it be delivered?"
+  for every commercial object type by combining sellability rules, inventory, capacity, and pools
+  into a single advisory availability and promise answer (CIC-011-006).
+
+scope:
+  includes:
+    - Sellability rules (fact kind sellability-rule) — regulatory, commercial, embargo, age, licence restrictions
+    - Sourcing policies (which nodes may fulfil which contexts) and sourcing decisions
+    - ATP projection (from inventory, inbound, capacity, pool events)
+    - Promise date calculation (lead times, transit times, calendars)
+    - Availability-to-promise for composites
+  excludes:
+    - Inventory positions and reservations (DOM-INV)
+    - Transport planning and carrier selection (DOM-LOG)
+    - Demand forecasting (DOM-FCS)
+
+responsibilities:
+  - Deterministic, explainable availability decisions.
+  - Bounded staleness of ATP versus inventory (p99 2s).
+  - Sourcing decisions that DOM-INV reserves against.
+
+principles: [PRIN-006, PRIN-015, PRIN-016, PRIN-020, PRIN-021]
+
+boundaries:
+  upstream: [DOM-INV, DOM-COB, DOM-CTX, DOM-RUL, DOM-POL, DOM-LOG, DOM-SUPN, DOM-GEO]
+  downstream: [DOM-CAT, DOM-ORD, DOM-QTE, DOM-SRC, DOM-OFR]
+
+ownership:
+  boundedContext: supply
+  owningRole: Chief Product Architect
+  service: availability-service
+  schema: ucos_supply
+
+capabilities:
+  - {id: AVL-C1, name: Sellability, description: "Evaluate sellability rules with reasons."}
+  - {id: AVL-C2, name: ATP, description: "Compute available-to-promise per object/node/context."}
+  - {id: AVL-C3, name: Promise, description: "Compute earliest promise date and delivery windows."}
+  - {id: AVL-C4, name: Sourcing, description: "Decide fulfilment nodes for a basket (cost/time/split optimization)."}
+  - {id: AVL-C5, name: Calendars, description: "Node working calendars, cut-off times, lead times."}
+
+services:
+  - {name: AvailabilityQueryService, kind: application, operations: [ResolveAvailability, ComputePromise, DecideSourcing, ExplainAvailability]}
+  - {name: AtpProjector, kind: application, contract: "Consumes ucos.supply.inventory.*, capacity.*, expected receipts; maintains atp_projection keyed (object, node) with ucosversion"}
+  - {name: SourcingOptimizer, kind: domain-service, contract: "optimize(lines, candidateNodes, ctx) -> SourcingPlan minimizing weighted cost (shipping cost, split penalty, promise date) per policy availability.sourcing-objective; exact for <= 8 nodes x 20 lines, greedy heuristic otherwise; deterministic tie-break by node id"}
+  - {name: AvailabilityConfigService, kind: application, operations: [DefineSourcingPolicy, DefineNodeCalendar, DefineLeadTime]}
+
+aggregates:
+  - name: SourcingPolicy
+    identity: "urn:ucos:<tenant>:sourcing-policy:<ulid>"
+    invariants: ["INV-AVL-1: every node referenced exists and is active; scope matches at least one market context."]
+    fields:
+      - {name: scope, type: ApplicabilityScope}
+      - {name: candidateNodes, type: "[{nodeRef, priority, maxDistanceKm?, allowedFacets[]}]"}
+      - {name: splitPolicy, type: "allow|deny|allow-with-penalty"}
+      - {name: objective, type: "{weights: {cost, time, splits}}"}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+  - name: NodeCalendar
+    identity: "urn:ucos:<tenant>:node-calendar:<ulid>"
+    fields:
+      - {name: nodeRef, type: InstanceUrn}
+      - {name: timezone, type: ZoneId}
+      - {name: workingHours, type: "weekly schedule"}
+      - {name: holidays, type: "Date[] or calendar ref"}
+      - {name: cutOffs, type: "[{service level, time}]"}
+  - name: LeadTime
+    identity: "urn:ucos:<tenant>:lead-time:<ulid>"
+    fields:
+      - {name: scope, type: "ApplicabilityScope (object/type, node, destination territory, service level)"}
+      - {name: processingDuration, type: Duration}
+      - {name: transitDuration, type: "Duration | carrier-plugin"}
+
+entities: []
+
+valueObjects:
+  - {name: AvailabilityResult, definition: "CIC-011-006 §1"}
+  - {name: SourcingPlan, definition: "[{lineId, nodeRef, quantity, promiseDate}] + totals {cost, splits}"}
+  - {name: PromiseWindow, definition: "{earliest, latest, serviceLevel, confidence}"}
+
+commands:
+  - {name: DefineSourcingPolicy, input: "SourcingPolicy", emits: [SourcingPolicyDefined]}
+  - {name: DefineNodeCalendar, input: "NodeCalendar", emits: [NodeCalendarDefined]}
+  - {name: DefineLeadTime, input: "LeadTime", emits: [LeadTimeDefined]}
+
+queries:
+  - {name: ResolveAvailability, input: "{objects[] <= 200, context, quantity?}", output: "AvailabilityResult[]", algorithm: "CIC-011-006 §2"}
+  - {name: ComputePromise, input: "{lines[], context (incl. destination), serviceLevel?}", output: "PromiseWindow per line"}
+  - {name: DecideSourcing, input: "{lines[], context}", output: SourcingPlan, note: "Used by order saga before ReserveInventory"}
+  - {name: ExplainAvailability, input: "{objectRef, context}", output: "result + sellability rule hits + ATP components + resolution traces"}
+
+apis:
+  - {style: REST, path: "/v1/supply/availability:resolve", methods: {POST: ResolveAvailability}}
+  - {style: REST, path: "/v1/supply/availability:promise", methods: {POST: ComputePromise}}
+  - {style: REST, path: "/v1/supply/availability:source", methods: {POST: DecideSourcing}}
+  - {style: REST, path: "/v1/supply/availability:explain", methods: {POST: ExplainAvailability}}
+  - {style: REST, path: "/v1/supply/sourcing-policies", methods: {POST: DefineSourcingPolicy}}
+  - {style: REST, path: "/v1/supply/node-calendars", methods: {POST: DefineNodeCalendar}}
+  - {style: REST, path: "/v1/supply/lead-times", methods: {POST: DefineLeadTime}}
+
+events:
+  - {type: ucos.supply.availability.status-changed.v1, payload: "{objectRef, contextClass (market/channel), from, to}", note: "Emitted on threshold crossings (available->limited->unavailable) per published context classes; consumers: catalog visibility, search, notifications (back-in-stock)"}
+  - {type: ucos.supply.sourcing.policy-defined.v1, payload: "{id, scope}"}
+  - {type: ucos.supply.sourcing.node-calendar-defined.v1, payload: "{id, nodeRef}"}
+  - {type: ucos.supply.sourcing.lead-time-defined.v1, payload: "{id, scope}"}
+
+stateMachines:
+  - name: AvailabilityStatus
+    definition: "Derived status per (object, context class); not commanded"
+    initial: unavailable
+    states: [available, limited, backorder, preorder, unavailable, not-sellable]
+    terminal: []
+    transitions:
+      - {from: "*", to: available, trigger: "atp >= limitedThreshold"}
+      - {from: "*", to: limited, trigger: "0 < atp < limitedThreshold"}
+      - {from: "*", to: backorder, trigger: "atp <= 0 and backorder allowed and inbound exists"}
+      - {from: "*", to: preorder, trigger: "lifecycle category ready and preorder policy allows"}
+      - {from: "*", to: unavailable, trigger: "atp <= 0 and no backorder/preorder"}
+      - {from: "*", to: not-sellable, trigger: "sellability deny"}
+
+rules:
+  - {id: RUL-AVL-1, statement: "Sellability rules are evaluated with conflict 'all' and deny-overrides; each deny returns a reason code (e.g. R-AVL-EMBARGO, R-AVL-AGE-RESTRICTED, R-AVL-LICENCE-REQUIRED)."}
+  - {id: RUL-AVL-2, statement: "Availability is advisory; only DOM-INV reservations commit stock (CIC-011-006 §2)."}
+  - {id: RUL-AVL-3, statement: "Promise dates computed in node timezone with calendars and cut-offs, returned in UTC plus destination-local date."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:sellability-rule.resolution", purpose: "ResolutionConfig (cardinality many, conflict all)"}
+  - {urn: "urn:ucos:ucos.std:policy:availability.thresholds", purpose: "Limited thresholds per context class"}
+  - {urn: "urn:ucos:ucos.std:policy:availability.backorder", purpose: "Backorder allowance per type/context"}
+  - {urn: "urn:ucos:ucos.std:policy:availability.preorder", purpose: "Preorder allowance"}
+  - {urn: "urn:ucos:ucos.std:policy:availability.sourcing-objective", purpose: "Default sourcing weights"}
+
+decisions:
+  - {id: DEC-AVL-1, question: "Is X sellable and available in context C?", algorithm: "CIC-011-006 §2"}
+  - {id: DEC-AVL-2, question: "Which nodes fulfil this basket?", algorithm: "SourcingOptimizer per policy objective"}
+
+security:
+  permissions: [availability.read, availability.explain, availability.configure]
+  dataClassification: "Internal; exact ATP numbers may be confidential — public responses return status only unless policy availability.expose-quantity allows."
+  threats: ["Competitive stock scraping -> quantity exposure policy + rate limits"]
+
+governance:
+  changeControl: "Sellability rules (especially regulatory/embargo) and sourcing policies via ChangeSet; regulatory rules require Compliance approval."
+  evidence: "Regulatory sellability rule changes link legal source Evidence."
+
+runtimeBehavior:
+  consistency: "ATP eventual (p99 2s from inventory events); sellability rules version-keyed."
+  slo: {ResolveAvailability_50_p99_ms: 40, DecideSourcing_p99_ms: 100, availability: "99.99%"}
+  caching: "CIC-011-006 §4 and CIC-011-003"
+
+persistenceModel:
+  store: PostgreSQL schema ucos_supply (shared context; separate tables) + T1/T2 caches
+  tables:
+    - {name: atp_projection, columns: "tenant_id uuid, object_ref text, node_ref text, on_hand numeric, reserved numeric, safety_stock numeric, inbound jsonb, version bigint, updated_at timestamptz", pk: "(tenant_id, object_ref, node_ref)"}
+    - {name: sourcing_policies, columns: "tenant_id, id, scope jsonb, body jsonb, valid_from, valid_to", pk: "(tenant_id, id)"}
+    - {name: node_calendars, columns: "tenant_id, id, node_ref, body jsonb", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, node_ref)"]}
+    - {name: lead_times, columns: "tenant_id, id, scope jsonb, body jsonb", pk: "(tenant_id, id)"}
+    - {name: availability_status, columns: "tenant_id, object_ref, context_class, status, changed_at", pk: "(tenant_id, object_ref, context_class)"}
+    - {name: event_store, columns: "standard (shared context store)"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "atp_projection hash(tenant_id, object_ref) 128."
+  retention: "Projection only (rebuildable); configuration indefinite."
+
+extensionModel:
+  extensionPoints: ["Carrier transit-time plugins", "Sourcing optimizer plugins (MILP solvers)", "Sellability effect kinds", "External ATP sources (supplier/drop-ship feeds) via DOM-DXC"]
+  forbidden: ["Committing inventory from availability service"]
+
+certificationCriteria:
+  - {id: CR-AVL-01, rule: "Passes CIC-011-006 CR-011-006-02 and CR-011-006-03.", level: L1}
+  - {id: CR-AVL-02, rule: "SourcingOptimizer exact mode equals brute-force optimum on 10^4 random small instances.", level: L1}
+  - {id: CR-AVL-03, rule: "Promise date golden tests across timezones, cut-offs, holidays, DST.", level: L1}
+validationRules:
+  - {id: VR-AVL-01, rule: "Every active fulfillment node has a calendar."}
+  - {id: VR-AVL-02, rule: "Every market context in reference deployments resolves a sourcing policy (VR-011-006-01)."}

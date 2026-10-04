@@ -1,0 +1,189 @@
+header:
+  id: DOM-KNW
+  title: Knowledge Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief AI Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-004-001, CIC-017-001, CIC-015-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-011, PRIN-014, DOM-KGR]
+  certification: [CR-KNW-01, CR-KNW-02, CR-KNW-03]
+  validation: [VR-KNW-01, VR-KNW-02]
+
+# Knowledge Lifecycle (DOM-KLC) is the lifecycle of the assertions and articles owned here.
+subsumes:
+  - domain: DOM-KLC
+    coverage: "KnowledgeLifecycle state machine, review cadence (RUL-KNW-2), expiry, supersession, PromoteInference, CR-KNW-02"
+
+purpose: >
+  Own curated commercial knowledge that is not structural metadata or transactional data:
+  assertions (compatibility, substitution, regulatory interpretations, configuration know-how),
+  knowledge articles (how-to, policies explained, product guides), and the governed grounding corpus
+  used by assistants and agents — each with provenance, review lifecycle, audience, and expiry.
+
+scope:
+  includes:
+    - Assertions (subject–predicate–object statements with confidence and provenance), incl. promotion of KG inferences
+    - Knowledge articles (localized, versioned, audience-scoped)
+    - Knowledge lifecycle (draft, review, published, stale, retired) with review cadences
+    - Grounding corpus composition for AI (chunking, embeddings via plugins, access-filtered retrieval)
+  excludes:
+    - Types and relationships as structure (DOM-ONT, DOM-REL) — knowledge may propose them via ChangeSets
+    - Graph projection (DOM-KGR), documents/media binaries (DOM-DOC, DOM-MED)
+
+responsibilities:
+  - Every assertion and article has an owner, source, and review date.
+  - Retrieval respects authorization and audience (no leakage through AI grounding).
+  - Promotion of knowledge into facts goes through the owning domain's commands with evidence.
+
+principles: [PRIN-001, PRIN-011, PRIN-014]
+
+boundaries:
+  upstream: [DOM-KGR, DOM-ONT, DOM-TXO, DOM-DOC, DOM-AGT, DOM-PRV]
+  downstream: [DOM-AGT, DOM-SRC, DOM-RCM, DOM-REL, DOM-DSC]
+
+ownership:
+  boundedContext: ontology
+  owningRole: Chief AI Architect
+  service: knowledge-service
+  schema: ucos_ontology
+
+capabilities:
+  - {id: KNW-C1, name: Assertions, description: "Author, import, and review assertions; promote KG inferences."}
+  - {id: KNW-C2, name: Articles, description: "Author and publish localized knowledge articles."}
+  - {id: KNW-C3, name: Lifecycle, description: "Review cadences, staleness detection, retirement."}
+  - {id: KNW-C4, name: Grounding, description: "Build and serve access-filtered retrieval indexes for AI."}
+
+services:
+  - {name: KnowledgeCommandService, kind: application, operations: [DraftAssertion, DraftArticle, SubmitKnowledge, PublishKnowledge, MarkStale, RetireKnowledge, PromoteInference]}
+  - {name: GroundingIndexer, kind: application, contract: "On publish: chunk (structure-aware), embed via EmbeddingPort plugin, index with ACL keys (audience, tenant, classification); on retire: remove"}
+  - {name: KnowledgeQueryService, kind: application, operations: [GetKnowledge, SearchKnowledge, RetrieveGrounding]}
+
+aggregates:
+  - name: Assertion
+    identity: "urn:ucos:<tenant>:assertion:<ulid>"
+    invariants:
+      - "INV-KNW-1: subject and object are URNs or typed literals; predicate is a registered relationship type or knowledge predicate."
+      - "INV-KNW-2: published assertions carry source (human|import|inference|model) and evidence or rationale."
+    fields:
+      - {name: subject, type: Urn}
+      - {name: predicate, type: string}
+      - {name: object, type: "Urn | literal"}
+      - {name: confidence, type: "decimal 0..1"}
+      - {name: source, type: "{kind, ref}"}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: owner, type: PartyUrn}
+      - {name: reviewBy, type: Date}
+      - {name: state, type: string}
+  - name: Article
+    identity: "urn:ucos:<tenant>:article:<ulid>"
+    invariants: ["INV-KNW-3: body is structured (headings, blocks) with LocalizedText; audience non-empty; links resolve to existing URNs."]
+    fields:
+      - {name: title, type: LocalizedText}
+      - {name: body, type: "LocalizedText blocks (Markdown subset)"}
+      - {name: audience, type: "[internal|partner|customer|agent]"}
+      - {name: about, type: "Urn[] (objects, types, policies, offers)"}
+      - {name: classification, type: DataClassification}
+      - {name: owner, type: PartyUrn}
+      - {name: reviewBy, type: Date}
+      - {name: version, type: int}
+      - {name: state, type: string}
+
+entities:
+  - {name: GroundingChunk, within: "Article/Assertion projection", fields: [chunkId, sourceUrn, version, text, embeddingRef, aclKeys, locale]}
+
+valueObjects:
+  - {name: RetrievalResult, definition: "{chunks: [{sourceUrn, version, text, score}], filteredOut: int, indexVersion}"}
+
+commands:
+  - {name: DraftAssertion, input: "Assertion draft", emits: [AssertionDrafted]}
+  - {name: DraftArticle, input: "Article draft", emits: [ArticleDrafted]}
+  - {name: SubmitKnowledge, input: "{urn}", emits: [KnowledgeSubmitted]}
+  - {name: PublishKnowledge, input: "{urn, reviewerApproval}", emits: [KnowledgePublished], preconditions: ["reviewer != author", "INV-KNW-2/3"]}
+  - {name: MarkStale, input: "{urn, reason}", emits: [KnowledgeMarkedStale]}
+  - {name: RetireKnowledge, input: "{urn, supersededBy?}", emits: [KnowledgeRetired]}
+  - {name: PromoteInference, input: "{inferredEdgeRef (KG), evidenceRef}", emits: [AssertionDrafted], note: "Draft assertion; on publish, issues DOM-REL CreateRelationship via ChangeSet when predicate is a relationship type"}
+
+queries:
+  - {name: GetKnowledge, input: "{urn, version?, locale?}", output: "Assertion | Article"}
+  - {name: SearchKnowledge, input: "{text, about?, audience, locale, cursor}", output: "page"}
+  - {name: RetrieveGrounding, input: "{query, about?, audience, locale, k<=20}", output: RetrievalResult, note: "PDP-filtered by principal; used by agents and assistants"}
+
+apis:
+  - {style: REST, path: "/v1/knowledge/assertions", methods: {POST: DraftAssertion}}
+  - {style: REST, path: "/v1/knowledge/assertions:promote-inference", methods: {POST: PromoteInference}}
+  - {style: REST, path: "/v1/knowledge/articles", methods: {POST: DraftArticle}}
+  - {style: REST, path: "/v1/knowledge/items/{urn}", methods: {GET: GetKnowledge}}
+  - {style: REST, path: "/v1/knowledge/items/{urn}:submit", methods: {POST: SubmitKnowledge}}
+  - {style: REST, path: "/v1/knowledge/items/{urn}:publish", methods: {POST: PublishKnowledge}}
+  - {style: REST, path: "/v1/knowledge/items/{urn}:mark-stale", methods: {POST: MarkStale}}
+  - {style: REST, path: "/v1/knowledge/items/{urn}:retire", methods: {POST: RetireKnowledge}}
+  - {style: REST, path: "/v1/knowledge:search", methods: {GET: SearchKnowledge}}
+  - {style: REST, path: "/v1/knowledge:retrieve", methods: {POST: RetrieveGrounding}}
+
+events:
+  - {type: ucos.ontology.knowledge.assertion-drafted.v1, payload: "{urn, subject, predicate}"}
+  - {type: ucos.ontology.knowledge.article-drafted.v1, payload: "{urn, about}"}
+  - {type: ucos.ontology.knowledge.submitted.v1, payload: "{urn}"}
+  - {type: ucos.ontology.knowledge.published.v1, payload: "{urn, version, audience}", consumers: [grounding indexer, search]}
+  - {type: ucos.ontology.knowledge.marked-stale.v1, payload: "{urn, reason}"}
+  - {type: ucos.ontology.knowledge.retired.v1, payload: "{urn, supersededBy}"}
+
+stateMachines:
+  - name: KnowledgeLifecycle
+    initial: draft
+    states: [draft, in-review, published, stale, retired]
+    terminal: [retired]
+    transitions:
+      - {from: draft, to: in-review, command: SubmitKnowledge}
+      - {from: in-review, to: draft, command: reject}
+      - {from: in-review, to: published, command: PublishKnowledge}
+      - {from: published, to: stale, trigger: "reviewBy reached (timer) or MarkStale or referenced URN retired"}
+      - {from: stale, to: in-review, command: SubmitKnowledge}
+      - {from: [published, stale], to: retired, command: RetireKnowledge}
+
+rules:
+  - {id: RUL-KNW-1, statement: "RetrieveGrounding returns only chunks whose aclKeys intersect the principal's audience and tenant and whose classification the principal may read; stale items are excluded unless explicitly requested."}
+  - {id: RUL-KNW-2, statement: "Default review cadence by audience: customer/agent 180 days, internal 365 days (policy knowledge.review-cadence)."}
+  - {id: RUL-KNW-3, statement: "Knowledge never overrides system-of-record facts: when an assertion conflicts with authoritative data (e.g. price), agents must use the authoritative API (CIC-017-001 §2.5)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:knowledge.review-cadence", purpose: "Review intervals by audience and classification"}
+
+decisions:
+  - {id: DEC-KNW-1, question: "Which knowledge may ground this agent's answer?", algorithm: "RetrieveGrounding with RUL-KNW-1 filtering"}
+
+security:
+  permissions: [knowledge.read, knowledge.author, knowledge.publish, knowledge.retrieve]
+  dataClassification: "Per item; customer-audience items public."
+  threats: ["Prompt injection via knowledge content -> content treated as data (CIC-017-001 §6); authoring restricted and reviewed", "Leakage via embeddings -> ACL-filtered retrieval, tenant-separated indexes"]
+
+governance:
+  changeControl: "Publish requires reviewer approval (SoD); promotions to facts via owning-domain ChangeSets."
+  evidence: "Review approvals captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Grounding index eventual (p99 30s after publish)."
+  slo: {RetrieveGrounding_p99_ms: 150, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_ontology (separate tables) + vector index (SearchIndexPort with vector support)
+  tables:
+    - {name: assertions, columns: "tenant_id, urn, subject, predicate, object jsonb, body jsonb, state, review_by", pk: "(tenant_id, urn)", indexes: ["(tenant_id, subject)", "(tenant_id, state, review_by)"]}
+    - {name: articles, columns: "tenant_id, urn, version, body jsonb, audience text[], state, review_by", pk: "(tenant_id, urn, version)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16; vector index per tenant group."
+  retention: "Retired items retained 2 years for audit, removed from grounding immediately."
+
+extensionModel:
+  extensionPoints: ["EmbeddingPort plugins", "Knowledge predicates registry", "Importers (wiki, help centers) via DOM-DXC"]
+  forbidden: ["Ungated ingestion of external content into customer/agent audiences"]
+
+certificationCriteria:
+  - {id: CR-KNW-01, rule: "Grounding ACL test: no chunk outside the principal's audience/tenant/classification is ever returned (10^4 randomized queries).", level: L1}
+  - {id: CR-KNW-02, rule: "Items past reviewBy transition to stale and leave grounding within 1 hour.", level: L1}
+  - {id: CR-KNW-03, rule: "RetrieveGrounding p99 <= 150ms at 500 rps per tenant group.", level: L2}
+validationRules:
+  - {id: VR-KNW-01, rule: "Every knowledge predicate used is a registered reltype or knowledge predicate."}
+  - {id: VR-KNW-02, rule: "Every customer-audience article has all tier-1 locales or an explicit fallback declaration."}

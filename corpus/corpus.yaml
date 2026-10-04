@@ -1,0 +1,100 @@
+name: UCOS-COM Ω∞ Complete Implementation Corpus
+version: 1.1.0
+authority: UCOS Constitutional Authority
+note: 'Artifacts are discovered from corpora/; this manifest fixes the corpus set
+  and dependency order. Coverage: python3 tools/validate.py --coverage'
+order:
+- CORPUS-000
+- CORPUS-001
+- CORPUS-002
+- CORPUS-003
+- CORPUS-004
+- CORPUS-005
+- CORPUS-006
+- CORPUS-007
+- CORPUS-008
+- CORPUS-009
+- CORPUS-010
+- CORPUS-011
+- CORPUS-012
+- CORPUS-013
+- CORPUS-014
+- CORPUS-015
+- CORPUS-016
+- CORPUS-017
+- CORPUS-018
+- CORPUS-019
+- CORPUS-020
+- CORPUS-021
+- CORPUS-022
+- CORPUS-023
+- CORPUS-024
+- CORPUS-025
+- CORPUS-026
+- CORPUS-027
+- CORPUS-028
+- CORPUS-029
+- CORPUS-030
+corpora:
+- id: CORPUS-000
+  title: Constitutional Foundation
+- id: CORPUS-001
+  title: Repository Constitution
+- id: CORPUS-002
+  title: Domain Constitution
+- id: CORPUS-003
+  title: Data Constitution
+- id: CORPUS-004
+  title: Knowledge Graph Constitution
+- id: CORPUS-005
+  title: API Constitution
+- id: CORPUS-006
+  title: Event Constitution
+- id: CORPUS-007
+  title: State Machine Constitution
+- id: CORPUS-008
+  title: Rules Constitution
+- id: CORPUS-009
+  title: Policy Constitution
+- id: CORPUS-010
+  title: Decision Constitution
+- id: CORPUS-011
+  title: Context Constitution
+- id: CORPUS-012
+  title: UI Constitution
+- id: CORPUS-013
+  title: UX Constitution
+- id: CORPUS-014
+  title: Security Constitution
+- id: CORPUS-015
+  title: Governance Constitution
+- id: CORPUS-016
+  title: Risk Constitution
+- id: CORPUS-017
+  title: AI Constitution
+- id: CORPUS-018
+  title: Automation Constitution
+- id: CORPUS-019
+  title: Digital Twin Constitution
+- id: CORPUS-020
+  title: Runtime Constitution
+- id: CORPUS-021
+  title: Infrastructure Constitution
+- id: CORPUS-022
+  title: Observability Constitution
+- id: CORPUS-023
+  title: Testing Constitution
+- id: CORPUS-024
+  title: Deployment Constitution
+- id: CORPUS-025
+  title: Operations Constitution
+- id: CORPUS-026
+  title: Migration Constitution
+- id: CORPUS-027
+  title: SDK Constitution
+- id: CORPUS-028
+  title: Plugin Constitution
+- id: CORPUS-029
+  title: Registry Constitution
+- id: CORPUS-030
+  title: Reference Implementation Constitution

@@ -1,0 +1,178 @@
+header:
+  id: DOM-MDM
+  title: Master Data Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-002-001, CIC-015-001, CIC-026-001, CIC-002-002]
+  traces: [PRIN-001, PRIN-003, PRIN-011]
+  certification: [CR-MDM-01, CR-MDM-02, CR-MDM-03]
+  validation: [VR-MDM-01, VR-MDM-02]
+
+purpose: >
+  Govern master data across contexts when multiple sources contribute to one record — source
+  registration and trust, cross-source matching for commercial objects, organizations, locations, and
+  other master aggregates, attribute-level survivorship, stewardship workflows, and golden-record
+  publication through the owning domains' commands (MDM never becomes a second system of record).
+
+scope:
+  includes:
+    - Source system registry (systems contributing master data, trust levels per attribute)
+    - Source records (staging copies of inbound master data with lineage)
+    - Matching across sources and against existing UCOS aggregates (non-party; party matching is DOM-PTY's PartyMatcher, invoked by MDM)
+    - Survivorship rules per attribute; golden record proposals applied via owning-domain commands
+    - Stewardship queues (match review, conflict resolution, enrichment)
+  excludes:
+    - Owning master aggregates (owning domains: COB, PTY, ORG, GEO, …)
+    - Transport/connectors (DOM-DXC), quality rules (DOM-DQL)
+
+responsibilities:
+  - Single path from many sources to one aggregate per real-world entity (PRIN-001).
+  - Attribute-level lineage: which source supplied each surviving value.
+  - Steward decisions captured and reusable (learned match rules).
+
+principles: [PRIN-001, PRIN-003, PRIN-011]
+
+boundaries:
+  upstream: [DOM-DXC, DOM-REF, DOM-DQL, DOM-ONT]
+  downstream: [DOM-COB, DOM-PTY, DOM-ORG, DOM-GEO, DOM-LIN, DOM-SUPN]
+
+ownership:
+  boundedContext: data
+  owningRole: Chief Data Architect
+  service: master-data-service
+  schema: ucos_data
+
+capabilities:
+  - {id: MDM-C1, name: Sources, description: "Register sources and attribute trust."}
+  - {id: MDM-C2, name: Stage, description: "Ingest source records with lineage."}
+  - {id: MDM-C3, name: Match, description: "Match source records to each other and to aggregates."}
+  - {id: MDM-C4, name: Survive, description: "Compute golden values; apply via owning commands."}
+  - {id: MDM-C5, name: Steward, description: "Human review queues for low-confidence matches and conflicts."}
+
+services:
+  - {name: MasterDataCommandService, kind: application, operations: [RegisterSource, IngestSourceRecords, ResolveMatch, ApplyGoldenRecord, DefineSurvivorshipRule, DefineMatchRule]}
+  - {name: MatchEngine, kind: domain-service, contract: "match(sourceRecord, entityKind) -> candidates with scores; deterministic rules (external IDs via DOM-REF) first, then probabilistic (Fellegi-Sunter weights per entity kind policy); PTY entities delegated to PartyMatcher"}
+  - {name: SurvivorshipEngine, kind: domain-service, contract: "survive(cluster) -> golden values with source per attribute; rules: source trust ranking, most recent, most complete, steward override"}
+  - {name: MasterDataQueryService, kind: application, operations: [GetSourceRecord, GetCluster, GetStewardshipQueue, GetAttributeLineage]}
+
+aggregates:
+  - name: SourceSystem
+    identity: "urn:ucos:<tenant>:mdm-source:<code>"
+    fields:
+      - {name: code, type: string}
+      - {name: entityKinds, type: "string[] (type URNs or kernel kinds)"}
+      - {name: trust, type: "map<attributeCode, rank>"}
+      - {name: connectorRef, type: "DOM-DXC connector"}
+  - name: MatchCluster
+    identity: "urn:ucos:<tenant>:mdm-cluster:<ulid>"
+    invariants:
+      - "INV-MDM-1: a cluster resolves to at most one UCOS aggregate (target); source records belong to exactly one active cluster."
+      - "INV-MDM-2: golden values are applied only through the owning domain's commands with mdmClusterRef provenance."
+    fields:
+      - {name: entityKind, type: string}
+      - {name: sourceRecords, type: "SourceRecordRef[]"}
+      - {name: target, type: "InstanceUrn?"}
+      - {name: matchScore, type: decimal}
+      - {name: goldenValues, type: "map<attr, {value, sourceRecordRef}>"}
+      - {name: status, type: "proposed|needs-review|confirmed|applied|split"}
+
+entities:
+  - {name: SourceRecord, within: "staging", fields: [sourceSystem, sourceKey, entityKind, payload (mapped to ontology attributes), receivedAt, clusterRef]}
+
+valueObjects:
+  - {name: AttributeLineage, definition: "{target, attribute, value, sourceSystem, sourceKey, survivedBy (rule), at}"}
+
+commands:
+  - {name: RegisterSource, input: "SourceSystem", emits: [MasterDataSourceRegistered]}
+  - {name: IngestSourceRecords, input: "{sourceSystem, records[] <= 10000}", emits: [SourceRecordsIngested], note: "Triggers matching"}
+  - {name: ResolveMatch, input: "{clusterId, decision: confirm|split|merge-with, steward}", emits: [MatchResolved]}
+  - {name: ApplyGoldenRecord, input: "{clusterId}", emits: [GoldenRecordApplied], note: "Issues Create/Update commands to owning domain"}
+  - {name: DefineSurvivorshipRule, input: "{entityKind, attribute, rule} + changeSetRef", emits: [SurvivorshipRuleDefined]}
+  - {name: DefineMatchRule, input: "{entityKind, rule} + changeSetRef", emits: [MatchRuleDefined]}
+
+queries:
+  - {name: GetSourceRecord, input: "{sourceSystem, sourceKey}", output: SourceRecord}
+  - {name: GetCluster, input: "{id}", output: MatchCluster}
+  - {name: GetStewardshipQueue, input: "{entityKind?, reason?, cursor}", output: "clusters needing review"}
+  - {name: GetAttributeLineage, input: "{target, attribute?}", output: "AttributeLineage[]"}
+
+apis:
+  - {style: REST, path: "/v1/master-data/sources", methods: {POST: RegisterSource}}
+  - {style: REST, path: "/v1/master-data/sources/{code}/records", methods: {POST: IngestSourceRecords}}
+  - {style: REST, path: "/v1/master-data/sources/{code}/records/{sourceKey}", methods: {GET: GetSourceRecord}}
+  - {style: REST, path: "/v1/master-data/clusters/{id}", methods: {GET: GetCluster}}
+  - {style: REST, path: "/v1/master-data/clusters/{id}:resolve", methods: {POST: ResolveMatch}}
+  - {style: REST, path: "/v1/master-data/clusters/{id}:apply", methods: {POST: ApplyGoldenRecord}}
+  - {style: REST, path: "/v1/master-data/stewardship-queue", methods: {GET: GetStewardshipQueue}}
+  - {style: REST, path: "/v1/master-data/lineage", methods: {GET: GetAttributeLineage}}
+  - {style: REST, path: "/v1/master-data/survivorship-rules", methods: {POST: DefineSurvivorshipRule}}
+  - {style: REST, path: "/v1/master-data/match-rules", methods: {POST: DefineMatchRule}}
+
+events:
+  - {type: ucos.data.mdm-source.registered.v1, payload: "{code, entityKinds}"}
+  - {type: ucos.data.source-records.ingested.v1, payload: "{sourceSystem, count, clustersAffected}"}
+  - {type: ucos.data.match.resolved.v1, payload: "{clusterId, decision, steward}"}
+  - {type: ucos.data.golden-record.applied.v1, payload: "{clusterId, target, attributes}", consumers: [lineage, quality]}
+  - {type: ucos.data.survivorship-rule.defined.v1, payload: "{entityKind, attribute}"}
+  - {type: ucos.data.match-rule.defined.v1, payload: "{entityKind}"}
+
+stateMachines:
+  - name: MatchClusterLifecycle
+    initial: proposed
+    states: [proposed, needs-review, confirmed, applied, split]
+    terminal: [split]
+    transitions:
+      - {from: proposed, to: confirmed, trigger: "score >= auto-confirm threshold"}
+      - {from: proposed, to: needs-review, trigger: "review threshold <= score < auto-confirm"}
+      - {from: needs-review, to: confirmed, command: ResolveMatch, guard: "confirm"}
+      - {from: needs-review, to: split, command: ResolveMatch, guard: "split"}
+      - {from: confirmed, to: applied, command: ApplyGoldenRecord}
+      - {from: applied, to: needs-review, trigger: "new conflicting source record"}
+
+rules:
+  - {id: RUL-MDM-1, statement: "MDM writes only via owning-domain commands; direct writes to other schemas are forbidden (PRIN-003)."}
+  - {id: RUL-MDM-2, statement: "Steward overrides persist as survivorship rule instances for that (target, attribute) until the source value changes."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:mdm.match-thresholds", purpose: "Auto-confirm and review thresholds per entity kind"}
+
+decisions:
+  - {id: DEC-MDM-1, question: "Do source records A and B denote the same entity?", algorithm: "MatchEngine with mdm.match-thresholds"}
+
+security:
+  permissions: [mdm.read, mdm.ingest, mdm.steward, mdm.rules.manage]
+  dataClassification: "Inherits classification of mastered data; personal source records encrypted."
+  threats: ["Source poisoning -> source trust ranks + quality gates (DOM-DQL) before apply"]
+
+governance:
+  changeControl: "Match and survivorship rules via ChangeSet."
+  evidence: "Steward decisions audited."
+
+runtimeBehavior:
+  consistency: "Eventual (staging -> apply)."
+  slo: {match_latency_p95_s: 10, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_data
+  tables:
+    - {name: mdm_sources, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: source_records, columns: "tenant_id, source_code, source_key, entity_kind, payload_enc bytea, payload_hash bytea, cluster_id, received_at", pk: "(tenant_id, source_code, source_key)", indexes: ["(tenant_id, cluster_id)"]}
+    - {name: match_clusters, columns: "tenant_id, id, entity_kind, target, score, body jsonb, status", pk: "(tenant_id, id)", indexes: ["(tenant_id, target)", "(tenant_id, status)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "source_records hash(tenant_id) 64."
+  retention: "Source records 2 years after supersession; lineage indefinite."
+
+extensionModel:
+  extensionPoints: ["ML matchers (plugins)", "Entity kinds (any ontology type)"]
+  forbidden: ["Golden records stored as separate system of record"]
+
+certificationCriteria:
+  - {id: CR-MDM-01, rule: "Golden record application uses owning commands only (schema grants test).", level: L1}
+  - {id: CR-MDM-02, rule: "Matching precision >= 0.98 at auto-confirm on reference datasets per entity kind.", level: L2}
+  - {id: CR-MDM-03, rule: "Attribute lineage present for every applied golden attribute.", level: L1}
+validationRules:
+  - {id: VR-MDM-01, rule: "Every source declares trust for every attribute it supplies."}
+  - {id: VR-MDM-02, rule: "Every entity kind mastered maps to an owning domain command set."}

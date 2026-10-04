@@ -1,0 +1,159 @@
+# Policies for DOM-DOC, MED, SRC, RCM, INT, ANL, FCS, FRD, FRK, CYR, ORK (and CIC-016-001).
+defaults:
+  cfg: &cfg
+    kind: configuration
+    layer: platform
+    scope: {}
+  res: &res
+    kind: configuration
+    layer: platform
+    scope: {}
+    outputSchema: {$ref: resolution-config}
+  bands: &bands
+    kind: configuration
+    layer: platform
+    scope: {}
+    outputSchema: {type: object, required: [bands], properties: {bands: {type: array, minItems: 4, items: {type: object, required: [band, minScore], properties: {band: {enum: [low, medium, high, critical]}, minScore: {type: integer, minimum: 0, maximum: 1000}, action: {type: string}}}}}}
+
+policies:
+  # ---------------- CIC-016-001 risk decision policies ----------------
+  - name: risk.order-action
+    kind: selection
+    layer: platform
+    scope: {}
+    combining: first-applicable
+    outputSchema:
+      type: object
+      required: [action]
+      properties:
+        action: {enum: [allow, review, step-up, block]}
+        obligations: {type: array}
+        reason: {type: string, pattern: "^R-[A-Z]{2,5}-[A-Z0-9-]+$"}
+    body:
+      language: cel
+      source: |
+        assessments.exists(a, a.band == 'critical') ? {'action': 'block', 'reason': 'R-ORD-RISK-HIGH'}
+        : assessments.exists(a, a.band == 'high') && amountMinor > 50000 ? {'action': 'review', 'reason': 'R-ORD-RISK-HIGH'}
+        : assessments.exists(a, a.band == 'high') ? {'action': 'step-up', 'obligations': [{'kind': 'require-mfa'}]}
+        : {'action': 'allow'}
+    testVectors:
+      - {name: all-low, input: {assessments: [{riskType: fraud, band: low}, {riskType: credit, band: low}], amountMinor: 9900}, context: {}, expectedOutput: {action: allow}}
+      - {name: medium-allowed, input: {assessments: [{riskType: fraud, band: medium}], amountMinor: 200000}, context: {}, expectedOutput: {action: allow}}
+      - {name: high-small-step-up, input: {assessments: [{riskType: fraud, band: high}], amountMinor: 2000}, context: {}, expectedOutput: {action: step-up, obligations: [{kind: require-mfa}]}}
+      - {name: high-large-review, input: {assessments: [{riskType: fraud, band: high}], amountMinor: 120000}, context: {}, expectedOutput: {action: review, reason: R-ORD-RISK-HIGH}}
+      - {name: critical-block, input: {assessments: [{riskType: credit, band: low}, {riskType: fraud, band: critical}], amountMinor: 100}, context: {}, expectedOutput: {action: block, reason: R-ORD-RISK-HIGH}}
+
+  - <<: *cfg
+    name: risk.aggregation
+    outputSchema: {type: object, required: [method], properties: {method: {enum: [max-band, weighted]}, weights: {type: object}}}
+    body: {language: static, source: &riskAgg {method: max-band}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *riskAgg}]
+
+  - <<: *cfg
+    name: risk.fail-mode
+    outputSchema: {type: object, required: [byCheckpoint], properties: {byCheckpoint: {type: object, additionalProperties: {type: object, required: [mode], properties: {mode: {enum: [fail-open, fail-closed, review]}, maxAmountMinorFailOpen: {type: integer}}}}}}
+    body: {language: static, source: &riskFail {byCheckpoint: {checkout: {mode: fail-open, maxAmountMinorFailOpen: 20000}, payment: {mode: fail-open, maxAmountMinorFailOpen: 20000}, refund: {mode: review}, payout-method-change: {mode: fail-closed}, account-create: {mode: fail-open}, agent-action: {mode: fail-closed}, credit: {mode: review}}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *riskFail}]
+
+  - <<: *bands
+    name: risk.fraud.bands
+    body: {language: static, source: &fraudBands {bands: [{band: low, minScore: 0}, {band: medium, minScore: 400}, {band: high, minScore: 700}, {band: critical, minScore: 900}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *fraudBands}]
+
+  - <<: *bands
+    name: risk.credit.bands
+    body: {language: static, source: &creditBands {bands: [{band: low, minScore: 0}, {band: medium, minScore: 350}, {band: high, minScore: 650}, {band: critical, minScore: 850}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *creditBands}]
+
+  - <<: *bands
+    name: risk.cyber.bands
+    body: {language: static, source: &cyberBands {bands: [{band: low, minScore: 0, action: none}, {band: medium, minScore: 500, action: throttle}, {band: high, minScore: 750, action: step-up}, {band: critical, minScore: 900, action: suspend-client}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *cyberBands}]
+
+  # ---------------- Resolution configs for new fact kinds ----------------
+  - <<: *res
+    name: document-template.resolution
+    body: {language: static, source: &docRes {dimensionPrecedence: [jurisdiction], conflictStrategy: error, cardinality: one, relaxationAllowed: true, fallbackChains: [locale, jurisdiction, channel], maxFallbackSteps: 16}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *docRes}]
+  - <<: *res
+    name: media-variant.resolution
+    body: {language: static, source: &medRes {conflictStrategy: most-recent, cardinality: one, relaxationAllowed: true, fallbackChains: [locale, channel, market], maxFallbackSteps: 16}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *medRes}]
+  - <<: *res
+    name: risk-rule.resolution
+    body: {language: static, source: &riskRes {dimensionPrecedence: [jurisdiction], conflictStrategy: all, cardinality: many, relaxationAllowed: false, hitPolicy: collect}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *riskRes}]
+  - <<: *res
+    name: quality-rule.resolution
+    body: {language: static, source: &dqRes {conflictStrategy: all, cardinality: many, relaxationAllowed: false, hitPolicy: collect}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *dqRes}]
+
+  # ---------------- Content ----------------
+  - <<: *cfg
+    name: documents.retention
+    outputSchema: {type: object, required: [byKind], properties: {byKind: {type: object, additionalProperties: {type: string, pattern: "^P"}}}}
+    body: {language: static, source: &docRet {byKind: {invoice: P10Y, credit-note: P10Y, debit-note: P10Y, contract: P10Y, terms: P10Y, quote: P3Y, order-confirmation: P3Y, delivery-note: P3Y, remittance: P10Y, passport: P15Y, certificate: P10Y, custom: P2Y}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *docRet}]
+
+  - <<: *cfg
+    name: media.rendition-profiles
+    outputSchema: {type: object, required: [image], properties: {image: {type: array}, video: {type: array}, model-3d: {type: array}}}
+    body: {language: static, source: &medProf {image: [{name: thumb, width: 160, formats: [avif, webp, jpeg]}, {name: card, width: 480, formats: [avif, webp, jpeg]}, {name: detail, width: 1600, formats: [avif, webp, jpeg]}], video: [{name: hls-ladder, renditions: [360p, 720p, 1080p]}], model-3d: [{name: ar, formats: [glb, usdz]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *medProf}]
+
+  # ---------------- Intelligence ----------------
+  - <<: *cfg
+    name: search.personalization
+    outputSchema: {type: object, required: [maxWeight, excludedContexts], properties: {maxWeight: {type: number, minimum: 0, maximum: 1}, excludedContexts: {type: array}}}
+    body: {language: static, source: &srcPers {maxWeight: 0.3, excludedContexts: [{dimension: party-segment, values: [public-sector]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *srcPers}]
+
+  - <<: *cfg
+    name: search.freshness
+    outputSchema: {type: object, required: [indexLagTarget, verifyPricesByChannel], properties: {indexLagTarget: {type: string, pattern: "^PT"}, verifyPricesByChannel: {type: object}}}
+    body: {language: static, source: &srcFresh {indexLagTarget: PT5S, verifyPricesByChannel: {direct: true, indirect: true, machine: true}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *srcFresh}]
+
+  - <<: *cfg
+    name: recommendations.guardrails
+    outputSchema: {type: object, required: [minConversionRatioVsControl, maxMarginDropPercent], properties: {minConversionRatioVsControl: {type: number}, maxMarginDropPercent: {type: number}}}
+    body: {language: static, source: &rcmGuard {minConversionRatioVsControl: 0.95, maxMarginDropPercent: 2}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *rcmGuard}]
+
+  - <<: *cfg
+    name: ml.prohibited-features
+    layer: regulatory
+    outputSchema: {type: object, required: [default], properties: {default: {type: array, items: {type: string}}, byUseCase: {type: object}}}
+    body: {language: static, source: &mlProhibited {default: [race, ethnicity, religion, sexual-orientation, health, political-opinion, union-membership, genetic, biometric, national-identifier], byUseCase: {credit: [gender, age, marital-status, postal-code-as-proxy], fraud: [gender]}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *mlProhibited}]
+
+  - <<: *cfg
+    name: ml.monitoring
+    outputSchema: {type: object, required: [psiAlert, psiRollback, autoRollback], properties: {psiAlert: {type: number}, psiRollback: {type: number}, autoRollback: {type: boolean}, qualityDropPercent: {type: number}}}
+    body: {language: static, source: &mlMon {psiAlert: 0.1, psiRollback: 0.25, autoRollback: true, qualityDropPercent: 10}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *mlMon}]
+
+  - <<: *cfg
+    name: analytics.k-anonymity
+    outputSchema: {type: object, required: [k], properties: {k: {type: integer, minimum: 2}}}
+    body: {language: static, source: &anlK {k: 10}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *anlK}]
+
+  - <<: *cfg
+    name: forecasting.override-threshold
+    outputSchema: {type: object, required: [percentRequiringApproval], properties: {percentRequiringApproval: {type: number, minimum: 0}}}
+    body: {language: static, source: &fcsOv {percentRequiringApproval: 15}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *fcsOv}]
+
+  # ---------------- Risk ----------------
+  - <<: *cfg
+    name: financial-risk.credit-tolerance
+    outputSchema: {type: object, required: [overLimitPercent, autoHold], properties: {overLimitPercent: {type: number, minimum: 0}, autoHold: {type: boolean}}}
+    body: {language: static, source: &frkTol {overLimitPercent: 5, autoHold: true}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *frkTol}]
+
+  - <<: *cfg
+    name: operational-risk.acceptance
+    outputSchema: {type: object, required: [byResidualScore, maxDuration], properties: {byResidualScore: {type: array}, maxDuration: {type: string, pattern: "^P"}}}
+    body: {language: static, source: &orkAcc {byResidualScore: [{upTo: 6, approverRoles: [risk-owner]}, {upTo: 12, approverRoles: [risk-owner, chief-risk-officer]}, {upTo: 25, approverRoles: [chief-risk-officer, executive-committee]}], maxDuration: P365D}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *orkAcc}]

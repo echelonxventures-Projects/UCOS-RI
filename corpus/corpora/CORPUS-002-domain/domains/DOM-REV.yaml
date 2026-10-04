@@ -1,0 +1,192 @@
+header:
+  id: DOM-REV
+  title: Revenue Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-004, CIC-008-001, CIC-015-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-005, PRIN-008, PRIN-016]
+  certification: [CR-REV-01, CR-REV-02, CR-REV-03, CR-REV-04]
+  validation: [VR-REV-01, VR-REV-02]
+
+purpose: >
+  Recognize revenue correctly under IFRS 15 / ASC 606 for every commercial model — one-time,
+  subscription, usage, bundles, licences, services, milestones, marketplaces (principal vs agent) —
+  by identifying contracts and performance obligations, allocating transaction price by standalone
+  selling price (SSP), and scheduling recognition, with full audit trail to orders, contracts, and invoices.
+
+scope:
+  includes:
+    - Revenue contracts (accounting view) built from orders, contracts, amendments
+    - Performance obligations (POBs) derived from offer/type facets via rules (fact kind revenue-pob-rule)
+    - SSP management (observable, adjusted-market, cost-plus, residual) with ranges
+    - Allocation and reallocation on modifications (prospective, cumulative catch-up)
+    - Recognition schedules (point-in-time, ratable, usage-based, milestone, input/output measures)
+    - Deferred revenue / contract asset waterfall and disclosures data
+    - Principal vs agent determination for marketplace transactions
+  excludes:
+    - Invoicing (DOM-BIL), posting (DOM-ACC consumes revenue events), pricing (DOM-PRC)
+
+responsibilities:
+  - Allocation sums to transaction price exactly per revenue contract.
+  - Recognition follows satisfaction events (fulfillment, entitlement activation, usage, time).
+  - Modifications handled per standard with explanation trail.
+
+principles: [PRIN-001, PRIN-005, PRIN-008, PRIN-016]
+
+boundaries:
+  upstream: [DOM-ORD, DOM-CTR, DOM-BIL, DOM-ENT, DOM-FUL, DOM-SDL, DOM-PRC, DOM-OFR, DOM-RUL, DOM-MKT]
+  downstream: [DOM-ACC, DOM-PRF, DOM-ANL, DOM-CMPL]
+
+ownership:
+  boundedContext: revenue
+  owningRole: Chief Product Architect
+  service: revenue-service
+  schema: ucos_revenue
+
+capabilities:
+  - {id: REV-C1, name: Contracts & POBs, description: "Identify revenue contracts and performance obligations (incl. combination of contracts)."}
+  - {id: REV-C2, name: SSP, description: "Maintain SSP by object/offer/context with methods and ranges."}
+  - {id: REV-C3, name: Allocate, description: "Allocate transaction price incl. variable consideration and discounts."}
+  - {id: REV-C4, name: Recognize, description: "Generate and execute recognition schedules from satisfaction events."}
+  - {id: REV-C5, name: Modify, description: "Apply modification accounting (separate contract, prospective, catch-up)."}
+  - {id: REV-C6, name: Waterfall, description: "Deferred revenue, contract assets/liabilities, RPO disclosures."}
+
+services:
+  - {name: RevenueContractService, kind: application, operations: [CreateRevenueContract, ApplyModification, CloseRevenueContract]}
+  - {name: SspService, kind: application, operations: [SetSsp, ImportSspStudy]}
+  - {name: Allocator, kind: domain-service, contract: "allocate(transactionPrice, pobs, ssp) -> allocations; relative SSP; discount allocation per evidence rules; residual method only when SSP highly variable; Σ allocations = price exactly (largest-remainder rounding)"}
+  - {name: RecognitionEngine, kind: domain-service, contract: "schedule(pob) by pattern; recognize(satisfactionEvent) -> recognition entries; idempotent on (pob, eventId)"}
+  - {name: RevenueQueryService, kind: application, operations: [GetRevenueContract, GetRecognitionSchedule, GetWaterfall, GetRpo]}
+
+aggregates:
+  - name: RevenueContract
+    identity: "urn:ucos:<tenant>:revenue-contract:<ulid>"
+    invariants:
+      - "INV-REV-1: Σ POB allocations = transaction price (incl. estimated variable consideration constrained) in contract currency, exactly."
+      - "INV-REV-2: recognized-to-date per POB <= allocated amount (except variable consideration true-ups)."
+      - "INV-REV-3: every change has a ModificationRecord with method and rationale."
+    fields:
+      - {name: sources, type: "[orderRef | contractRef | amendmentRef]"}
+      - {name: customer, type: PartyUrn}
+      - {name: legalEntity, type: InstanceUrn}
+      - {name: currency, type: CurrencyCode}
+      - {name: transactionPrice, type: "{fixed: Money, variable: {estimate, method: expected-value|most-likely, constraint}}"}
+      - {name: pobs, type: "PerformanceObligation[]"}
+      - {name: principalOrAgent, type: "principal|agent (per POB for marketplaces)"}
+      - {name: modifications, type: "ModificationRecord[]"}
+      - {name: status, type: "active|completed|terminated"}
+  - name: SspEntry
+    identity: "urn:ucos:<tenant>:ssp:<ulid>"
+    fields:
+      - {name: subject, type: "objectRef | offerRef | typeRef"}
+      - {name: method, type: "observable|adjusted-market|expected-cost-plus|residual"}
+      - {name: amount, type: Money}
+      - {name: range, type: "{low, high}?"}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+
+entities:
+  - {name: PerformanceObligation, within: RevenueContract, fields: [pobId, "sourceLines[]", "pattern (point-in-time|ratable|usage|milestone|input-measure|output-measure)", "satisfactionTrigger (event type + filter)", allocated (Money), recognized (Money), "period {start, end}?"]}
+  - {name: ModificationRecord, within: RevenueContract, fields: [at, sourceRef, "method (separate-contract|prospective|cumulative-catch-up)", rationale, allocationsBefore, allocationsAfter]}
+
+valueObjects:
+  - {name: RecognitionEntry, definition: "{pobId, date, amount, kind: recognize|reverse|true-up, sourceEventId}"}
+  - {name: Waterfall, definition: "{asOf, deferredOpening, billings, recognized, deferredClosing, contractAssets, byPeriod[]}"}
+
+commands:
+  - {name: CreateRevenueContract, input: "{sources[], combineWith?}", emits: [RevenueContractCreated, AllocationComputed], note: "Triggered by order.accepted / contract.terms-published"}
+  - {name: ApplyModification, input: "{revenueContractId, sourceRef, changes}", emits: [RevenueContractModified, AllocationComputed]}
+  - {name: CloseRevenueContract, input: "{id}", emits: [RevenueContractClosed]}
+  - {name: SetSsp, input: "SspEntry + changeSetRef", emits: [SspSet]}
+  - {name: ImportSspStudy, input: "{studyRef, entries[]}", emits: [SspSet], async: true}
+  - {name: RecognizeRevenue, input: "{satisfactionEvent}", emits: [RevenueRecognized], note: "Driven by fulfillment.completed, entitlement.granted/consumed, time (timers), milestone acceptance"}
+
+queries:
+  - {name: GetRevenueContract, input: "{id}", output: RevenueContract}
+  - {name: GetRecognitionSchedule, input: "{id, pobId?}", output: "RecognitionEntry[] (planned + actual)"}
+  - {name: GetWaterfall, input: "{legalEntity, from, to, currency}", output: Waterfall}
+  - {name: GetRpo, input: "{legalEntity, asOf}", output: "{remainingPerformanceObligations, expectedTiming buckets}"}
+
+apis:
+  - {style: REST, path: "/v1/revenue/contracts", methods: {POST: CreateRevenueContract}}
+  - {style: REST, path: "/v1/revenue/contracts/{id}", methods: {GET: GetRevenueContract}}
+  - {style: REST, path: "/v1/revenue/contracts/{id}/modifications", methods: {POST: ApplyModification}}
+  - {style: REST, path: "/v1/revenue/contracts/{id}:close", methods: {POST: CloseRevenueContract}}
+  - {style: REST, path: "/v1/revenue/contracts/{id}/schedule", methods: {GET: GetRecognitionSchedule}}
+  - {style: REST, path: "/v1/revenue/ssp", methods: {POST: SetSsp}}
+  - {style: REST, path: "/v1/revenue/ssp:import", methods: {POST: ImportSspStudy}}
+  - {style: REST, path: "/v1/revenue:recognize", methods: {POST: RecognizeRevenue}, note: "Internal; normally event-driven"}
+  - {style: REST, path: "/v1/revenue/waterfall", methods: {GET: GetWaterfall}}
+  - {style: REST, path: "/v1/revenue/rpo", methods: {GET: GetRpo}}
+
+events:
+  - {type: ucos.revenue.contract.created.v1, payload: "{id, sources, transactionPrice, pobs}"}
+  - {type: ucos.revenue.contract.modified.v1, payload: "{id, method, sourceRef}"}
+  - {type: ucos.revenue.contract.closed.v1, payload: "{id}"}
+  - {type: ucos.revenue.allocation.computed.v1, payload: "{id, allocations: [{pobId, amount}]}"}
+  - {type: ucos.revenue.ssp.set.v1, payload: "{subject, method, amount, scope}"}
+  - {type: ucos.revenue.recognition.recognized.v1, payload: "{id, pobId, date, amount, kind, sourceEventId}", consumers: [accounting (posting), profitability]}
+
+stateMachines:
+  - name: RevenueContractLifecycle
+    initial: active
+    states: [active, completed, terminated]
+    terminal: [completed, terminated]
+    transitions:
+      - {from: active, to: active, command: ApplyModification}
+      - {from: active, to: completed, trigger: "all POBs fully recognized and billed"}
+      - {from: active, to: terminated, trigger: "contract terminated; remaining handled per modification rules"}
+
+rules:
+  - {id: RUL-REV-1, statement: "POB identification is metadata: revenue-pob-rule maps (type facets, offer slots, action) to POB patterns, e.g. Entitling+Recurring -> ratable over service period; Fulfillable(physical) -> point-in-time at delivery; Metered -> usage-based."}
+  - {id: RUL-REV-2, statement: "Marketplace principal/agent determination from contract terms and control indicators (rules); agent POBs recognize net commission only."}
+  - {id: RUL-REV-3, statement: "Recognition in closed accounting periods is not allowed; late satisfaction events recognize in the current open period (DOM-ACC RUL-ACC-3)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:revenue-pob-rule.resolution", purpose: "ResolutionConfig for POB rules"}
+  - {urn: "urn:ucos:ucos.std:policy:revenue.variable-consideration", purpose: "Estimation method and constraint thresholds"}
+
+decisions:
+  - {id: DEC-REV-1, question: "How much revenue is recognized for POB P at date D?", algorithm: "RecognitionEngine pattern evaluation over satisfaction events up to D"}
+  - {id: DEC-REV-2, question: "How is a modification accounted for?", algorithm: "Standard decision tree: distinct goods at SSP -> separate contract; remaining distinct -> prospective; otherwise cumulative catch-up"}
+
+security:
+  permissions: [revenue.read, revenue.contract.manage, revenue.ssp.manage, revenue.recognize, revenue.report]
+  dataClassification: "Confidential financial."
+  threats: ["Earnings manipulation via SSP changes -> governed SSP with evidence; modification rationale required"]
+
+governance:
+  changeControl: "SSP, POB rules, and variable consideration policies via ChangeSet with Revenue Accounting approval."
+  evidence: "SSP studies, modification rationales captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per revenue contract; recognition idempotent per (pob, event)."
+  slo: {recognition_lag_p99_s: 60, GetWaterfall_p99_ms: 2000, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_revenue (event-sourced; financial)
+  tables:
+    - {name: revenue_contracts, columns: "tenant_id, id, customer, legal_entity, currency, status, body jsonb, revision bigint", pk: "(tenant_id, id)"}
+    - {name: pobs, columns: "tenant_id, contract_id, pob_id, pattern, allocated_minor, recognized_minor, period_start, period_end", pk: "(tenant_id, contract_id, pob_id)"}
+    - {name: recognition_entries, columns: "tenant_id, contract_id, pob_id, entry_date, amount_minor, kind, source_event_id", pk: "(tenant_id, contract_id, pob_id, source_event_id, kind)", indexes: ["(tenant_id, entry_date)"]}
+    - {name: ssp_entries, columns: "tenant_id, id, subject, method, amount_minor, currency, scope jsonb, valid_from, valid_to", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "recognition_entries range(entry_date) monthly x hash(tenant_id) 16."
+  retention: "Financial retention (min 10 years)."
+
+extensionModel:
+  extensionPoints: ["POB rules per industry pack (telecom device subsidies, SaaS, construction milestones)", "Measure-of-progress plugins (input/output measures)"]
+  forbidden: ["Product-specific recognition code"]
+
+certificationCriteria:
+  - {id: CR-REV-01, rule: "Golden ASC 606/IFRS 15 example suite (bundles with discounts, variable consideration, modifications of each type, principal/agent) matches expected schedules exactly.", level: L1}
+  - {id: CR-REV-02, rule: "Allocation sums equal transaction price for 10^6 random contracts (largest-remainder rounding).", level: L1}
+  - {id: CR-REV-03, rule: "Waterfall reconciles: deferred opening + billings - recognized = deferred closing per legal entity and period.", level: L1}
+  - {id: CR-REV-04, rule: "Recognition lag p99 <= 60s at 5,000 satisfaction events/s.", level: L2}
+validationRules:
+  - {id: VR-REV-01, rule: "Every ucos.std commercial type has at least one revenue-pob-rule covering action add."}
+  - {id: VR-REV-02, rule: "Every revenue event type has a posting rule in DOM-ACC."}

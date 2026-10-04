@@ -1,0 +1,221 @@
+header:
+  id: DOM-PRI
+  title: Privacy Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Security Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-014-001, CIC-003-001, CIC-010-001, CIC-018-001, CIC-002-001]
+  traces: [PRIN-010, PRIN-011, PRIN-015, CIC-014-001]
+  certification: [CR-PRI-01, CR-PRI-02, CR-PRI-03, CR-PRI-04]
+  validation: [VR-PRI-01, VR-PRI-02]
+
+purpose: >
+  Make lawful, purpose-bound processing of personal data a runtime property of UCOS: purpose and
+  legal-basis registry, records of processing, data-subject requests (access, portability,
+  rectification, erasure, restriction, objection), residency enforcement, retention by purpose, and
+  privacy impact assessments — across every bounded context.
+
+scope:
+  includes:
+    - Purpose registry with legal bases and data categories (ucos.std seeds; jurisdiction packs refine)
+    - Records of processing activities (RoPA) generated from module manifests and data maps
+    - Data maps: where each personal attribute is stored, cached, projected, exported (from ontology sensitivity + persistence specs)
+    - Data subject requests (DSR) orchestration across contexts with deadlines
+    - Purpose binding enforcement inputs to PDP; restriction flags
+    - Residency rules and cross-border transfer checks
+    - Privacy impact assessments (PIA/DPIA) for new processing (ChangeSet requirement)
+  excludes:
+    - Consent capture per party (DOM-PTY; PRI consumes consent state)
+    - Encryption and key destruction mechanics (DOM-SEC)
+
+responsibilities:
+  - Every personal-data read is purpose-bound and auditable.
+  - DSRs complete within jurisdictional deadlines with evidence.
+  - Residency never violated by storage, replication, or processing (incl. AI providers).
+
+principles: [PRIN-010, PRIN-011, PRIN-015]
+
+boundaries:
+  upstream: [DOM-PTY, DOM-ONT, DOM-SEC, DOM-POL, DOM-GOV, DOM-WFL]
+  downstream: [DOM-POL, DOM-PTY, DOM-SEC, DOM-EVT, DOM-AGT, DOM-ANL, DOM-CMPL]
+
+ownership:
+  boundedContext: security
+  owningRole: Chief Security Architect
+  service: privacy-service
+  schema: ucos_security
+
+capabilities:
+  - {id: PRI-C1, name: Purposes, description: "Register purposes, legal bases, data categories, retention."}
+  - {id: PRI-C2, name: Data map & RoPA, description: "Derive and publish data maps and records of processing."}
+  - {id: PRI-C3, name: DSR, description: "Intake, verify identity, fan out to contexts, assemble, deliver, evidence."}
+  - {id: PRI-C4, name: Enforcement inputs, description: "Purpose binding, restriction flags, residency checks for PDP and pipelines."}
+  - {id: PRI-C5, name: Assessments, description: "PIA/DPIA records gating new processing."}
+
+services:
+  - {name: PrivacyCommandService, kind: application, operations: [RegisterPurpose, OpenDataSubjectRequest, VerifyRequester, CompleteDsrTask, DeliverDsrResult, RestrictProcessing, LiftRestriction, RecordAssessment, ApproveAssessment]}
+  - {name: DataMapBuilder, kind: domain-service, contract: "build() from ontology sensitivity, DOM persistence models, event schemas, search/graph projections, plugin manifests -> data map; diff on every release"}
+  - {name: DsrOrchestrator, kind: process-manager, contract: "Fan out per-context DSR tasks (export/erase/rectify/restrict) via DOM-WFL; deadline timers; evidence per task"}
+  - {name: ResidencyChecker, kind: domain-service, contract: "check(subjectJurisdiction, targetRegion|processor) -> allowed | transfer-mechanism-required | denied, per policy privacy.residency"}
+  - {name: PrivacyQueryService, kind: application, operations: [GetPurpose, ListPurposes, GetDataMap, GetRopa, GetDataSubjectRequest, CheckPurposeBinding, CheckResidency]}
+
+aggregates:
+  - name: Purpose
+    identity: "urn:ucos:<namespace>:purpose:<code>"
+    invariants: ["INV-PRI-1: each purpose has >= 1 legal basis per jurisdiction where used and a retention rule."]
+    fields:
+      - {name: code, type: string}
+      - {name: legalBases, type: "consent|contract|legal-obligation|vital-interest|public-task|legitimate-interest (+ LIA ref)"}
+      - {name: dataCategories, type: "string[]"}
+      - {name: retention, type: "duration | event-based rule"}
+      - {name: processors, type: "PartyUrn[] (incl. AI model providers)"}
+  - name: DataSubjectRequest
+    identity: "urn:ucos:<tenant>:dsr:<ulid>"
+    invariants:
+      - "INV-PRI-2: no fulfilment before requester verification at required assurance."
+      - "INV-PRI-3: erasure honors legal holds and legal-obligation retention (partial erasure with explanation)."
+    fields:
+      - {name: subject, type: PartyUrn}
+      - {name: kind, type: "access|portability|rectification|erasure|restriction|objection"}
+      - {name: jurisdiction, type: string}
+      - {name: receivedAt, type: Instant}
+      - {name: dueAt, type: Instant}
+      - {name: tasks, type: "[{context, action, status, evidenceRef}]"}
+      - {name: status, type: string}
+      - {name: resultRef, type: "Evidence/document ref?"}
+  - name: ProcessingRestriction
+    identity: "urn:ucos:<tenant>:restriction:<ulid>"
+    fields:
+      - {name: subject, type: PartyUrn}
+      - {name: purposes, type: "string[] | all-except-storage"}
+      - {name: reason, type: string}
+      - {name: status, type: "active|lifted"}
+  - name: PrivacyAssessment
+    identity: "urn:ucos:<tenant|platform>:pia:<ulid>"
+    fields:
+      - {name: subjectOfAssessment, type: "ChangeSet | plugin | model | workflow ref"}
+      - {name: risks, type: "[{description, likelihood, impact, mitigation}]"}
+      - {name: outcome, type: "approved|approved-with-conditions|rejected"}
+      - {name: dpoApproval, type: "PartyUrn?"}
+
+entities: []
+
+valueObjects:
+  - {name: DataMapEntry, definition: "{attribute or field, sensitivity, stores[] (context, table/index/topic), projections[], exports[], processors[], purposes[]}"}
+  - {name: PurposeBindingResult, definition: "{allowed, purpose, legalBasis, restrictions[], consentRequired, consentState}"}
+
+commands:
+  - {name: RegisterPurpose, input: "Purpose + changeSetRef", emits: [PurposeRegistered]}
+  - {name: OpenDataSubjectRequest, input: "{subject | identifyingInfo, kind, jurisdiction, channel}", emits: [DataSubjectRequestOpened], note: "dueAt from policy privacy.dsr-deadlines"}
+  - {name: VerifyRequester, input: "{dsrId, method, evidenceRef}", emits: [DataSubjectRequesterVerified]}
+  - {name: CompleteDsrTask, input: "{dsrId, context, action, evidenceRef, outcome (done|partial|not-applicable), explanation?}", emits: [DsrTaskCompleted]}
+  - {name: DeliverDsrResult, input: "{dsrId, deliveryChannel}", emits: [DataSubjectRequestCompleted]}
+  - {name: RestrictProcessing, input: "{subject, purposes, reason}", emits: [ProcessingRestricted]}
+  - {name: LiftRestriction, input: "{restrictionId}", emits: [ProcessingRestrictionLifted]}
+  - {name: RecordAssessment, input: "PrivacyAssessment", emits: [PrivacyAssessmentRecorded]}
+  - {name: ApproveAssessment, input: "{id, outcome, conditions?}", emits: [PrivacyAssessmentDecided]}
+
+queries:
+  - {name: GetPurpose, input: "{code}", output: Purpose}
+  - {name: ListPurposes, input: "{jurisdiction?}", output: "Purpose[]"}
+  - {name: GetDataMap, input: "{context?, attribute?}", output: "DataMapEntry[]"}
+  - {name: GetRopa, input: "{legalEntity, format: json|csv}", output: "RoPA (GDPR Art. 30 structure)"}
+  - {name: GetDataSubjectRequest, input: "{id}", output: DataSubjectRequest}
+  - {name: CheckPurposeBinding, input: "{subject?, purpose, dataCategories, context}", output: PurposeBindingResult, note: "Embedded via PDP bundle data for hot path"}
+  - {name: CheckResidency, input: "{subjectJurisdiction, region | processor}", output: "allowed|transfer-mechanism-required|denied"}
+
+apis:
+  - {style: REST, path: "/v1/privacy/purposes", methods: {POST: RegisterPurpose, GET: ListPurposes}}
+  - {style: REST, path: "/v1/privacy/purposes/{code}", methods: {GET: GetPurpose}}
+  - {style: REST, path: "/v1/privacy/data-map", methods: {GET: GetDataMap}}
+  - {style: REST, path: "/v1/privacy/ropa", methods: {GET: GetRopa}}
+  - {style: REST, path: "/v1/privacy/dsr", methods: {POST: OpenDataSubjectRequest}}
+  - {style: REST, path: "/v1/privacy/dsr/{id}", methods: {GET: GetDataSubjectRequest}}
+  - {style: REST, path: "/v1/privacy/dsr/{id}:verify", methods: {POST: VerifyRequester}}
+  - {style: REST, path: "/v1/privacy/dsr/{id}/tasks:complete", methods: {POST: CompleteDsrTask}}
+  - {style: REST, path: "/v1/privacy/dsr/{id}:deliver", methods: {POST: DeliverDsrResult}}
+  - {style: REST, path: "/v1/privacy/restrictions", methods: {POST: RestrictProcessing}}
+  - {style: REST, path: "/v1/privacy/restrictions/{id}:lift", methods: {POST: LiftRestriction}}
+  - {style: REST, path: "/v1/privacy/assessments", methods: {POST: RecordAssessment}}
+  - {style: REST, path: "/v1/privacy/assessments/{id}:decide", methods: {POST: ApproveAssessment}}
+  - {style: REST, path: "/v1/privacy:check-purpose", methods: {POST: CheckPurposeBinding}}
+  - {style: REST, path: "/v1/privacy:check-residency", methods: {POST: CheckResidency}}
+
+events:
+  - {type: ucos.security.purpose.registered.v1, payload: "{code, legalBases}"}
+  - {type: ucos.security.dsr.opened.v1, payload: "{id, kind, jurisdiction, dueAt}"}
+  - {type: ucos.security.dsr.requester-verified.v1, payload: "{id}"}
+  - {type: ucos.security.dsr.task-completed.v1, payload: "{id, context, action, outcome}"}
+  - {type: ucos.security.dsr.completed.v1, payload: "{id, completedAt, partial}"}
+  - {type: ucos.security.dsr.task-requested.v1, payload: "{id, context, action, subject}", note: "Command-like integration event consumed by each context's DSR handler"}
+  - {type: ucos.security.restriction.applied.v1, payload: "{id, subject, purposes}", consumers: [policy bundle builder]}
+  - {type: ucos.security.restriction.lifted.v1, payload: "{id}"}
+  - {type: ucos.security.assessment.recorded.v1, payload: "{id, subjectOfAssessment}"}
+  - {type: ucos.security.assessment.decided.v1, payload: "{id, outcome}"}
+
+stateMachines:
+  - name: DsrLifecycle
+    initial: received
+    states: [received, verifying, in-progress, assembling, delivered, rejected]
+    terminal: [delivered, rejected]
+    transitions:
+      - {from: received, to: verifying, kind: automatic}
+      - {from: verifying, to: in-progress, command: VerifyRequester}
+      - {from: verifying, to: rejected, trigger: "verification failed or timed out (timer)"}
+      - {from: in-progress, to: assembling, trigger: "all tasks completed"}
+      - {from: assembling, to: delivered, command: DeliverDsrResult}
+
+rules:
+  - {id: RUL-PRI-1, statement: "Every API call reading personal fields must carry UCOS-Purpose; PDP denies when purpose is unregistered, legal basis missing for the subject's jurisdiction, consent absent where required, or a restriction applies."}
+  - {id: RUL-PRI-2, statement: "Erasure = crypto-shred subject key (DOM-SEC) + tombstones + removal from search/graph/cache/exports; legally retained data is re-encrypted under a retention key accessible only to the legal-obligation purpose."}
+  - {id: RUL-PRI-3, statement: "New processing (new purpose, new processor, AI model receiving personal data) requires an approved PrivacyAssessment linked to the ChangeSet."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:privacy.dsr-deadlines", purpose: "Deadlines and extensions per jurisdiction"}
+  - {urn: "urn:ucos:ucos.std:policy:privacy.residency", purpose: "Allowed regions and transfer mechanisms per subject jurisdiction"}
+  - {urn: "urn:ucos:ucos.std:policy:privacy.purpose-binding", purpose: "Enforcement settings for purpose binding (strict/monitor)"}
+
+decisions:
+  - {id: DEC-PRI-1, question: "May personal data category D of subject S be processed for purpose P here?", algorithm: "CheckPurposeBinding + CheckResidency; DecisionRecord on deny"}
+  - {id: DEC-PRI-2, question: "Which data must be erased vs retained for request R?", algorithm: "Per data map entry: legal-obligation retention or hold -> retain-encrypted; else erase"}
+
+security:
+  permissions: [privacy.read, privacy.purpose.manage, privacy.dsr.manage, privacy.dsr.task.complete, privacy.restriction.manage, privacy.assessment.manage, privacy.assessment.approve]
+  dataClassification: "DSR artifacts contain personal data -> encrypted, access-restricted, deleted after delivery + policy retention."
+  threats: ["DSR fraud (impersonation to exfiltrate data) -> verification at policy assurance", "Shadow processing -> data map diff on every release blocks unknown personal data stores"]
+
+governance:
+  changeControl: "Purposes, residency, and DSR deadlines via ChangeSet with DPO approval."
+  evidence: "Each DSR task completion and delivery captured as Evidence; RoPA versions sealed."
+
+runtimeBehavior:
+  consistency: "Strong for DSR state; purpose/restriction facts in PDP bundles within 10s."
+  slo: {CheckPurposeBinding_embedded_p99_ms: 1, dsr_on_time_rate: ">= 99%", availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_security (separate tables)
+  tables:
+    - {name: purposes, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: dsr_requests, columns: "tenant_id, id, subject, kind, jurisdiction, received_at, due_at, status, body_enc bytea", pk: "(tenant_id, id)", indexes: ["(tenant_id, status, due_at)"]}
+    - {name: dsr_tasks, columns: "tenant_id, dsr_id, context, action, status, evidence_ref", pk: "(tenant_id, dsr_id, context, action)"}
+    - {name: restrictions, columns: "tenant_id, id, subject, purposes text[], status", pk: "(tenant_id, id)", indexes: ["(tenant_id, subject) WHERE status='active'"]}
+    - {name: assessments, columns: "scope text, id, body jsonb, outcome", pk: "(scope, id)"}
+    - {name: data_map_versions, columns: "version text, body jsonb, generated_at", pk: "(version)", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "DSR records 3 years (proof of compliance); payloads deleted 30 days after delivery."
+
+extensionModel:
+  extensionPoints: ["Jurisdiction packs (purposes, legal bases, deadlines, residency)", "Identity verification plugins for DSR", "Consent management platform connectors"]
+  forbidden: ["Personal data stores not declared in persistence models (data map diff fails release)"]
+
+certificationCriteria:
+  - {id: CR-PRI-01, rule: "End-to-end erasure DSR across all contexts leaves zero plaintext (CR-003-001-05) and evidence for every task.", level: L1}
+  - {id: CR-PRI-02, rule: "Access/portability export contains every personal data map entry for the subject (completeness check against data map).", level: L1}
+  - {id: CR-PRI-03, rule: "Calls without UCOS-Purpose or with unregistered purpose reading personal fields are denied in all contexts.", level: L1}
+  - {id: CR-PRI-04, rule: "Release pipeline fails when data map diff shows an undeclared personal data store.", level: L1}
+validationRules:
+  - {id: VR-PRI-01, rule: "Every purpose referenced (consents, policies, plugin manifests) is registered (pack purposes registry)."}
+  - {id: VR-PRI-02, rule: "Every attribute with sensitivity >= personal appears in the data map."}

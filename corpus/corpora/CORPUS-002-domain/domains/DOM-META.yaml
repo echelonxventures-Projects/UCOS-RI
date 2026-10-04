@@ -1,0 +1,193 @@
+header:
+  id: DOM-META
+  title: Metadata Registry Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-029-001, CIC-000-002, CIC-015-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-004, PRIN-013, CIC-029-001]
+  certification: [CR-META-01, CR-META-02, CR-META-03]
+  validation: [VR-META-01, VR-META-02]
+
+purpose: >
+  Operate the registries of shared identifiers (CIC-029-001 §1) and the Type Pack lifecycle —
+  packaging, signing, installing, upgrading, and uninstalling metadata bundles per tenant — so every
+  metadata definition in UCOS has one registered key and one governed path into a tenant.
+
+scope:
+  includes:
+    - Registry service for kinds, error codes, reason codes, purposes (seed), meters, units, ports, fact kinds index, effect kinds index
+    - Pack catalog (available packs, versions, signatures, certification status)
+    - Pack installations per tenant (install, upgrade, uninstall) executed as ChangeSets
+    - Metadata search across all definition kinds (unified metadata index)
+  excludes:
+    - Owning the definitions themselves (each kind's owning domain: ONT, CTX, LFC, POL, RUL, TXO, EVT …)
+    - Plugin runtime activation (DOM-EXT)
+
+responsibilities:
+  - Uniqueness of every registry key (CR-029-001-04).
+  - Atomic, governed pack installation in dependency order with rollback.
+  - Unified discovery of metadata for authors and tools.
+
+principles: [PRIN-001, PRIN-004, PRIN-013]
+
+boundaries:
+  upstream: [DOM-GOV, DOM-CRT, DOM-ORG]
+  downstream: [DOM-ONT, DOM-CTX, DOM-LFC, DOM-POL, DOM-RUL, DOM-TXO, DOM-EVT, DOM-PRI, DOM-ENT, DOM-EXT]
+
+ownership:
+  boundedContext: ontology
+  owningRole: Chief Data Architect
+  service: metadata-registry-service
+  schema: ucos_ontology
+
+capabilities:
+  - {id: META-C1, name: Registries, description: "Register and serve shared keys with uniqueness."}
+  - {id: META-C2, name: Pack catalog, description: "Publish signed packs with certification records."}
+  - {id: META-C3, name: Install/upgrade, description: "Tenant pack installation as ChangeSet; dependency resolution; migrations."}
+  - {id: META-C4, name: Uninstall, description: "Remove pack definitions when unreferenced."}
+  - {id: META-C5, name: Discover, description: "Search all metadata definitions across kinds."}
+
+services:
+  - {name: RegistryService, kind: application, operations: [RegisterKey, DeprecateKey, LookupKey, ListRegistry]}
+  - {name: PackService, kind: application, operations: [PublishPack, InstallPack, UpgradePack, UninstallPack, GetPack, ListPacks, GetInstallation]}
+  - {name: DependencyResolver, kind: domain-service, contract: "resolve(packId@range, installed) -> install plan (topological, semver-compatible) | conflict report"}
+  - {name: MetadataSearch, kind: application, operations: [SearchMetadata]}
+
+aggregates:
+  - name: RegistryEntry
+    identity: "urn:ucos:<namespace>:<registry>:<key>"
+    invariants: ["INV-META-1: (registry, key) unique across platform and installed packs/plugins for a tenant; keys follow the registry's grammar."]
+    fields:
+      - {name: registry, type: "kind|error-code|reason-code|purpose|meter|unit|port|fact-kind|effect-kind|evidence-kind|decision-type|role"}
+      - {name: key, type: string}
+      - {name: definition, type: json}
+      - {name: contributedBy, type: "pack|plugin|kernel"}
+      - {name: status, type: "active|deprecated"}
+  - name: Pack
+    identity: "urn:ucos:global:pack:<id>@<version>"
+    invariants:
+      - "INV-META-2: pack digest signed by publisher; CertificationRecord L1+ for the digest before listing."
+      - "INV-META-3: namespace verified and owned by publisher (DOM-ORG)."
+    fields:
+      - {name: id, type: string}
+      - {name: version, type: SemVer}
+      - {name: namespace, type: string}
+      - {name: dependencies, type: "[{id, range}]"}
+      - {name: digest, type: Sha256}
+      - {name: signature, type: "Sigstore bundle"}
+      - {name: certificationRef, type: InstanceUrn}
+      - {name: realizes, type: "map<DomainId, TypeName[]>"}
+  - name: PackInstallation
+    identity: "urn:ucos:<tenant>:pack-installation:<packId>"
+    invariants: ["INV-META-4: installed version satisfies all dependents' ranges; uninstall only when no live instance references pack definitions."]
+    fields:
+      - {name: packId, type: string}
+      - {name: installedVersion, type: SemVer}
+      - {name: changeSetRef, type: InstanceUrn}
+      - {name: status, type: "installing|installed|upgrading|uninstalling|failed|uninstalled"}
+
+entities: []
+
+valueObjects:
+  - {name: InstallPlan, definition: "[{packId, version, items: definition counts by kind, migrations[]}] in topological order"}
+
+commands:
+  - {name: RegisterKey, input: "{registry, key, definition, contributedBy}", emits: [RegistryKeyRegistered], preconditions: ["INV-META-1"]}
+  - {name: DeprecateKey, input: "{registry, key, replacement?}", emits: [RegistryKeyDeprecated]}
+  - {name: PublishPack, input: "{bundle (OCI artifact ref), signature}", emits: [PackPublished], preconditions: ["INV-META-2,3", "static pack checks pass (CR-029-001-01)"]}
+  - {name: InstallPack, input: "{packId, versionRange}", emits: [PackInstallationStarted, PackInstalled, PackInstallationFailed], note: "Creates ChangeSet (CIC-015-001) with all definitions; apply order per CIC-029-001 §3"}
+  - {name: UpgradePack, input: "{packId, targetVersion}", emits: [PackUpgradeStarted, PackUpgraded], note: "MAJOR requires registered migrations (CIC-026-001)"}
+  - {name: UninstallPack, input: "{packId}", emits: [PackUninstalled], preconditions: ["INV-META-4"]}
+
+queries:
+  - {name: LookupKey, input: "{registry, key}", output: RegistryEntry}
+  - {name: ListRegistry, input: "{registry, cursor, limit}", output: "page"}
+  - {name: GetPack, input: "{id, version}", output: Pack}
+  - {name: ListPacks, input: "{namespace?, realizes?, cursor}", output: "page"}
+  - {name: GetInstallation, input: "{packId}", output: PackInstallation}
+  - {name: SearchMetadata, input: "{text, kinds[], namespace?, locale}", output: "[{urn, kind, label, state}]"}
+
+apis:
+  - {style: REST, path: "/v1/registry/{registry}", methods: {POST: RegisterKey, GET: ListRegistry}}
+  - {style: REST, path: "/v1/registry/{registry}/{key}", methods: {GET: LookupKey}}
+  - {style: REST, path: "/v1/registry/{registry}/{key}:deprecate", methods: {POST: DeprecateKey}}
+  - {style: REST, path: "/v1/packs", methods: {POST: PublishPack, GET: ListPacks}}
+  - {style: REST, path: "/v1/packs/{id}/versions/{version}", methods: {GET: GetPack}}
+  - {style: REST, path: "/v1/pack-installations", methods: {POST: InstallPack}}
+  - {style: REST, path: "/v1/pack-installations/{packId}", methods: {GET: GetInstallation, DELETE: UninstallPack}}
+  - {style: REST, path: "/v1/pack-installations/{packId}:upgrade", methods: {POST: UpgradePack}}
+  - {style: REST, path: "/v1/metadata:search", methods: {GET: SearchMetadata}}
+
+events:
+  - {type: ucos.ontology.registry.key-registered.v1, payload: "{registry, key, contributedBy}"}
+  - {type: ucos.ontology.registry.key-deprecated.v1, payload: "{registry, key, replacement}"}
+  - {type: ucos.ontology.pack.published.v1, payload: "{id, version, digest, namespace}"}
+  - {type: ucos.ontology.pack.installation-started.v1, payload: "{packId, version, changeSetRef}"}
+  - {type: ucos.ontology.pack.installed.v1, payload: "{packId, version}"}
+  - {type: ucos.ontology.pack.installation-failed.v1, payload: "{packId, reason}"}
+  - {type: ucos.ontology.pack.upgrade-started.v1, payload: "{packId, from, to}"}
+  - {type: ucos.ontology.pack.upgraded.v1, payload: "{packId, version}"}
+  - {type: ucos.ontology.pack.uninstalled.v1, payload: "{packId}"}
+
+stateMachines:
+  - name: PackInstallationLifecycle
+    initial: installing
+    states: [installing, installed, upgrading, uninstalling, failed, uninstalled]
+    terminal: [uninstalled]
+    transitions:
+      - {from: installing, to: installed, trigger: "ChangeSet applied"}
+      - {from: installing, to: failed, trigger: "ChangeSet apply failed and rolled back"}
+      - {from: installed, to: upgrading, command: UpgradePack}
+      - {from: upgrading, to: installed, trigger: "upgrade ChangeSet applied"}
+      - {from: upgrading, to: failed, trigger: "upgrade failed (previous version remains active)"}
+      - {from: failed, to: installing, command: InstallPack}
+      - {from: installed, to: uninstalling, command: UninstallPack}
+      - {from: uninstalling, to: uninstalled, trigger: "all definitions retired"}
+
+rules:
+  - {id: RUL-META-1, statement: "Registry keys contributed by a pack are owned by that pack; another pack contributing the same key fails installation (CR-029-001-04)."}
+  - {id: RUL-META-2, statement: "ucos.std is installed in every tenant at provisioning and cannot be uninstalled."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:packs.install", purpose: "Who may install/upgrade/uninstall packs per tenant and which publishers are allowed"}
+
+decisions:
+  - {id: DEC-META-1, question: "Can pack P@v be installed in tenant T?", algorithm: "DependencyResolver + registry uniqueness + certification + policy packs.install"}
+
+security:
+  permissions: [registry.read, registry.write, packs.publish, packs.install, packs.uninstall, metadata.search]
+  dataClassification: "Public (std packs) to confidential (tenant-private packs)."
+  threats: ["Malicious pack (e.g. policy loosening) -> signatures, certification, ChangeSet approval with impact analysis", "Dependency confusion -> namespace verification + signed digests"]
+
+governance:
+  changeControl: "Installations and upgrades are ChangeSets (CIC-015-001)."
+  evidence: "Pack signature verification and certification refs attached."
+
+runtimeBehavior:
+  consistency: "Strong for registries; installations transactional via ChangeSet saga."
+  slo: {LookupKey_p99_ms: 5, InstallPack_ucos_std_p95_s: 120, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_ontology (separate tables) + OCI registry for pack bundles
+  tables:
+    - {name: registry_entries, columns: "tenant_id, registry, key, definition jsonb, contributed_by, status", pk: "(tenant_id, registry, key)"}
+    - {name: packs, columns: "id, version, namespace, digest, signature jsonb, certification_ref, body jsonb", pk: "(id, version)", global: true}
+    - {name: pack_installations, columns: "tenant_id, pack_id, installed_version, change_set_ref, status", pk: "(tenant_id, pack_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Small; hash(tenant_id) 16."
+  retention: "Indefinite."
+
+extensionModel:
+  extensionPoints: ["New registries for new kernel-adjacent concepts (constitutional amendment for kernel kinds)", "Private pack catalogs per publisher"]
+  forbidden: ["Unregistered keys in published metadata"]
+
+certificationCriteria:
+  - {id: CR-META-01, rule: "Passes CIC-029-001 CR-029-001-01..04.", level: L1}
+  - {id: CR-META-02, rule: "Failed install at any definition rolls back all previously applied definitions of that installation.", level: L1}
+  - {id: CR-META-03, rule: "Installing ucos.std into an empty tenant completes within 120s p95.", level: L2}
+validationRules:
+  - {id: VR-META-01, rule: "Every registry named in CIC-029-001 §1 has a populated seed in ucos.std or kernel."}
+  - {id: VR-META-02, rule: "Every error code referenced in DOM specs follows E-<DOM>-<NAME> and maps to its domain code."}

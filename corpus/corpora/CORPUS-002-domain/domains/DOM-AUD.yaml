@@ -1,0 +1,156 @@
+header:
+  id: DOM-AUD
+  title: Audit Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-015-001, CIC-022-001, CIC-003-001, CIC-002-001]
+  traces: [PRIN-011, PRIN-008, PRIN-010, CIC-015-001]
+  certification: [CR-AUD-01, CR-AUD-02, CR-AUD-03]
+  validation: [VR-AUD-01, VR-AUD-02]
+
+purpose: >
+  Record who did what, on whose behalf, to which resource, when, where, why, and with what outcome —
+  for every command, authorization denial, personal-data read, governance action, break-glass, and
+  configuration change — with guaranteed delivery, hourly sealing into the evidence ledger, and
+  searchable, access-controlled retrieval (CIC-015-001 §7).
+
+scope:
+  includes:
+    - AuditRecord ingestion pipeline (separate from telemetry; guaranteed delivery)
+    - Hourly segment sealing (digest into DOM-EVD ledger)
+    - Audit search, export, and tenant-facing audit logs
+    - Alerting hooks for sensitive actions (to DOM-SEC detections)
+  excludes:
+    - Telemetry (DOM-OBS), decision records (DOM-DEC), evidence storage (DOM-EVD)
+
+responsibilities:
+  - Completeness: exactly one audit record per auditable operation (CR-015-001-05).
+  - Integrity: sealed segments verifiable.
+  - Confidentiality: personal data in audit minimized; access controlled and itself audited.
+
+principles: [PRIN-008, PRIN-010, PRIN-011]
+
+boundaries:
+  upstream: [DOM-IDN, DOM-POL, DOM-GOV, DOM-SEC, DOM-PRI, DOM-RTM]
+  downstream: [DOM-EVD, DOM-SEC, DOM-CMPL, DOM-FCT]
+
+ownership:
+  boundedContext: governance
+  owningRole: Chief Governance Architect
+  service: audit-service
+  schema: ucos_governance
+
+capabilities:
+  - {id: AUD-C1, name: Ingest, description: "Durable intake from every service's audit emitter."}
+  - {id: AUD-C2, name: Seal, description: "Hourly segments sealed into Evidence ledger."}
+  - {id: AUD-C3, name: Search, description: "Query by actor, resource, action, time, correlation."}
+  - {id: AUD-C4, name: Export, description: "Tenant exports and SIEM streaming."}
+
+services:
+  - {name: AuditIngestor, kind: application, operations: [IngestAuditRecords], contract: "At-least-once with dedupe on recordId; durable before ack (audit emitter in ucos-observability buffers locally on disk when unavailable)"}
+  - {name: SegmentSealer, kind: application, operations: [SealSegment], contract: "Every hour per tenant: Merkle root over records -> CaptureEvidence(kind log-segment)"}
+  - {name: AuditQueryService, kind: application, operations: [SearchAudit, GetAuditRecord, ExportAudit, VerifySegment]}
+
+aggregates:
+  - name: AuditRecord
+    identity: "urn:ucos:<tenant>:audit:<ulid>"
+    invariants: ["INV-AUD-1: immutable; required fields who, what, when, where, outcome, correlationId; personal values never included (references and hashes only)."]
+    fields:
+      - {name: who, type: "{principal, kind, identity, onBehalfOf?, actChain?}"}
+      - {name: what, type: "{operation, resourceKind, resourceRef, changedFields[]}"}
+      - {name: when, type: Instant}
+      - {name: where, type: "{region, cell, service, clientId, ipHash}"}
+      - {name: why, type: "{purpose?, changeSetRef?, ticket?, reason?}"}
+      - {name: outcome, type: "success|denied|failed"}
+      - {name: correlationId, type: ULID}
+  - name: AuditSegment
+    identity: "urn:ucos:<tenant>:audit-segment:<hour>"
+    fields:
+      - {name: from, type: Instant}
+      - {name: to, type: Instant}
+      - {name: count, type: long}
+      - {name: merkleRoot, type: Sha256}
+      - {name: evidenceRef, type: InstanceUrn}
+
+entities: []
+
+valueObjects:
+  - {name: AuditQuery, definition: "{actor?, resource?, operation?, outcome?, from, to, correlationId?, cursor}"}
+
+commands:
+  - {name: IngestAuditRecords, input: "AuditRecord[] <= 1000", emits: []}
+  - {name: SealSegment, input: "{tenant, hour}", emits: [AuditSegmentSealed]}
+  - {name: ExportAudit, input: "{query, format: jsonl|parquet, destination}", emits: [AuditExportCompleted], async: true}
+
+queries:
+  - {name: SearchAudit, input: AuditQuery, output: "page of AuditRecord"}
+  - {name: GetAuditRecord, input: "{id}", output: AuditRecord}
+  - {name: VerifySegment, input: "{tenant, hour}", output: "{recomputedRoot, sealedRoot, match, evidenceVerification}"}
+
+apis:
+  - {style: gRPC, service: "ucos.audit.v1.Ingest (internal, mTLS)", rpcs: [IngestAuditRecords]}
+  - {style: REST, path: "/v1/audit/records", methods: {GET: SearchAudit}}
+  - {style: REST, path: "/v1/audit/records/{id}", methods: {GET: GetAuditRecord}}
+  - {style: REST, path: "/v1/audit/exports", methods: {POST: ExportAudit}}
+  - {style: REST, path: "/v1/audit/segments/{hour}:verify", methods: {GET: VerifySegment}}
+  - {style: REST, path: "/ops/v1/audit/segments/{tenant}/{hour}:seal", methods: {POST: SealSegment}}
+
+events:
+  - {type: ucos.governance.audit-segment.sealed.v1, payload: "{tenant, hour, count, merkleRoot, evidenceRef}"}
+  - {type: ucos.governance.audit-export.completed.v1, payload: "{exportId, records, destination}"}
+
+stateMachines:
+  - name: SegmentLifecycle
+    initial: open
+    states: [open, sealing, sealed]
+    terminal: [sealed]
+    transitions:
+      - {from: open, to: sealing, trigger: "hour boundary + 5 min grace (late arrivals)"}
+      - {from: sealing, to: sealed, command: SealSegment}
+
+rules:
+  - {id: RUL-AUD-1, statement: "Records arriving after their segment is sealed go to a late-arrival segment for that hour, sealed separately and linked."}
+  - {id: RUL-AUD-2, statement: "Reading audit records is itself audited; tenant users see only their tenant's records with PDP field redaction."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:audit.retention", purpose: "Hot and archive retention per record category"}
+
+decisions:
+  - {id: DEC-AUD-1, question: "Is audit segment H intact?", algorithm: "VerifySegment: recompute Merkle root and verify Evidence inclusion"}
+
+security:
+  permissions: [audit.read, audit.read.platform, audit.export, audit.seal]
+  dataClassification: "Confidential; personal data excluded by design (hashes/refs)."
+  threats: ["Audit suppression -> emitter disk buffer, ingestion lag alerts, completeness tests", "Tampering -> sealing + ledger anchoring"]
+
+governance:
+  changeControl: "Retention and categories via ChangeSet."
+  evidence: "Sealed segments are Evidence."
+
+runtimeBehavior:
+  consistency: "At-least-once ingestion, dedupe by recordId; searchable within 60s."
+  slo: {ingestion_lag_p99_s: 60, SearchAudit_p95_s: 2, availability: "99.99% ingestion"}
+
+persistenceModel:
+  store: "Append-only store (PostgreSQL partitioned or columnar via AnalyticsStorePort) + archive Parquet"
+  tables:
+    - {name: audit_records, columns: "tenant_id, id, at, principal, operation, resource_ref, outcome, correlation_id, body jsonb", pk: "(tenant_id, id, at)", indexes: ["(tenant_id, resource_ref, at)", "(tenant_id, principal, at)", "(tenant_id, correlation_id)"]}
+    - {name: audit_segments, columns: "tenant_id, hour, count, merkle_root, evidence_ref, late bool", pk: "(tenant_id, hour, late)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "audit_records range(at) daily x hash(tenant_id) 16."
+  retention: "Hot 24 months, archive per audit.retention (default 7 years)."
+
+extensionModel:
+  extensionPoints: ["SIEM exporters", "Additional audit categories"]
+  forbidden: ["Deleting audit records (except crypto-shred of referenced personal data, which leaves hashes)"]
+
+certificationCriteria:
+  - {id: CR-AUD-01, rule: "Passes CR-015-001-05 completeness test.", level: L1}
+  - {id: CR-AUD-02, rule: "Tamper test: modified record detected by VerifySegment.", level: L1}
+  - {id: CR-AUD-03, rule: "DLP scan finds no personal values in audit records.", level: L1}
+validationRules:
+  - {id: VR-AUD-01, rule: "Every command in DOM specs is covered by the audit emitter (static route scan)."}
+  - {id: VR-AUD-02, rule: "Every audit category has a retention entry."}

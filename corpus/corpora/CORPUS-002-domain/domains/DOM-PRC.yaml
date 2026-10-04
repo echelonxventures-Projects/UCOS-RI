@@ -1,0 +1,222 @@
+header:
+  id: DOM-PRC
+  title: Pricing Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-004, CIC-011-001, CIC-008-001, CIC-009-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-006, PRIN-016, PRIN-020, PRIN-021, CIC-011-004]
+  certification: [CR-PRC-01, CR-PRC-02, CR-PRC-03, CR-PRC-04]
+  validation: [VR-PRC-01, VR-PRC-02]
+
+purpose: >
+  Own every price fact and compute deterministic, explainable, reproducible prices for any commercial
+  object in any context — one-time, recurring, and usage — through the Pricing Resolution Algorithm.
+
+scope:
+  includes:
+    - PriceLists and PriceEntries (contextual price facts)
+    - Price models (flat, per-unit, tiered, volume, stair-step, percentage, formula, plugin)
+    - Price adjustment rules and phases (with DOM-RUL as rule engine)
+    - Pricing snapshots for replay
+    - Price simulation and what-if
+  excludes:
+    - Tax determination (DOM-TAX; invoked in TAX phase)
+    - Promotion budgets and campaign targeting (DOM-CMP), offers (DOM-OFR)
+    - Invoicing and charging (DOM-BIL), contract negotiation (DOM-CTR)
+    - FX rates (DOM-ACC)
+
+responsibilities:
+  - Single source of truth for price facts.
+  - Deterministic pricing reproducible from pricingSnapshotId.
+  - Explainable results (component-level trace).
+
+principles: [PRIN-001, PRIN-005, PRIN-006, PRIN-016, PRIN-020, PRIN-021]
+
+boundaries:
+  upstream: [DOM-COB, DOM-CTX, DOM-RUL, DOM-POL, DOM-CTR, DOM-CMP, DOM-TAX, DOM-ACC]
+  downstream: [DOM-CAT, DOM-OFR, DOM-QTE, DOM-ORD, DOM-BIL, DOM-SRC, DOM-PRF]
+
+ownership:
+  boundedContext: pricing
+  owningRole: Chief Product Architect
+  service: pricing-service
+  schema: ucos_pricing
+
+capabilities:
+  - {id: PRC-C1, name: Manage price lists, description: "Create, version, schedule, approve, and publish price lists and entries."}
+  - {id: PRC-C2, name: Price, description: "Compute prices for a basket in context (CIC-011-004)."}
+  - {id: PRC-C3, name: Explain, description: "Return component-level trace."}
+  - {id: PRC-C4, name: Replay, description: "Re-price against a stored pricingSnapshotId."}
+  - {id: PRC-C5, name: Simulate, description: "What-if pricing against draft price lists/adjustments without reservations."}
+  - {id: PRC-C6, name: Bulk price change, description: "Formula-based mass update producing a new price list version (e.g. +3.5% for territory X)."}
+
+services:
+  - {name: PriceListCommandService, kind: application, operations: [CreatePriceList, AddPriceEntries, UpdatePriceEntry, EndPriceEntry, SubmitPriceList, ApprovePriceList, PublishPriceList, ApplyBulkPriceChange]}
+  - {name: PricingEngine, kind: domain-service, contract: "CIC-011-004 Price(); pure except budget reservation port"}
+  - {name: PriceModelEvaluator, kind: domain-service, contract: "evaluate(priceModel, line, ctx) -> PriceComponent[]; plugin models via PriceModelPort"}
+  - {name: SnapshotService, kind: domain-service, contract: "snapshotVersion(tenant) -> monotonically increasing id; materialize(snapshotId) for replay"}
+  - {name: PricingQueryService, kind: application, operations: [Price, ReplayPrice, GetPriceList, FindPriceEntries, ExplainPrice]}
+
+aggregates:
+  - name: PriceList
+    identity: "urn:ucos:<tenant>:pricelist:<ulid>"
+    invariants:
+      - "INV-PRC-1: all entries share the list currency unless list.multiCurrency=true, in which case each entry declares currency."
+      - "INV-PRC-2: no two entries for the same (subject, chargeType, effective scope digest) overlap in validity (exclusion constraint)."
+      - "INV-PRC-3: entries of a published list are immutable; changes create a new list version or end-dated successor entries."
+      - "INV-PRC-4: tiered models have strictly increasing upTo and a final unbounded tier."
+      - "INV-PRC-5: formula models compile and their CEL cost estimate <= 5000."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: code, type: string}
+      - {name: label, type: LocalizedText}
+      - {name: currency, type: CurrencyCode}
+      - {name: multiCurrency, type: boolean}
+      - {name: scope, type: ApplicabilityScope, description: "Default scope applied (ANDed) to every entry"}
+      - {name: priority, type: int}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: basedOn, type: "InstanceUrn?", description: "Derived list: entries computed from base list by formula"}
+      - {name: derivation, type: "CEL?", description: "e.g. base * 1.035 rounded per policy"}
+      - {name: lifecycleState, type: string}
+      - {name: version, type: int}
+      - {name: revision, type: long}
+
+entities:
+  - name: PriceEntry
+    within: PriceList
+    fields: [entryId, "subject (objectRef|typeRef|selector)", chargeType, priceModel, "scope (ANDed with list scope)", validFrom, validTo, priority, "currency (if multiCurrency)", "recurrence {period, alignment, prorationPolicyRef}?", "meterRef?"]
+
+valueObjects:
+  - {name: PriceModel, definition: "CIC-011-004 §2 tagged union"}
+  - {name: Money, definition: "{amountMinor: integer, currency, scale}"}
+  - {name: CurrencyCode, definition: "ISO-4217 alpha-3 or registered non-ISO code (loyalty points, tokens) from DOM-ACC currency registry"}
+  - {name: PriceComponent, definition: "CIC-011-004 §1"}
+  - {name: PricingSnapshotId, definition: "sha256(tenant, snapshotVersion, contextDigest, requestDigest) hex"}
+  - {name: ChargeType, definition: "one-time|recurring|usage (extensible by registry)"}
+
+commands:
+  - {name: CreatePriceList, input: "{code, label, currency, multiCurrency, scope, priority, validFrom, validTo, basedOn?, derivation?}", emits: [PriceListCreated]}
+  - {name: AddPriceEntries, input: "{listId, expectedRevision, entries[] <= 10000}", emits: [PriceEntriesAdded], preconditions: ["list state draft|in-review", "INV-PRC-2,4,5"]}
+  - {name: UpdatePriceEntry, input: "{listId, entryId, expectedRevision, patch}", emits: [PriceEntryUpdated], preconditions: ["list not published"]}
+  - {name: EndPriceEntry, input: "{listId, entryId, validTo}", emits: [PriceEntryEnded], note: "Allowed on published lists (end-dating only)"}
+  - {name: SubmitPriceList, input: "{listId}", emits: [PriceListSubmitted]}
+  - {name: ApprovePriceList, input: "{listId, decision, comment}", emits: [PriceListApproved, PriceListRejected], preconditions: ["approver != author (SoD)", "PDP pricing.approve with margin impact from DOM-PRF when available"]}
+  - {name: PublishPriceList, input: "{listId, effectiveAt?}", emits: [PriceListPublished]}
+  - {name: ApplyBulkPriceChange, input: "{sourceListId, selector: CEL, formula: CEL, roundingPolicyRef?, targetValidFrom}", emits: [PriceListCreated, PriceEntriesAdded], async: true}
+
+queries:
+  - {name: Price, input: PriceRequest, output: PriceResult, consistency: "snapshot-consistent"}
+  - {name: ReplayPrice, input: "{pricingSnapshotId, request}", output: PriceResult}
+  - {name: ExplainPrice, input: "PriceRequest", output: "PriceResult with full trace"}
+  - {name: GetPriceList, input: "{listId, version?}", output: PriceList}
+  - {name: FindPriceEntries, input: "{subject?, listId?, context?, asOf?, cursor, limit}", output: "page of PriceEntry"}
+  - {name: FindPriceLists, input: "{state?, currency?, scope filter?, cursor, limit}", output: "page of PriceList"}
+
+apis:
+  - {style: REST, path: "/v1/pricing:price", methods: {POST: Price}, note: "POST used for basket body; side-effect free unless reservation requested; Idempotency-Key required when reserve=true"}
+  - {style: REST, path: "/v1/pricing:replay", methods: {POST: ReplayPrice}}
+  - {style: REST, path: "/v1/pricing:explain", methods: {POST: ExplainPrice}}
+  - {style: REST, path: "/v1/pricing/price-lists", methods: {POST: CreatePriceList, GET: FindPriceLists}}
+  - {style: REST, path: "/v1/pricing/price-lists/{id}", methods: {GET: GetPriceList}}
+  - {style: REST, path: "/v1/pricing/price-lists/{id}/entries", methods: {POST: AddPriceEntries, GET: FindPriceEntries}}
+  - {style: REST, path: "/v1/pricing/price-lists/{id}/entries/{entryId}", methods: {PATCH: UpdatePriceEntry}}
+  - {style: REST, path: "/v1/pricing/price-lists/{id}/entries/{entryId}:end", methods: {POST: EndPriceEntry}}
+  - {style: REST, path: "/v1/pricing/price-lists/{id}:submit", methods: {POST: SubmitPriceList}}
+  - {style: REST, path: "/v1/pricing/price-lists/{id}:approve", methods: {POST: ApprovePriceList}}
+  - {style: REST, path: "/v1/pricing/price-lists/{id}:publish", methods: {POST: PublishPriceList}}
+  - {style: REST, path: "/v1/pricing/price-lists/{id}:bulk-change", methods: {POST: ApplyBulkPriceChange}}
+  - {style: gRPC, service: "ucos.pricing.v1.PricingService", rpcs: [Price, ReplayPrice]}
+
+events:
+  - {type: ucos.pricing.price-list.created.v1, payload: "{id, code, currency, scope, validFrom, validTo}"}
+  - {type: ucos.pricing.price-list.entries-added.v1, payload: "{id, revision, entries[] (summary), ucosversion per subject}"}
+  - {type: ucos.pricing.price-list.entry-updated.v1, payload: "{id, entryId, patch}"}
+  - {type: ucos.pricing.price-list.entry-ended.v1, payload: "{id, entryId, subject, validTo}"}
+  - {type: ucos.pricing.price-list.submitted.v1, payload: "{id}"}
+  - {type: ucos.pricing.price-list.approved.v1, payload: "{id, approver}"}
+  - {type: ucos.pricing.price-list.rejected.v1, payload: "{id, approver, comment}"}
+  - {type: ucos.pricing.price-list.published.v1, payload: "{id, version, effectiveAt, subjectsAffected}", consumers: [catalog, search, quote, billing, cache invalidation]}
+
+stateMachines:
+  - name: PriceListLifecycle
+    initial: draft
+    states: [draft, in-review, approved, scheduled, published, superseded, retired]
+    terminal: [retired]
+    transitions:
+      - {from: draft, to: in-review, command: SubmitPriceList}
+      - {from: in-review, to: draft, command: ApprovePriceList, guard: "decision=reject"}
+      - {from: in-review, to: approved, command: ApprovePriceList, guard: "decision=approve and approvals >= pricing.approval policy"}
+      - {from: approved, to: scheduled, command: PublishPriceList, guard: "effectiveAt > now"}
+      - {from: approved, to: published, command: PublishPriceList, guard: "effectiveAt <= now"}
+      - {from: scheduled, to: published, trigger: "effectiveAt reached (scheduler emits published event)"}
+      - {from: published, to: superseded, trigger: "successor version published"}
+      - {from: superseded, to: retired, trigger: "validTo passed and no open quotes reference it"}
+
+rules:
+  - {id: RUL-PRC-1, statement: "Price facts are resolved with conflict strategy 'error' by default: two equally specific entries for the same subject and charge type is a data defect (E-PRC-AMBIGUOUS) and is also prevented at write time where detectable."}
+  - {id: RUL-PRC-2, statement: "Object-level entries beat type-level entries regardless of scope specificity (subject specificity precedes context specificity)."}
+  - {id: RUL-PRC-3, statement: "Manual overrides (phase 70) require obligation require-approval when discount exceeds policy pricing.manual-discount-threshold."}
+  - {id: RUL-PRC-4, statement: "Prices below cost floor (DOM-CST, when available) produce warning W-PRC-BELOW-COST and require approval in approve step."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:price-entry.resolution", purpose: "ResolutionConfig for price entries (conflict: error)"}
+  - {urn: "urn:ucos:ucos.std:policy:price-adjustment.resolution", purpose: "ResolutionConfig for adjustments (cardinality many)"}
+  - {urn: "urn:ucos:ucos.std:policy:pricing.phases", purpose: "Ordered phase list"}
+  - {urn: "urn:ucos:ucos.std:policy:pricing.rounding", purpose: "Rounding by currency/scope"}
+  - {urn: "urn:ucos:ucos.std:policy:pricing.floor", purpose: "Minimum line subtotal"}
+  - {urn: "urn:ucos:ucos.std:policy:pricing.conversion.allowed", purpose: "Allow FX conversion when no native-currency price"}
+  - {urn: "urn:ucos:ucos.std:policy:pricing.approval", purpose: "Approvals by list scope and change magnitude"}
+  - {urn: "urn:ucos:ucos.std:policy:pricing.manual-discount-threshold", purpose: "Manual discount approval threshold"}
+
+decisions:
+  - {id: DEC-PRC-1, question: "What is the price of this basket in this context?", algorithm: "CIC-011-004"}
+  - {id: DEC-PRC-2, question: "Can this price list be approved?", inputs: ["approvals", "margin impact", "below-cost warnings"], output: "allow|deny"}
+
+security:
+  permissions: [pricing.price, pricing.explain, pricing.list.read, pricing.list.author, pricing.list.approve, pricing.list.publish, pricing.bulk-change]
+  dataClassification: "Price lists confidential (contract and segment prices are commercially sensitive); Price responses filtered: explain traces require pricing.explain."
+  threats: ["Price scraping -> rate limits per client on pricing:price; contract prices only for authenticated contract parties", "Formula injection -> CEL sandbox, cost limits"]
+
+governance:
+  changeControl: "Publication requires approval per pricing.approval; bulk changes always require approval."
+  evidence: "Approval records + diff report (entries changed, avg/max % change) stored as Evidence."
+  audit: "Every Price call with reserve=true and every quote-bound price is retained with pricingSnapshotId."
+
+runtimeBehavior:
+  consistency: "Price reads are snapshot-consistent per request; publish visible to pricing within 1s p99."
+  slo: {Price_10lines_p99_ms: 30, Price_100lines_p99_ms: 80, availability: "99.99%"}
+  scale: "10^8 price entries per tenant; 50,000 price requests/s per region."
+  caching: "CIC-011-003; candidate sets cached per (subject, snapshotVersion)."
+  failureModes: ["Tax adapter down: return prices without tax with W-PRC-TAX-UNAVAILABLE when includeTax=optional; fail E-PRC-TAX-UNAVAILABLE when required", "Budget service down: promotions with budgets are skipped and trace records reason"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_pricing (event-sourced lists; materialized entry index)
+  tables:
+    - {name: price_lists, columns: "tenant_id uuid, id char(26), code text, currency char(3), scope jsonb, priority int, valid_from timestamptz, valid_to timestamptz, state text, version int, revision bigint", pk: "(tenant_id, id)"}
+    - {name: price_entries, columns: "tenant_id uuid, list_id char(26), entry_id char(26), subject_kind text, subject text, charge_type text, model jsonb, scope jsonb, scope_digest bytea, specificity int, priority int, currency char(3), valid_from timestamptz, valid_to timestamptz, snapshot_from bigint, snapshot_to bigint", pk: "(tenant_id, list_id, entry_id)", indexes: ["(tenant_id, subject, charge_type) INCLUDE (scope_digest, valid_from, valid_to, snapshot_from, snapshot_to)", "exclusion: (tenant_id, subject, charge_type, scope_digest, tstzrange(valid_from, valid_to)) where state=published"]}
+    - {name: entry_scope_index, columns: "tenant_id, subject, dimension, value, entry_id", note: "Inverted index of CIC-011-001 §5"}
+    - {name: snapshots, columns: "tenant_id, snapshot_version bigint, created_at", note: "Entries carry [snapshot_from, snapshot_to) for MVCC-style replay"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "price_entries hash(tenant_id) 64; sub-partition list(charge_type) for > 10^9 rows."
+  retention: "Entries retained with snapshot ranges for 10 years (replay); archived to Parquet after 24 months, replay from archive allowed with higher latency."
+
+extensionModel:
+  extensionPoints:
+    - "New price models via PriceModelPort plugins (certified; pure functions with cost annotation)"
+    - "New charge types via registry"
+    - "New phases via pricing.phases policy"
+    - "New adjustment effect kinds registered for fact kind price-adjustment"
+  forbidden: ["Code-level price logic per industry/market (UCOS-L001)"]
+
+certificationCriteria:
+  - {id: CR-PRC-01, rule: "Passes CIC-011-004 CR-011-004-01..05.", level: L1}
+  - {id: CR-PRC-02, rule: "Approval SoD test: author cannot approve own list under any role combination.", level: L1}
+  - {id: CR-PRC-03, rule: "Replay from archive reproduces results for 1,000 sampled historical pricingSnapshotIds.", level: L2}
+  - {id: CR-PRC-04, rule: "Load test: 50,000 rps Price(10 lines) with p99 <= 30ms in one region.", level: L2}
+validationRules:
+  - {id: VR-PRC-01, rule: "Every ucos.std pricing policy listed in 'policies' exists with test vectors."}
+  - {id: VR-PRC-02, rule: "Every price model kind in CIC-011-004 §2 has an evaluator in the reference implementation."}

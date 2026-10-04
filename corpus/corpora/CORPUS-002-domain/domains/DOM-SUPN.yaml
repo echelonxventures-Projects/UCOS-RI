@@ -1,0 +1,207 @@
+header:
+  id: DOM-SUPN
+  title: Supply Networks Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Systems Engineer
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-007-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-007, PRIN-016, PRIN-022]
+  certification: [CR-SUPN-01, CR-SUPN-02, CR-SUPN-03]
+  validation: [VR-SUPN-01, VR-SUPN-02]
+
+purpose: >
+  Model and operate the inbound side of commerce: suppliers and their sourcing relationships to
+  commercial objects, supplier catalogs and purchase prices, purchase orders and their receipts,
+  replenishment proposals, and supplier performance — feeding inventory, availability (inbound),
+  cost, and provenance.
+
+scope:
+  includes:
+    - Supplier roles on parties (DOM-PTY role supplier) with sourcing relationships (object <-> supplier: MOQ, lead time, pack size, priority)
+    - Supplier catalog ingestion (mapping supplier items to commercial objects via DOM-REF external IDs)
+    - Purchase orders (create, confirm, change, cancel), ASN/expected receipts, receipt matching (2/3-way with DOM-INV receipts and supplier invoices)
+    - Replenishment proposals from policies (min/max, reorder point, forecast-driven via DOM-FCS)
+    - Supplier scorecards (on-time, fill rate, quality)
+  excludes:
+    - Supplier invoice payment (AP in external ERP via DOM-DXC or DOM-ACC postings)
+    - Manufacturing (DOM-MFG), inventory positions (DOM-INV)
+
+responsibilities:
+  - Single source for sourcing relationships and purchase prices (as cost entries via DOM-CST).
+  - Expected receipts accurate for ATP.
+  - Traceable PO lifecycle and matching.
+
+principles: [PRIN-001, PRIN-007, PRIN-016, PRIN-022]
+
+boundaries:
+  upstream: [DOM-PTY, DOM-COB, DOM-REF, DOM-FCS, DOM-INV, DOM-DXC]
+  downstream: [DOM-INV, DOM-AVL, DOM-CST, DOM-PRV, DOM-ACC, DOM-PLN]
+
+ownership:
+  boundedContext: supply
+  owningRole: Chief Systems Engineer
+  service: supply-network-service
+  schema: ucos_supply
+
+capabilities:
+  - {id: SUPN-C1, name: Sourcing relationships, description: "Maintain who supplies what, from where, on what terms."}
+  - {id: SUPN-C2, name: Supplier catalogs, description: "Ingest and map supplier items and prices."}
+  - {id: SUPN-C3, name: Purchase orders, description: "PO lifecycle with confirmations, ASNs, receipts, matching."}
+  - {id: SUPN-C4, name: Replenishment, description: "Generate replenishment proposals by policy."}
+  - {id: SUPN-C5, name: Scorecards, description: "Supplier performance metrics."}
+
+services:
+  - {name: SupplyNetworkCommandService, kind: application, operations: [DefineSourcingRelationship, EndSourcingRelationship, IngestSupplierCatalog, CreatePurchaseOrder, ConfirmPurchaseOrder, ChangePurchaseOrder, CancelPurchaseOrder, RecordAdvanceShipNotice, MatchReceipt, GenerateReplenishmentProposals, ApproveReplenishmentProposal]}
+  - {name: ReplenishmentPlanner, kind: domain-service, contract: "propose(object, node) per policy supply.replenishment (min-max | reorder-point | forecast-cover days) respecting MOQ, pack size, lead time, supplier priority"}
+  - {name: SupplyNetworkQueryService, kind: application, operations: [GetSourcingRelationships, GetPurchaseOrder, FindPurchaseOrders, GetSupplierScorecard]}
+
+aggregates:
+  - name: SourcingRelationship
+    identity: "urn:ucos:<tenant>:sourcing-relationship:<ulid>"
+    invariants: ["INV-SUPN-1: one primary relationship per (object, node scope, period); MOQ and packSize positive; leadTime set."]
+    fields:
+      - {name: supplier, type: PartyUrn}
+      - {name: objectRef, type: InstanceUrn}
+      - {name: supplierItemRef, type: "ExternalReference (scheme supplier:<id>)"}
+      - {name: nodeScope, type: ApplicabilityScope}
+      - {name: moq, type: Quantity}
+      - {name: packSize, type: Quantity}
+      - {name: leadTime, type: duration}
+      - {name: priority, type: int}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+  - name: PurchaseOrder
+    identity: "urn:ucos:<tenant>:purchase-order:<ulid>"
+    invariants:
+      - "INV-SUPN-2: lines reference active sourcing relationships; quantities multiples of packSize and >= MOQ unless override approved."
+      - "INV-SUPN-3: received quantity per line <= ordered + tolerance (policy supply.receipt-tolerance)."
+    fields:
+      - {name: number, type: string}
+      - {name: supplier, type: PartyUrn}
+      - {name: buyerEntity, type: LegalEntityUrn}
+      - {name: shipToNode, type: InstanceUrn}
+      - {name: lines, type: "[{lineId, objectRef, quantity, unitPrice: Money, expectedAt, receivedQuantity}]"}
+      - {name: currency, type: CurrencyCode}
+      - {name: lifecycleState, type: string}
+  - name: ReplenishmentProposal
+    identity: "urn:ucos:<tenant>:replenishment-proposal:<ulid>"
+    fields:
+      - {name: objectRef, type: InstanceUrn}
+      - {name: nodeRef, type: InstanceUrn}
+      - {name: suggestedQuantity, type: Quantity}
+      - {name: supplier, type: PartyUrn}
+      - {name: rationale, type: "{method, onHand, onOrder, demandForecast, safetyStock}"}
+      - {name: status, type: "proposed|approved|rejected|converted"}
+
+entities: []
+
+valueObjects:
+  - {name: MatchResult, definition: "{poLine, receiptRefs[], invoiceRef?, matchType: two-way|three-way, variances {qty, price}, status: matched|exception}"}
+
+commands:
+  - {name: DefineSourcingRelationship, input: "SourcingRelationship", emits: [SourcingRelationshipDefined]}
+  - {name: EndSourcingRelationship, input: "{id, validTo}", emits: [SourcingRelationshipEnded]}
+  - {name: IngestSupplierCatalog, input: "{supplier, feedRef, format}", emits: [SupplierCatalogIngested], async: true, note: "Purchase prices become DOM-CST cost entries (costType purchase)"}
+  - {name: CreatePurchaseOrder, input: "{supplier, buyerEntity, shipToNode, lines, sourceProposalRefs?}", emits: [PurchaseOrderCreated]}
+  - {name: ConfirmPurchaseOrder, input: "{id, supplierConfirmation}", emits: [PurchaseOrderConfirmed], note: "Creates expected receipts in DOM-INV"}
+  - {name: ChangePurchaseOrder, input: "{id, changes, reason}", emits: [PurchaseOrderChanged]}
+  - {name: CancelPurchaseOrder, input: "{id, reason}", emits: [PurchaseOrderCancelled]}
+  - {name: RecordAdvanceShipNotice, input: "{poId, lines, expectedAt, shipmentRef}", emits: [AdvanceShipNoticeRecorded]}
+  - {name: MatchReceipt, input: "{poId, receiptMovementRefs, supplierInvoiceRef?}", emits: [ReceiptMatched, ReceiptMatchException]}
+  - {name: GenerateReplenishmentProposals, input: "{scope (nodes/objects), asOf}", emits: [ReplenishmentProposalsGenerated], async: true}
+  - {name: ApproveReplenishmentProposal, input: "{id, adjustedQuantity?}", emits: [ReplenishmentProposalApproved]}
+
+queries:
+  - {name: GetSourcingRelationships, input: "{objectRef?, supplier?, nodeRef?, asOf?}", output: "SourcingRelationship[]"}
+  - {name: GetPurchaseOrder, input: "{id}", output: PurchaseOrder}
+  - {name: FindPurchaseOrders, input: "{supplier?, state?, expectedBefore?, cursor}", output: "page"}
+  - {name: GetSupplierScorecard, input: "{supplier, period}", output: "{onTimeRate, fillRate, qualityRejectRate, leadTimeVariance}"}
+
+apis:
+  - {style: REST, path: "/v1/supply-network/sourcing-relationships", methods: {POST: DefineSourcingRelationship, GET: GetSourcingRelationships}}
+  - {style: REST, path: "/v1/supply-network/sourcing-relationships/{id}:end", methods: {POST: EndSourcingRelationship}}
+  - {style: REST, path: "/v1/supply-network/supplier-catalogs", methods: {POST: IngestSupplierCatalog}}
+  - {style: REST, path: "/v1/supply-network/purchase-orders", methods: {POST: CreatePurchaseOrder, GET: FindPurchaseOrders}}
+  - {style: REST, path: "/v1/supply-network/purchase-orders/{id}", methods: {GET: GetPurchaseOrder, PATCH: ChangePurchaseOrder}}
+  - {style: REST, path: "/v1/supply-network/purchase-orders/{id}:confirm", methods: {POST: ConfirmPurchaseOrder}}
+  - {style: REST, path: "/v1/supply-network/purchase-orders/{id}:cancel", methods: {POST: CancelPurchaseOrder}}
+  - {style: REST, path: "/v1/supply-network/purchase-orders/{id}/asns", methods: {POST: RecordAdvanceShipNotice}}
+  - {style: REST, path: "/v1/supply-network/purchase-orders/{id}:match", methods: {POST: MatchReceipt}}
+  - {style: REST, path: "/v1/supply-network/replenishment-proposals", methods: {POST: GenerateReplenishmentProposals}}
+  - {style: REST, path: "/v1/supply-network/replenishment-proposals/{id}:approve", methods: {POST: ApproveReplenishmentProposal}}
+  - {style: REST, path: "/v1/supply-network/suppliers/{supplier}/scorecard", methods: {GET: GetSupplierScorecard}}
+
+events:
+  - {type: ucos.supply.sourcing-relationship.defined.v1, payload: "{id, supplier, objectRef, leadTime}", consumers: [availability, cost]}
+  - {type: ucos.supply.sourcing-relationship.ended.v1, payload: "{id, validTo}"}
+  - {type: ucos.supply.supplier-catalog.ingested.v1, payload: "{supplier, items, mapped, unmapped}"}
+  - {type: ucos.supply.purchase-order.created.v1, payload: "{id, number, supplier, lines}"}
+  - {type: ucos.supply.purchase-order.confirmed.v1, payload: "{id, lines (confirmed qty, expectedAt)}", consumers: [inventory (expected receipts), availability]}
+  - {type: ucos.supply.purchase-order.changed.v1, payload: "{id, changes}"}
+  - {type: ucos.supply.purchase-order.cancelled.v1, payload: "{id}"}
+  - {type: ucos.supply.purchase-order.asn-recorded.v1, payload: "{poId, expectedAt, shipmentRef}"}
+  - {type: ucos.supply.purchase-order.receipt-matched.v1, payload: "{poId, matchType, variances}", consumers: [accounting, cost (landed cost)]}
+  - {type: ucos.supply.purchase-order.receipt-match-exception.v1, payload: "{poId, variances}"}
+  - {type: ucos.supply.replenishment.proposals-generated.v1, payload: "{count, scope}"}
+  - {type: ucos.supply.replenishment.proposal-approved.v1, payload: "{id, quantity}"}
+
+stateMachines:
+  - name: PurchaseOrderLifecycle
+    initial: draft
+    states: [draft, sent, confirmed, partially-received, received, closed, cancelled]
+    terminal: [closed, cancelled]
+    transitions:
+      - {from: draft, to: sent, command: send}
+      - {from: sent, to: confirmed, command: ConfirmPurchaseOrder}
+      - {from: [confirmed, partially-received], to: partially-received, trigger: "receipt < ordered"}
+      - {from: [confirmed, partially-received], to: received, trigger: "receipt >= ordered within tolerance"}
+      - {from: received, to: closed, trigger: "matched"}
+      - {from: [draft, sent, confirmed], to: cancelled, command: CancelPurchaseOrder}
+
+rules:
+  - {id: RUL-SUPN-1, statement: "Purchase prices from supplier catalogs are cost entries in DOM-CST (single cost truth); SUPN never stores its own price table."}
+  - {id: RUL-SUPN-2, statement: "Replenishment proposals above policy value thresholds require approval before conversion to POs."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:supply.replenishment", purpose: "Replenishment method and parameters per object class/node"}
+  - {urn: "urn:ucos:ucos.std:policy:supply.receipt-tolerance", purpose: "Over/under receipt tolerances and price variance tolerances"}
+
+decisions:
+  - {id: DEC-SUPN-1, question: "How much should be reordered for X at node N from whom?", algorithm: "ReplenishmentPlanner"}
+
+security:
+  permissions: [supply-network.read, supply-network.sourcing.manage, supply-network.po.manage, supply-network.replenishment.approve]
+  dataClassification: "Confidential (supplier terms and prices)."
+  threats: ["Supplier data spoofing -> supplier feeds authenticated per connector; ASN/catalog idempotency"]
+
+governance:
+  changeControl: "Replenishment and tolerance policies via ChangeSet."
+  evidence: "Match exceptions resolutions captured."
+
+runtimeBehavior:
+  consistency: "Strong per PO; expected receipts propagated to DOM-INV within 2s."
+  slo: {CreatePurchaseOrder_p99_ms: 200, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_supply (separate tables)
+  tables:
+    - {name: sourcing_relationships, columns: "tenant_id, id, supplier, object_ref, body jsonb, priority, valid_from, valid_to", pk: "(tenant_id, id)", indexes: ["(tenant_id, object_ref)", "(tenant_id, supplier)"]}
+    - {name: purchase_orders, columns: "tenant_id, id, number, supplier, buyer_entity, body jsonb, state, revision", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, number)", "(tenant_id, supplier, state)"]}
+    - {name: replenishment_proposals, columns: "tenant_id, id, object_ref, node_ref, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 32."
+  retention: "Financial retention for POs."
+
+extensionModel:
+  extensionPoints: ["Supplier connectors (EDI X12/EDIFACT, cXML, APIs) via DOM-DXC", "Replenishment methods (plugins)"]
+  forbidden: ["Duplicate purchase price storage outside DOM-CST"]
+
+certificationCriteria:
+  - {id: CR-SUPN-01, rule: "EDI 850/855/856 (or EDIFACT ORDERS/ORDRSP/DESADV) round-trip conformance via certified connectors.", level: L1}
+  - {id: CR-SUPN-02, rule: "Replenishment golden tests (min-max, reorder point, forecast cover) respect MOQ and pack size.", level: L1}
+  - {id: CR-SUPN-03, rule: "Three-way match detects seeded quantity and price variances 100%.", level: L1}
+validationRules:
+  - {id: VR-SUPN-01, rule: "Every Stockable object in reference fixtures has a primary sourcing relationship."}
+  - {id: VR-SUPN-02, rule: "Every supplier party has role supplier."}

@@ -1,0 +1,166 @@
+header:
+  id: DOM-VER
+  title: Versioning Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-000-003, CIC-024-001, CIC-026-001, CIC-002-001]
+  traces: [PRIN-012, PRIN-013, PRIN-011, CIC-000-003]
+  certification: [CR-VER-01, CR-VER-02, CR-VER-03]
+  validation: [VR-VER-01, VR-VER-02]
+
+purpose: >
+  Maintain the version catalog of everything versioned in UCOS — metadata definitions, APIs, event
+  schemas, packs, plugins, SDKs, models — with deprecation and sunset schedules and the **pin
+  inventory** (which consumers depend on which versions), so retire guards, migrations, and
+  deprecation communications are decided from facts.
+
+scope:
+  includes:
+    - VersionedArtifact catalog entries (kind, id, version, compatibility class, status, dates)
+    - Pin inventory: dependency edges consumer -> artifact@version (instances pinned to type versions, API clients by version, event consumers by schema major, tenants by pack version)
+    - Deprecation and sunset schedules with notification campaigns
+    - Compatibility matrix queries (what works with what)
+  excludes:
+    - The definitions themselves (owning domains)
+    - Migrations execution (CORPUS-026; DOM-LFC/COB jobs)
+
+responsibilities:
+  - Answer "can version X be retired?" with exact pin counts.
+  - Enforce deprecation windows (CIC-000-003 §4, CIC-005-001 §6).
+  - Notify affected consumers before sunset.
+
+principles: [PRIN-011, PRIN-012, PRIN-013]
+
+boundaries:
+  upstream: [DOM-ONT, DOM-LFC, DOM-EVT, DOM-META, DOM-EXT, DOM-OBS]
+  downstream: [DOM-ONT, DOM-LFC, DOM-POL, DOM-EVO, DOM-GOV]
+
+ownership:
+  boundedContext: lifecycle
+  owningRole: Chief Architect
+  service: version-catalog-service
+  schema: ucos_lifecycle
+
+capabilities:
+  - {id: VER-C1, name: Catalog, description: "Record versions and statuses across artifact kinds."}
+  - {id: VER-C2, name: Pins, description: "Maintain consumer->version pin counts from events and telemetry."}
+  - {id: VER-C3, name: Deprecation, description: "Schedule deprecations/sunsets; enforce windows; notify."}
+  - {id: VER-C4, name: Compatibility, description: "Compute compatibility matrices."}
+
+services:
+  - {name: VersionCatalogService, kind: application, operations: [RecordArtifactVersion, ScheduleDeprecation, ScheduleSunset, CancelSunset]}
+  - {name: PinTracker, kind: application, contract: "Consumes created/retyped/migrated events (instance pins), API gateway usage metrics (client pins by API major), consumer-group registrations (event schema pins), pack installations (tenant pins); maintains counts per (artifact@version, consumerKind)"}
+  - {name: VersionQueryService, kind: application, operations: [GetArtifactVersions, GetPins, CanRetire, GetCompatibility, GetSunsetCalendar]}
+
+aggregates:
+  - name: VersionedArtifact
+    identity: "urn:ucos:global:artifact-version:<kind>:<id>@<version>"
+    invariants:
+      - "INV-VER-1: sunsetAt >= deprecatedAt + minimum window for the kind (APIs/events 12 months; metadata read support indefinite)."
+      - "INV-VER-2: a version cannot be sunset while pins > 0 unless a migration has completed for all pins or a governance waiver exists."
+    fields:
+      - {name: kind, type: "type|lifecycle|policy|rule|dimension|api|event-schema|pack|plugin|sdk|model"}
+      - {name: id, type: string}
+      - {name: version, type: SemVer}
+      - {name: compatibility, type: "MAJOR|MINOR|PATCH (relative to previous)"}
+      - {name: status, type: "active|deprecated|sunset-scheduled|sunset|retired"}
+      - {name: successor, type: "string?"}
+      - {name: deprecatedAt, type: "Instant?"}
+      - {name: sunsetAt, type: "Instant?"}
+
+entities:
+  - {name: PinCount, within: "projection", fields: [artifactVersion, consumerKind, tenant, count, lastSeenAt]}
+
+valueObjects:
+  - {name: RetireDecision, definition: "{allowed, pins: [{consumerKind, tenant, count}], blockingMigrations[], waiverRef?}"}
+
+commands:
+  - {name: RecordArtifactVersion, input: "{kind, id, version, compatibility, successorOf?}", emits: [ArtifactVersionRecorded], note: "Fed from publish events of owning domains"}
+  - {name: ScheduleDeprecation, input: "{artifactVersion, successor, deprecatedAt}", emits: [ArtifactDeprecationScheduled]}
+  - {name: ScheduleSunset, input: "{artifactVersion, sunsetAt}", emits: [ArtifactSunsetScheduled], preconditions: ["INV-VER-1"]}
+  - {name: CancelSunset, input: "{artifactVersion, reason}", emits: [ArtifactSunsetCancelled]}
+
+queries:
+  - {name: GetArtifactVersions, input: "{kind, id}", output: "VersionedArtifact[]"}
+  - {name: GetPins, input: "{artifactVersion, tenant?}", output: "PinCount[]"}
+  - {name: CanRetire, input: "{artifactVersion}", output: RetireDecision}
+  - {name: GetCompatibility, input: "{kind, id, version}", output: "{compatibleConsumers, breaking[], successors[]}"}
+  - {name: GetSunsetCalendar, input: "{from, to, tenant?}", output: "upcoming sunsets affecting the tenant"}
+
+apis:
+  - {style: REST, path: "/v1/versions/artifacts", methods: {POST: RecordArtifactVersion}}
+  - {style: REST, path: "/v1/versions/artifacts/{kind}/{id}", methods: {GET: GetArtifactVersions}}
+  - {style: REST, path: "/v1/versions/artifacts/{kind}/{id}/{version}/pins", methods: {GET: GetPins}}
+  - {style: REST, path: "/v1/versions/artifacts/{kind}/{id}/{version}:can-retire", methods: {GET: CanRetire}}
+  - {style: REST, path: "/v1/versions/artifacts/{kind}/{id}/{version}/compatibility", methods: {GET: GetCompatibility}}
+  - {style: REST, path: "/v1/versions/artifacts/{kind}/{id}/{version}:deprecate", methods: {POST: ScheduleDeprecation}}
+  - {style: REST, path: "/v1/versions/artifacts/{kind}/{id}/{version}:schedule-sunset", methods: {POST: ScheduleSunset}}
+  - {style: REST, path: "/v1/versions/artifacts/{kind}/{id}/{version}:cancel-sunset", methods: {POST: CancelSunset}}
+  - {style: REST, path: "/v1/versions/sunset-calendar", methods: {GET: GetSunsetCalendar}}
+
+events:
+  - {type: ucos.lifecycle.artifact-version.recorded.v1, payload: "{kind, id, version, compatibility}"}
+  - {type: ucos.lifecycle.artifact-version.deprecation-scheduled.v1, payload: "{kind, id, version, successor, deprecatedAt}", consumers: [notification workflows, developer portal]}
+  - {type: ucos.lifecycle.artifact-version.sunset-scheduled.v1, payload: "{kind, id, version, sunsetAt, pins}"}
+  - {type: ucos.lifecycle.artifact-version.sunset-cancelled.v1, payload: "{kind, id, version, reason}"}
+  - {type: ucos.lifecycle.artifact-version.sunset.v1, payload: "{kind, id, version}"}
+
+stateMachines:
+  - name: ArtifactVersionLifecycle
+    initial: active
+    states: [active, deprecated, sunset-scheduled, sunset, retired]
+    terminal: [retired]
+    transitions:
+      - {from: active, to: deprecated, command: ScheduleDeprecation}
+      - {from: deprecated, to: sunset-scheduled, command: ScheduleSunset}
+      - {from: sunset-scheduled, to: deprecated, command: CancelSunset}
+      - {from: sunset-scheduled, to: sunset, trigger: "sunsetAt reached and CanRetire.allowed"}
+      - {from: sunset, to: retired, trigger: "retention period for replay elapsed"}
+
+rules:
+  - {id: RUL-VER-1, statement: "Owning domains' retire guards (e.g. RetireTypeDefinition) call CanRetire; DOM-VER is the single source of pin counts."}
+  - {id: RUL-VER-2, statement: "Deprecation notifications go to affected tenants at deprecation, 90, 30, and 7 days before sunset (policy versions.notification-schedule)."}
+  - {id: RUL-VER-3, statement: "Sunset APIs return 410 Gone with successor link; sunset event schemas stop being produced but remain registered for replay."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:versions.notification-schedule", purpose: "Deprecation notification offsets"}
+
+decisions:
+  - {id: DEC-VER-1, question: "Can artifact X@v be retired?", algorithm: "CanRetire: pins == 0 or (all pins migrated) or waiver"}
+
+security:
+  permissions: [versions.read, versions.deprecate, versions.sunset]
+  dataClassification: "Internal; tenant pin data visible only to that tenant and platform."
+  threats: ["Premature sunset breaking tenants -> INV-VER-2"]
+
+governance:
+  changeControl: "Sunset scheduling via ChangeSet with pin report."
+  evidence: "Notification delivery records attached to sunset ChangeSets."
+
+runtimeBehavior:
+  consistency: "Pin counts eventual (p99 5 min for telemetry-derived pins; 5s for event-derived pins)."
+  slo: {CanRetire_p99_ms: 50, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_lifecycle (separate tables)
+  tables:
+    - {name: artifact_versions, columns: "kind, id, version, body jsonb, status, deprecated_at, sunset_at", pk: "(kind, id, version)", global: true}
+    - {name: pin_counts, columns: "tenant_id, kind, id, version, consumer_kind, count bigint, last_seen_at", pk: "(tenant_id, kind, id, version, consumer_kind)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "pin_counts hash(tenant_id) 16."
+  retention: "Indefinite."
+
+extensionModel:
+  extensionPoints: ["New artifact kinds and pin sources"]
+  forbidden: ["Per-domain ad-hoc pin tracking"]
+
+certificationCriteria:
+  - {id: CR-VER-01, rule: "Pin counts equal recomputation from source stores for 10^6 instances after random create/retype/migrate sequences.", level: L1}
+  - {id: CR-VER-02, rule: "ScheduleSunset rejects windows shorter than the kind minimum.", level: L1}
+  - {id: CR-VER-03, rule: "A version with live pins cannot reach sunset without waiver (negative test).", level: L1}
+validationRules:
+  - {id: VR-VER-01, rule: "Every artifact kind listed has a pin source configured."}
+  - {id: VR-VER-02, rule: "Every deprecated artifact names a successor or an explicit 'no successor' rationale."}

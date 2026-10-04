@@ -1,0 +1,168 @@
+header:
+  id: DOM-PLN
+  title: Planning Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief AI Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-019-001, CIC-011-001, CIC-028-001, CIC-002-001]
+  traces: [PRIN-006, PRIN-011, PRIN-013]
+  certification: [CR-PLN-01, CR-PLN-02, CR-PLN-03]
+  validation: [VR-PLN-01, VR-PLN-02]
+
+plugin:
+  id: ucos.ext.planning
+  isolation: I4
+  consumesPorts: [EventBusPort, AnalyticsStorePort]
+  providesApis: ["/v1/plans/*"]
+  requiredPacks: ["ucos.std@^1.0"]
+
+purpose: >
+  Manage commercial plans — sales and operations plans (S&OP), assortment plans, revenue and margin
+  plans, capacity and supply plans — as versioned plan versions over context dimensions, reconciled
+  with forecasts and actuals, with approval workflows and variance tracking.
+
+scope:
+  includes:
+    - Plan templates (measures, dimensions, time buckets) and plan versions (draft, consensus, approved)
+    - Inputs from forecasts (DOM-FCS), simulations (DOM-SIM), and manual entries
+    - Plan vs actual variance tracking via certified metrics
+    - Plan-to-execution handoffs (e.g. approved supply plan -> replenishment parameters; assortment plan -> portfolio roadmap items) as draft ChangeSets
+  excludes:
+    - Forecast computation (DOM-FCS), optimization (DOM-OPT), execution systems
+
+responsibilities:
+  - Approved plans immutable per version; variances computed from certified metrics.
+  - Execution handoffs governed.
+
+principles: [PRIN-006, PRIN-011, PRIN-013]
+
+boundaries:
+  upstream: [DOM-FCS, DOM-SIM, DOM-ANL, DOM-PFL, DOM-SUPN]
+  downstream: [DOM-GOV, DOM-SUPN, DOM-PFL, DOM-PRC]
+
+ownership:
+  boundedContext: intelligence
+  owningRole: Chief AI Architect
+  service: planning-service
+  schema: ucos_intelligence
+
+capabilities:
+  - {id: PLN-C1, name: Templates, description: "Plan structures over measures and dimensions."}
+  - {id: PLN-C2, name: Versions, description: "Draft, consensus, approved versions."}
+  - {id: PLN-C3, name: Variance, description: "Plan vs actual tracking."}
+  - {id: PLN-C4, name: Handoff, description: "Governed handoff to execution domains."}
+
+services:
+  - {name: PlanningCommandService, kind: application, operations: [DefinePlanTemplate, CreatePlanVersion, UpdatePlanCells, SubmitPlanVersion, ApprovePlanVersion, HandoffPlan]}
+  - {name: PlanningQueryService, kind: application, operations: [GetPlanVersion, GetPlanVariance]}
+
+aggregates:
+  - name: PlanTemplate
+    identity: "urn:ucos:<tenant>:plan-template:<code>"
+    fields:
+      - {name: measures, type: "metric URNs (certified)"}
+      - {name: dimensions, type: "registered dimensions with hierarchy levels"}
+      - {name: timeBuckets, type: "week|month|quarter (fiscal calendar ref)"}
+  - name: PlanVersion
+    identity: "urn:ucos:<tenant>:plan-version:<ulid>"
+    invariants: ["INV-PLN-1: approved versions immutable; one approved version per (template, period, scenarioTag) at a time."]
+    fields:
+      - {name: templateRef, type: string}
+      - {name: period, type: Interval}
+      - {name: scenarioTag, type: "base|upside|downside|custom"}
+      - {name: cells, type: "stored separately (dimension tuple x bucket -> measure values)"}
+      - {name: sources, type: "[forecastRunRef, scenarioRunRef, manual]"}
+      - {name: status, type: "draft|in-review|approved|superseded"}
+
+entities: []
+
+valueObjects:
+  - {name: Variance, definition: "{measure, tuple, bucket, plan, actual, abs, pct}"}
+
+commands:
+  - {name: DefinePlanTemplate, input: "PlanTemplate", emits: [PlanTemplateDefined]}
+  - {name: CreatePlanVersion, input: "{templateRef, period, scenarioTag, seedFrom?}", emits: [PlanVersionCreated]}
+  - {name: UpdatePlanCells, input: "{versionId, cells[]}", emits: [PlanCellsUpdated]}
+  - {name: SubmitPlanVersion, input: "{versionId}", emits: [PlanVersionSubmitted]}
+  - {name: ApprovePlanVersion, input: "{versionId, approvalRef}", emits: [PlanVersionApproved]}
+  - {name: HandoffPlan, input: "{versionId, targets[]}", emits: [PlanHandoffProposed], note: "Creates draft ChangeSets in target domains"}
+
+queries:
+  - {name: GetPlanVersion, input: "{versionId, slice?}", output: "PlanVersion + cells"}
+  - {name: GetPlanVariance, input: "{versionId, asOf}", output: "Variance[]"}
+
+apis:
+  - {style: REST, path: "/v1/plans/templates", methods: {POST: DefinePlanTemplate}}
+  - {style: REST, path: "/v1/plans/versions", methods: {POST: CreatePlanVersion}}
+  - {style: REST, path: "/v1/plans/versions/{versionId}", methods: {GET: GetPlanVersion}}
+  - {style: REST, path: "/v1/plans/versions/{versionId}/cells", methods: {PATCH: UpdatePlanCells}}
+  - {style: REST, path: "/v1/plans/versions/{versionId}:submit", methods: {POST: SubmitPlanVersion}}
+  - {style: REST, path: "/v1/plans/versions/{versionId}:approve", methods: {POST: ApprovePlanVersion}}
+  - {style: REST, path: "/v1/plans/versions/{versionId}:handoff", methods: {POST: HandoffPlan}}
+  - {style: REST, path: "/v1/plans/versions/{versionId}/variance", methods: {GET: GetPlanVariance}}
+
+events:
+  - {type: ucos.intelligence.plan-template.defined.v1, payload: "{code}"}
+  - {type: ucos.intelligence.plan-version.created.v1, payload: "{versionId, templateRef, period}"}
+  - {type: ucos.intelligence.plan-version.cells-updated.v1, payload: "{versionId, count}"}
+  - {type: ucos.intelligence.plan-version.submitted.v1, payload: "{versionId}"}
+  - {type: ucos.intelligence.plan-version.approved.v1, payload: "{versionId}"}
+  - {type: ucos.intelligence.plan.handoff-proposed.v1, payload: "{versionId, changeSetRefs}"}
+
+stateMachines:
+  - name: PlanVersionLifecycle
+    initial: draft
+    states: [draft, in-review, approved, superseded]
+    terminal: [superseded]
+    transitions:
+      - {from: draft, to: in-review, command: SubmitPlanVersion}
+      - {from: in-review, to: draft, command: UpdatePlanCells}
+      - {from: in-review, to: approved, command: ApprovePlanVersion}
+      - {from: approved, to: superseded, trigger: "newer approved version for same template/period/scenario"}
+
+rules:
+  - {id: RUL-PLN-1, statement: "Plan measures must be certified metrics so variances compare like with like."}
+  - {id: RUL-PLN-2, statement: "Handoffs never mutate execution domains directly; they create draft ChangeSets."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:planning.approval", purpose: "Approval plan for plan versions"}
+
+decisions:
+  - {id: DEC-PLN-1, question: "How far is actual from plan for tuple T?", algorithm: "Variance over certified metrics"}
+
+security:
+  permissions: [planning.read, planning.edit, planning.approve, planning.handoff]
+  dataClassification: "Confidential (commercial plans)."
+  threats: ["Plan leakage -> internal audiences only"]
+
+governance:
+  changeControl: "Approvals via planning.approval; handoffs via ChangeSets."
+  evidence: "Approved plan digests stored."
+
+runtimeBehavior:
+  consistency: "Strong per version."
+  slo: {GetPlanVariance_p95_s: 3, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_intelligence (separate tables) + analytics store for cells
+  tables:
+    - {name: plan_templates, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: plan_versions, columns: "tenant_id, id, template_ref, period_from, period_to, scenario_tag, status", pk: "(tenant_id, id)"}
+    - {name: plan_cells, columns: "tenant_id, version_id, tuple_key, bucket, measure, value numeric", pk: "(tenant_id, version_id, tuple_key, bucket, measure)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "plan_cells by (tenant_id, version_id)."
+  retention: "Approved versions 7 years."
+
+extensionModel:
+  extensionPoints: ["Plan templates per industry", "Spreadsheet connectors via DOM-DXC"]
+  forbidden: ["Direct execution changes from plans"]
+
+certificationCriteria:
+  - {id: CR-PLN-01, rule: "Approved versions immutable (negative tests).", level: L1}
+  - {id: CR-PLN-02, rule: "Variance equals recomputation from certified metrics.", level: L1}
+  - {id: CR-PLN-03, rule: "Plugin deploys as I4 with only declared ports.", level: L2}
+validationRules:
+  - {id: VR-PLN-01, rule: "Every plan measure is a certified metric."}
+  - {id: VR-PLN-02, rule: "Every template bucket references a fiscal calendar."}

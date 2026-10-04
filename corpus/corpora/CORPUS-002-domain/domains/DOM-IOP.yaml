@@ -1,0 +1,165 @@
+header:
+  id: DOM-IOP
+  title: Interoperability Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-029-001, CIC-005-001, CIC-002-001]
+  traces: [PRIN-022, PRIN-004, PRIN-019]
+  certification: [CR-IOP-01, CR-IOP-02, CR-IOP-03]
+  validation: [VR-IOP-01, VR-IOP-02]
+
+purpose: >
+  Make UCOS speak external standards without importing their models into the kernel: versioned
+  mappings between UCOS metadata (types, attributes, taxonomies, events, commands) and standard
+  vocabularies and schemas (schema.org, GS1 GDM/EPCIS, TM Forum SID/Open APIs, ACORD, HL7 FHIR,
+  UBL/EN 16931, cXML/OCI, OpenTravel), code-list crosswalks, and standard API facades.
+
+scope:
+  includes:
+    - Standard registry (standard, version, artifacts)
+    - Schema mappings (UCOS type/attribute <-> standard element), bidirectional where possible, with fidelity notes
+    - Code crosswalks (UCOS taxonomy terms <-> standard code lists)
+    - Standard API facades (e.g. TMF 620/622 over offer/order APIs) as plugins using mappings
+    - Round-trip conformance tests per mapping
+  excludes:
+    - Transport and scheduling (DOM-DXC), taxonomies themselves (DOM-TXO), external IDs (DOM-REF)
+
+responsibilities:
+  - Mappings versioned and tested for round-trip fidelity.
+  - No kernel or code dependency on any standard (mappings are metadata).
+
+principles: [PRIN-004, PRIN-019, PRIN-022]
+
+boundaries:
+  upstream: [DOM-ONT, DOM-TXO, DOM-REF, DOM-EVT]
+  downstream: [DOM-DXC, DOM-DST, DOM-FED, DOM-SRC, DOM-PRV, DOM-BIL]
+
+ownership:
+  boundedContext: data
+  owningRole: Chief Data Architect
+  service: interoperability-service
+  schema: ucos_data
+
+capabilities:
+  - {id: IOP-C1, name: Standards, description: "Register standards and versions."}
+  - {id: IOP-C2, name: Schema mappings, description: "Map UCOS metadata to standard schemas."}
+  - {id: IOP-C3, name: Code crosswalks, description: "Map taxonomy terms to standard codes."}
+  - {id: IOP-C4, name: Facades, description: "Expose standard APIs over UCOS via plugins."}
+  - {id: IOP-C5, name: Conformance, description: "Round-trip tests and fidelity reports."}
+
+services:
+  - {name: InteroperabilityCommandService, kind: application, operations: [RegisterStandard, DefineSchemaMapping, DefineCodeCrosswalk, RunMappingConformance]}
+  - {name: MappingEngine, kind: library, contract: "transform(direction, mappingRef, document) -> document + losses[]; CEL-based element expressions; used by DXC, DST, FED, facades"}
+  - {name: InteroperabilityQueryService, kind: application, operations: [GetStandard, GetSchemaMapping, TranslateCode, GetFidelityReport]}
+
+aggregates:
+  - name: Standard
+    identity: "urn:ucos:global:standard:<code>@<version>"
+    fields:
+      - {name: code, type: "string (schema-org, gs1-gdm, epcis, tmf-sid, tmf-620, acord, fhir, ubl, en16931, cxml, oci, …)"}
+      - {name: version, type: string}
+      - {name: artifacts, type: "schema/code-list refs"}
+  - name: SchemaMapping
+    identity: "urn:ucos:<namespace>:schema-mapping:<name>@<semver>"
+    invariants: ["INV-IOP-1: every required element of the target in the declared direction is mapped or listed as a declared loss; expressions type-check."]
+    fields:
+      - {name: standardRef, type: string}
+      - {name: ucosSide, type: "type/command/event refs"}
+      - {name: elements, type: "[{ucos, standard, toStandard (CEL), fromStandard (CEL), fidelity: exact|lossy|unsupported, note}]"}
+      - {name: directions, type: "[to-standard, from-standard]"}
+  - name: CodeCrosswalk
+    identity: "urn:ucos:<namespace>:crosswalk:<name>@<semver>"
+    fields:
+      - {name: taxonomyRef, type: string}
+      - {name: codeListRef, type: string}
+      - {name: entries, type: "[{term, code, matchType: exact|broad|narrow}]"}
+
+entities: []
+
+valueObjects:
+  - {name: FidelityReport, definition: "{mapping, roundTripCases, exact, lossy[], failures[]}"}
+
+commands:
+  - {name: RegisterStandard, input: "Standard", emits: [StandardRegistered]}
+  - {name: DefineSchemaMapping, input: "SchemaMapping + changeSetRef", emits: [SchemaMappingDefined]}
+  - {name: DefineCodeCrosswalk, input: "CodeCrosswalk + changeSetRef", emits: [CodeCrosswalkDefined]}
+  - {name: RunMappingConformance, input: "{mappingRef, corpusRef (sample documents)}", emits: [MappingConformanceCompleted], async: true}
+
+queries:
+  - {name: GetStandard, input: "{code, version}", output: Standard}
+  - {name: GetSchemaMapping, input: "{urn}", output: SchemaMapping}
+  - {name: TranslateCode, input: "{crosswalk | (taxonomy, codeList), value, direction}", output: "codes with matchType"}
+  - {name: GetFidelityReport, input: "{mappingRef}", output: FidelityReport}
+
+apis:
+  - {style: REST, path: "/v1/interop/standards", methods: {POST: RegisterStandard}}
+  - {style: REST, path: "/v1/interop/standards/{code}/{version}", methods: {GET: GetStandard}}
+  - {style: REST, path: "/v1/interop/schema-mappings", methods: {POST: DefineSchemaMapping}}
+  - {style: REST, path: "/v1/interop/schema-mappings/{urn}", methods: {GET: GetSchemaMapping}}
+  - {style: REST, path: "/v1/interop/schema-mappings/{urn}/conformance", methods: {POST: RunMappingConformance, GET: GetFidelityReport}}
+  - {style: REST, path: "/v1/interop/crosswalks", methods: {POST: DefineCodeCrosswalk}}
+  - {style: REST, path: "/v1/interop:translate-code", methods: {POST: TranslateCode}}
+
+events:
+  - {type: ucos.data.standard.registered.v1, payload: "{code, version}"}
+  - {type: ucos.data.schema-mapping.defined.v1, payload: "{urn, standardRef}"}
+  - {type: ucos.data.code-crosswalk.defined.v1, payload: "{urn, taxonomyRef, codeListRef}"}
+  - {type: ucos.data.mapping-conformance.completed.v1, payload: "{mappingRef, exact, lossy, failures}"}
+
+stateMachines:
+  - name: MappingDefinitionLifecycle
+    initial: draft
+    states: [draft, published, deprecated]
+    terminal: []
+    transitions:
+      - {from: draft, to: published, trigger: "ChangeSet applied with passing conformance"}
+      - {from: published, to: deprecated, trigger: "successor published or standard version retired"}
+
+rules:
+  - {id: RUL-IOP-1, statement: "Mappings are metadata in packs (e.g. ucos.interop.tmf, ucos.interop.gs1); no standard-specific code in core or domain services."}
+  - {id: RUL-IOP-2, statement: "Lossy elements are reported to callers (losses[]) and never silently dropped."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:interop.min-fidelity", purpose: "Minimum exact-fidelity ratio for publishing a mapping"}
+
+decisions:
+  - {id: DEC-IOP-1, question: "Is mapping M publishable?", algorithm: "Conformance fidelity >= interop.min-fidelity and no failures on required elements"}
+
+security:
+  permissions: [interop.read, interop.manage, interop.conformance.run]
+  dataClassification: "Metadata (public/internal)."
+  threats: ["Malicious CEL in mappings -> sandbox cost limits"]
+
+governance:
+  changeControl: "Mappings and crosswalks via ChangeSet."
+  evidence: "Fidelity reports attached."
+
+runtimeBehavior:
+  consistency: "Immutable published mappings; cached by pinned URN."
+  slo: {transform_overhead_p99_ms: 5, availability: "embedded library"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_data (separate tables)
+  tables:
+    - {name: standards, columns: "code, version, body jsonb", pk: "(code, version)", global: true}
+    - {name: schema_mappings, columns: "tenant_id, urn, body jsonb, state", pk: "(tenant_id, urn)"}
+    - {name: code_crosswalks, columns: "tenant_id, urn, body jsonb", pk: "(tenant_id, urn)"}
+    - {name: fidelity_reports, columns: "tenant_id, mapping_urn, body jsonb, run_at", pk: "(tenant_id, mapping_urn, run_at)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None."
+  retention: "Indefinite."
+
+extensionModel:
+  extensionPoints: ["Interop packs per standard", "Facade plugins (standard APIs)"]
+  forbidden: ["Kernel types shaped by any single standard"]
+
+certificationCriteria:
+  - {id: CR-IOP-01, rule: "Each published mapping passes round-trip conformance on its sample corpus with declared losses only.", level: L1}
+  - {id: CR-IOP-02, rule: "TMF 620/622 facade conformance (CTK) passes when the facade plugin is certified.", level: L2}
+  - {id: CR-IOP-03, rule: "Lossy transforms always report losses (negative tests).", level: L1}
+validationRules:
+  - {id: VR-IOP-01, rule: "Every mapping references registered standards and existing UCOS metadata."}
+  - {id: VR-IOP-02, rule: "Every crosswalk references an existing taxonomy and code list."}

@@ -1,0 +1,249 @@
+header:
+  id: DOM-SEC
+  title: Security Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Security Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-014-001, CIC-021-001, CIC-022-001, CIC-002-001]
+  traces: [PRIN-010, PRIN-022, CIC-014-001]
+  certification: [CR-SEC-01, CR-SEC-02, CR-SEC-03, CR-SEC-04]
+  validation: [VR-SEC-01, VR-SEC-02]
+
+purpose: >
+  Operate the security runtime of UCOS: tenant key hierarchies and crypto-shredding, field-level
+  encryption services, secrets brokerage, security event detection and response, vulnerability and
+  exception (waiver) management, and break-glass access — implementing CIC-014-001.
+
+scope:
+  includes:
+    - Key hierarchy per tenant (KEK) and per subject (DEK), rotation, re-wrap, destruction (crypto-shred)
+    - Encryption/decryption service (envelope encryption) and keyed hashing for searchable fields
+    - Security events (detections), incidents linkage, and response playbooks
+    - Vulnerability findings and security waivers (time-bound exceptions)
+    - Break-glass sessions
+  excludes:
+    - Authentication (DOM-IDN), authorization (DOM-POL), privacy purposes/DSR (DOM-PRI)
+    - Infrastructure KMS/HSM themselves (CIC-021-001 ports)
+
+responsibilities:
+  - Keys never leave the KMS/HSM boundary in clear (except DEKs in memory during use).
+  - Crypto-shred is complete, verifiable, and respects legal holds.
+  - Security exceptions are visible, time-bound, and governed.
+
+principles: [PRIN-010, PRIN-022]
+
+boundaries:
+  upstream: [DOM-IDN, DOM-POL, DOM-EVD, DOM-OBS]
+  downstream: [DOM-PRI, DOM-PTY, DOM-EVD, DOM-CRT, DOM-CYR, DOM-AUD]
+
+ownership:
+  boundedContext: security
+  owningRole: Chief Security Architect
+  service: security-service
+  schema: ucos_security
+
+capabilities:
+  - {id: SEC-C1, name: Key management, description: "Create, rotate, re-wrap, destroy tenant and subject keys."}
+  - {id: SEC-C2, name: Crypto services, description: "Encrypt/decrypt fields, keyed hashes, signing (HSM-backed)."}
+  - {id: SEC-C3, name: Detection, description: "Ingest security signals; detection rules; raise security events."}
+  - {id: SEC-C4, name: Findings & waivers, description: "Track vulnerabilities and time-bound waivers."}
+  - {id: SEC-C5, name: Break-glass, description: "Govern emergency access sessions."}
+
+services:
+  - {name: KeyService, kind: application, operations: [CreateTenantKey, RotateTenantKey, CreateSubjectKey, DestroySubjectKey, DestroyTenantKey]}
+  - {name: CryptoService, kind: application, operations: [EncryptFields, DecryptFields, ComputeKeyedHash, Sign], contract: "AES-256-GCM envelope; DEK cache per subject <= 5 min in memory; all ops audited by key id (not data)"}
+  - {name: DetectionService, kind: application, operations: [IngestSecuritySignal, DefineDetectionRule, RaiseSecurityEvent, ResolveSecurityEvent]}
+  - {name: FindingService, kind: application, operations: [RecordFinding, GrantWaiver, CloseFinding]}
+  - {name: BreakGlassService, kind: application, operations: [RequestBreakGlass, ApproveBreakGlass, EndBreakGlass]}
+  - {name: SecurityQueryService, kind: application, operations: [GetKeyStatus, FindSecurityEvents, FindFindings, GetBreakGlassSession, VerifyShred]}
+
+aggregates:
+  - name: KeyRecord
+    identity: "urn:ucos:<tenant>:key:<kid>"
+    invariants:
+      - "INV-SEC-1: subject keys wrapped by an active tenant KEK; KEK material only in KMS/HSM."
+      - "INV-SEC-2: destroy blocked while any legal hold covers the subject (DOM-EVD)."
+      - "INV-SEC-3: rotation keeps previous KEK version for decrypt until re-wrap completes."
+    fields:
+      - {name: kid, type: string}
+      - {name: kind, type: "tenant-kek|subject-dek|signing|hmac"}
+      - {name: subject, type: "PartyUrn? (for subject DEKs)"}
+      - {name: kmsRef, type: string}
+      - {name: version, type: int}
+      - {name: status, type: "active|rotating|retired|destroyed"}
+      - {name: destroyedAt, type: "Instant?"}
+  - name: SecurityEvent
+    identity: "urn:ucos:<tenant|platform>:security-event:<ulid>"
+    fields:
+      - {name: detectionRef, type: string}
+      - {name: severity, type: "low|medium|high|critical"}
+      - {name: signals, type: "json (no personal data in clear)"}
+      - {name: status, type: "open|triaged|contained|resolved|false-positive"}
+      - {name: incidentRef, type: "string?"}
+  - name: Finding
+    identity: "urn:ucos:platform:finding:<ulid>"
+    invariants: ["INV-SEC-4: Critical findings cannot be waived; High waivers <= 30 days; waivers require Security approval (CIC-000-004 waiver)."]
+    fields:
+      - {name: source, type: "sast|dast|sca|container|pentest|bug-bounty|config"}
+      - {name: subject, type: "module/plugin/pack coordinates + digest"}
+      - {name: severity, type: "low|medium|high|critical"}
+      - {name: cve, type: "string?"}
+      - {name: status, type: "open|waived|fixed|accepted-risk"}
+      - {name: waiver, type: "{approvedBy, expiresAt, rationale}?"}
+  - name: BreakGlassSession
+    identity: "urn:ucos:platform:break-glass:<ulid>"
+    invariants: ["INV-SEC-5: two distinct approvers; duration <= 4h; session recording enabled."]
+    fields:
+      - {name: requester, type: PartyUrn}
+      - {name: reason, type: string}
+      - {name: ticket, type: string}
+      - {name: approvers, type: "PartyUrn[]"}
+      - {name: scope, type: "cells/contexts"}
+      - {name: startedAt, type: Instant}
+      - {name: expiresAt, type: Instant}
+      - {name: status, type: "requested|active|ended|expired"}
+
+entities: []
+
+valueObjects:
+  - {name: EncryptedField, definition: "{kid, alg: A256GCM, iv, ciphertext, aadDigest}"}
+  - {name: ShredVerification, definition: "{subject, keyDestroyedAt, storesChecked[], plaintextFound: bool}"}
+
+commands:
+  - {name: CreateTenantKey, input: "{tenant}", emits: [TenantKeyCreated]}
+  - {name: RotateTenantKey, input: "{tenant}", emits: [TenantKeyRotationStarted, TenantKeyRotated], async: true}
+  - {name: CreateSubjectKey, input: "{tenant, subject}", emits: [SubjectKeyCreated]}
+  - {name: DestroySubjectKey, input: "{tenant, subject, legalBasis, requestRef}", emits: [SubjectKeyDestroyed], preconditions: ["INV-SEC-2"]}
+  - {name: DestroyTenantKey, input: "{tenant, offboardingRef}", emits: [TenantKeyDestroyed], preconditions: ["tenant offboarding state", "no legal holds"]}
+  - {name: EncryptFields, input: "{subject?, fields}", emits: [], note: "Data-plane operation; audited, no domain event"}
+  - {name: IngestSecuritySignal, input: "{source, signal}", emits: []}
+  - {name: DefineDetectionRule, input: "{code, condition (query over signal stream), severity}", emits: [DetectionRuleDefined]}
+  - {name: RaiseSecurityEvent, input: "{detectionRef, severity, signals}", emits: [SecurityEventRaised]}
+  - {name: ResolveSecurityEvent, input: "{id, resolution}", emits: [SecurityEventResolved]}
+  - {name: RecordFinding, input: "Finding", emits: [FindingRecorded]}
+  - {name: GrantWaiver, input: "{findingId, expiresAt, rationale, approvalRef}", emits: [FindingWaived]}
+  - {name: CloseFinding, input: "{findingId, resolution}", emits: [FindingClosed]}
+  - {name: RequestBreakGlass, input: "{reason, ticket, scope, duration}", emits: [BreakGlassRequested]}
+  - {name: ApproveBreakGlass, input: "{sessionId}", emits: [BreakGlassActivated]}
+  - {name: EndBreakGlass, input: "{sessionId}", emits: [BreakGlassEnded]}
+
+queries:
+  - {name: DecryptFields, input: "{fields, purpose}", output: "plaintext fields", note: "PDP-guarded by purpose (DOM-PRI); audited"}
+  - {name: ComputeKeyedHash, input: "{tenant, field, value}", output: "HMAC-SHA-256 digest (searchable personal fields)"}
+  - {name: Sign, input: "{keyRef, payloadDigest}", output: signature}
+  - {name: GetKeyStatus, input: "{kid}", output: KeyRecord}
+  - {name: FindSecurityEvents, input: "{severity?, status?, from?, cursor}", output: "page"}
+  - {name: FindFindings, input: "{subject?, severity?, status?, cursor}", output: "page"}
+  - {name: GetBreakGlassSession, input: "{id}", output: BreakGlassSession}
+  - {name: VerifyShred, input: "{tenant, subject}", output: ShredVerification}
+
+apis:
+  - {style: gRPC, service: "ucos.security.v1.CryptoService (internal, mTLS only)", rpcs: [EncryptFields, DecryptFields, ComputeKeyedHash, Sign]}
+  - {style: REST, path: "/v1/security/keys/tenants/{tenant}", methods: {POST: CreateTenantKey}}
+  - {style: REST, path: "/v1/security/keys/tenants/{tenant}:rotate", methods: {POST: RotateTenantKey}}
+  - {style: REST, path: "/v1/security/keys/tenants/{tenant}:destroy", methods: {POST: DestroyTenantKey}}
+  - {style: REST, path: "/v1/security/keys/subjects", methods: {POST: CreateSubjectKey}}
+  - {style: REST, path: "/v1/security/keys/subjects/{subject}:destroy", methods: {POST: DestroySubjectKey}}
+  - {style: REST, path: "/v1/security/keys/{kid}", methods: {GET: GetKeyStatus}}
+  - {style: REST, path: "/v1/security/keys/subjects/{subject}:verify-shred", methods: {GET: VerifyShred}}
+  - {style: REST, path: "/v1/security/signals", methods: {POST: IngestSecuritySignal}}
+  - {style: REST, path: "/v1/security/detection-rules", methods: {POST: DefineDetectionRule}}
+  - {style: REST, path: "/v1/security/events", methods: {POST: RaiseSecurityEvent, GET: FindSecurityEvents}}
+  - {style: REST, path: "/v1/security/events/{id}:resolve", methods: {POST: ResolveSecurityEvent}}
+  - {style: REST, path: "/v1/security/findings", methods: {POST: RecordFinding, GET: FindFindings}}
+  - {style: REST, path: "/v1/security/findings/{id}:waive", methods: {POST: GrantWaiver}}
+  - {style: REST, path: "/v1/security/findings/{id}:close", methods: {POST: CloseFinding}}
+  - {style: REST, path: "/ops/v1/security/break-glass", methods: {POST: RequestBreakGlass}}
+  - {style: REST, path: "/ops/v1/security/break-glass/{id}", methods: {GET: GetBreakGlassSession}}
+  - {style: REST, path: "/ops/v1/security/break-glass/{id}:approve", methods: {POST: ApproveBreakGlass}}
+  - {style: REST, path: "/ops/v1/security/break-glass/{id}:end", methods: {POST: EndBreakGlass}}
+
+events:
+  - {type: ucos.security.tenant-key.created.v1, payload: "{tenant, kid}"}
+  - {type: ucos.security.tenant-key.rotation-started.v1, payload: "{tenant, fromVersion}"}
+  - {type: ucos.security.tenant-key.rotated.v1, payload: "{tenant, toVersion, rewrapped}"}
+  - {type: ucos.security.tenant-key.destroyed.v1, payload: "{tenant, destroyedAt}"}
+  - {type: ucos.security.subject-key.created.v1, payload: "{tenant, subject, kid}"}
+  - {type: ucos.security.subject-key.destroyed.v1, payload: "{tenant, subject, destroyedAt}", consumers: [all contexts holding encrypted subject data (cache purge), privacy]}
+  - {type: ucos.security.detection-rule.defined.v1, payload: "{code, severity}"}
+  - {type: ucos.security.event.raised.v1, payload: "{id, detectionRef, severity}"}
+  - {type: ucos.security.event.resolved.v1, payload: "{id, resolution}"}
+  - {type: ucos.security.finding.recorded.v1, payload: "{id, subject, severity}", consumers: [certification]}
+  - {type: ucos.security.finding.waived.v1, payload: "{id, expiresAt}"}
+  - {type: ucos.security.finding.closed.v1, payload: "{id}"}
+  - {type: ucos.security.break-glass.requested.v1, payload: "{id, requester, scope}"}
+  - {type: ucos.security.break-glass.activated.v1, payload: "{id, approvers, expiresAt}"}
+  - {type: ucos.security.break-glass.ended.v1, payload: "{id, endedAt}"}
+
+stateMachines:
+  - name: BreakGlassLifecycle
+    initial: requested
+    states: [requested, active, ended, expired]
+    terminal: [ended, expired]
+    transitions:
+      - {from: requested, to: active, command: ApproveBreakGlass, guard: "second distinct approver"}
+      - {from: active, to: ended, command: EndBreakGlass}
+      - {from: active, to: expired, trigger: "expiresAt (timer)"}
+      - {from: requested, to: expired, trigger: "not approved within 1h"}
+  - name: FindingLifecycle
+    initial: open
+    states: [open, waived, fixed, accepted-risk]
+    terminal: [fixed, accepted-risk]
+    transitions:
+      - {from: open, to: waived, command: GrantWaiver, guard: "severity != critical"}
+      - {from: waived, to: open, trigger: "waiver expiresAt"}
+      - {from: [open, waived], to: fixed, command: CloseFinding, guard: "resolution=fixed"}
+      - {from: [open, waived], to: accepted-risk, command: CloseFinding, guard: "resolution=accepted-risk and severity in [low, medium]"}
+
+rules:
+  - {id: RUL-SEC-1, statement: "Decrypt requires a declared purpose bound by PDP (privacy.purpose-binding); purpose and key id are audited for every call."}
+  - {id: RUL-SEC-2, statement: "Subject key destruction emits an event that all contexts consume to purge decrypted caches within 5 minutes."}
+  - {id: RUL-SEC-3, statement: "Expired waivers re-open findings and block releases of the affected subject (CR-000-004-01)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:security.crypto-suite", purpose: "Approved algorithms and key sizes (crypto agility)"}
+  - {urn: "urn:ucos:ucos.std:policy:security.breach-notification", purpose: "Notification timers per jurisdiction"}
+  - {urn: "urn:ucos:ucos.std:policy:security.break-glass", purpose: "Approver roles and max duration"}
+
+decisions:
+  - {id: DEC-SEC-1, question: "May this key be destroyed now?", inputs: ["legal holds", "tenant state", "request legal basis"], output: "allow|deny"}
+  - {id: DEC-SEC-2, question: "May this finding be waived?", algorithm: "INV-SEC-4 + approval"}
+
+security:
+  permissions: [security.key.manage, security.crypto.use, security.event.manage, security.finding.manage, security.waiver.approve, security.break-glass.request, security.break-glass.approve]
+  dataClassification: "Restricted (key metadata, security events)."
+  threats: ["Insider key misuse -> dual control for tenant key destroy/rotate, HSM policies", "Crypto service abuse -> per-service quotas and purpose binding"]
+
+governance:
+  changeControl: "Crypto suite, detection rules, break-glass policy via ChangeSet with Security approval."
+  evidence: "Key destruction certificates, break-glass recordings, waiver approvals as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong for key state; crypto data plane stateless."
+  slo: {EncryptFields_p99_ms: 3, DecryptFields_p99_ms: 3, availability: "99.99%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_security + KMS/HSM
+  tables:
+    - {name: keys, columns: "tenant_id, kid, kind, subject, kms_ref, version, status, wrapped_dek bytea, destroyed_at", pk: "(tenant_id, kid)", indexes: ["(tenant_id, subject)"]}
+    - {name: security_events, columns: "scope text, id, body jsonb, severity, status, raised_at", pk: "(scope, id)"}
+    - {name: findings, columns: "id, subject, severity, status, body jsonb", pk: "(id)", global: true}
+    - {name: break_glass_sessions, columns: "id, body jsonb, status", pk: "(id)", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "keys hash(tenant_id) 64."
+  retention: "Key records retained (without material) indefinitely; security events 2 years hot."
+
+extensionModel:
+  extensionPoints: ["KMS/HSM adapters", "Detection rule packs", "SIEM exporters"]
+  forbidden: ["Application-managed key material"]
+
+certificationCriteria:
+  - {id: CR-SEC-01, rule: "Passes CIC-014-001 CR-014-001-01..07 for the security service itself.", level: L2}
+  - {id: CR-SEC-02, rule: "VerifyShred reports no plaintext across all stores after DestroySubjectKey (CR-003-001-05).", level: L1}
+  - {id: CR-SEC-03, rule: "Key destroy is blocked under active legal hold (negative test).", level: L1}
+  - {id: CR-SEC-04, rule: "Tenant KEK rotation re-wraps 10^7 DEKs without decrypt downtime.", level: L2}
+validationRules:
+  - {id: VR-SEC-01, rule: "Every attribute with sensitivity >= personal in packs maps to encryption via subject keys in persistence models."}
+  - {id: VR-SEC-02, rule: "security.crypto-suite lists only algorithms from CIC-014-001 §4."}

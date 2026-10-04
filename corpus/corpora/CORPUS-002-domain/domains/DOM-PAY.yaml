@@ -1,0 +1,243 @@
+header:
+  id: DOM-PAY
+  title: Payment Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-014-001, CIC-007-001, CIC-006-001, CIC-010-001, CIC-002-001]
+  traces: [PRIN-022, PRIN-010, PRIN-008, PRIN-016]
+  certification: [CR-PAY-01, CR-PAY-02, CR-PAY-03, CR-PAY-04, CR-PAY-05]
+  validation: [VR-PAY-01, VR-PAY-02]
+
+purpose: >
+  Move money in and out on behalf of tenants through any payment method and provider — cards,
+  wallets, bank transfers, direct debit, real-time payments, BNPL, vouchers, stored value, crypto via
+  plugins — with provider independence, idempotency, strong customer authentication, and
+  reconciliation, without UCOS ever storing sensitive authentication data.
+
+scope:
+  includes:
+    - Payment methods (tokenized references), mandates (direct debit), stored credentials consent
+    - Payment intents, authorizations, captures, voids, refunds, chargebacks/disputes
+    - Payouts (to sellers/partners via DOM-STL instructions) and incoming transfers matching
+    - Provider routing (PSP selection, cascading/retry), SCA/3DS orchestration
+    - Provider reconciliation (settlement reports vs internal records)
+  excludes:
+    - Raw card data handling (only in Z3 tokenization vault or PSP-hosted fields; PCI scope minimized)
+    - Invoice allocation (DOM-BIL ApplyPayment), marketplace settlement computation (DOM-STL)
+    - Accounting entries (DOM-ACC consumes payment events)
+
+responsibilities:
+  - Exactly-once money movement per intent (idempotency end-to-end with providers).
+  - Provider-agnostic model through PaymentProviderPort adapters.
+  - Complete, reconcilable payment records.
+
+principles: [PRIN-008, PRIN-010, PRIN-016, PRIN-022]
+
+boundaries:
+  upstream: [DOM-ORD, DOM-BIL, DOM-STL, DOM-PTY, DOM-FRD, DOM-POL]
+  downstream: [DOM-BIL, DOM-ORD, DOM-ACC, DOM-STL, DOM-FRD, DOM-ANL]
+  antiCorruption: "Each PSP integration is a plugin implementing PaymentProviderPort; provider-specific status codes map to UCOS reason codes in the adapter."
+
+ownership:
+  boundedContext: settlement
+  owningRole: Chief Product Architect
+  service: payment-service
+  schema: ucos_settlement
+
+capabilities:
+  - {id: PAY-C1, name: Payment methods, description: "Tokenize/store methods via provider or vault; mandates; consent for stored credentials."}
+  - {id: PAY-C2, name: Intents, description: "Create, authorize (with SCA), capture (full/partial/multi), void."}
+  - {id: PAY-C3, name: Refunds, description: "Full/partial refunds linked to captures; approval for manual refunds."}
+  - {id: PAY-C4, name: Disputes, description: "Chargeback lifecycle with evidence submission."}
+  - {id: PAY-C5, name: Routing, description: "Choose provider per method/context/cost/success-rate; failover cascading for soft declines."}
+  - {id: PAY-C6, name: Reconciliation, description: "Match provider settlement reports to captures/refunds/fees."}
+
+services:
+  - {name: PaymentCommandService, kind: application, operations: [RegisterPaymentMethod, RemovePaymentMethod, CreatePaymentIntent, AuthorizePaymentIntent, CompleteAuthentication, CapturePayment, VoidPaymentIntent, RefundPayment, RecordProviderNotification, RespondToDispute, ImportSettlementReport]}
+  - {name: PaymentRouter, kind: domain-service, contract: "route(intent, ctx) -> ordered provider candidates via policy payment.routing (method, currency, territory, amount, risk, provider health, cost)"}
+  - {name: ProviderGateway, kind: infrastructure, contract: "PaymentProviderPort: authorize/capture/void/refund/tokenize/notifications parsing/report parsing; idempotency key = intent id + operation sequence"}
+  - {name: Reconciler, kind: domain-service, contract: "match(reportLines, internal records) -> matched, unmatched-internal, unmatched-provider, fee lines"}
+  - {name: PaymentQueryService, kind: application, operations: [GetPaymentIntent, FindPaymentIntents, GetPaymentMethods, GetDispute, GetReconciliationReport]}
+
+aggregates:
+  - name: PaymentIntent
+    identity: "urn:ucos:<tenant>:payment-intent:<ulid>"
+    invariants:
+      - "INV-PAY-1: Σ captured <= authorized amount (+ incremental authorizations); Σ refunded <= Σ captured."
+      - "INV-PAY-2: every provider call carries a deterministic idempotency key; duplicate provider notifications are no-ops."
+      - "INV-PAY-3: currency immutable per intent."
+      - "INV-PAY-4: no PAN, CVV, or track data stored or logged anywhere outside Z3 vault (tokens only)."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: payer, type: PartyUrn}
+      - {name: payee, type: "OrganizationUrn (merchant of record)"}
+      - {name: amount, type: Money}
+      - {name: purpose, type: "{kind: order|invoice|deposit|topup|payout-funding, ref}"}
+      - {name: methodRef, type: "InstanceUrn (PaymentMethod)"}
+      - {name: providerRef, type: string}
+      - {name: providerTransactionId, type: "string?"}
+      - {name: authentication, type: "{required, method (3ds2|redirect|app), status}"}
+      - {name: captures, type: "Capture[]"}
+      - {name: refunds, type: "Refund[]"}
+      - {name: riskDecisionRef, type: "InstanceUrn?"}
+      - {name: lifecycleState, type: string}
+      - {name: revision, type: long}
+  - name: PaymentMethod
+    identity: "urn:ucos:<tenant>:payment-method:<ulid>"
+    invariants: ["INV-PAY-5: stored credentials require recorded consent (Evidence) and network token/mandate where available."]
+    fields:
+      - {name: owner, type: PartyUrn}
+      - {name: kind, type: "card|bank-account|wallet|mandate|voucher|stored-value|plugin:<kind>"}
+      - {name: token, type: "provider/vault token reference"}
+      - {name: display, type: "{brand, last4, expiry, bankName} (non-sensitive)"}
+      - {name: mandate, type: "{reference, scheme, signedAt, evidenceRef}?"}
+      - {name: status, type: "active|expired|revoked"}
+  - name: Dispute
+    identity: "urn:ucos:<tenant>:payment-dispute:<ulid>"
+    fields:
+      - {name: intentRef, type: InstanceUrn}
+      - {name: amount, type: Money}
+      - {name: reasonCode, type: string}
+      - {name: dueBy, type: Instant}
+      - {name: evidenceRefs, type: "InstanceUrn[]"}
+      - {name: status, type: "open|evidence-submitted|won|lost|accepted"}
+
+entities:
+  - {name: Capture, within: PaymentIntent, fields: [captureId, amount, capturedAt, providerRef, "settlementRef?"]}
+  - {name: Refund, within: PaymentIntent, fields: [refundId, captureId, amount, reasonCode, status, providerRef, "approvalRef?"]}
+
+valueObjects:
+  - {name: ProviderResult, definition: "{outcome: approved|declined|pending|requires-action|error, ucosReasonCode, retryable, providerCode (opaque)}"}
+
+commands:
+  - {name: RegisterPaymentMethod, input: "{owner, providerTokenizationResult | vault token, consentEvidenceRef}", emits: [PaymentMethodRegistered]}
+  - {name: RemovePaymentMethod, input: "{id}", emits: [PaymentMethodRemoved]}
+  - {name: CreatePaymentIntent, input: "{payer, payee, amount, purpose, methodRef?, captureMode (automatic|manual), idempotencyKey}", emits: [PaymentIntentCreated]}
+  - {name: AuthorizePaymentIntent, input: "{id, methodRef, browser/device data for SCA}", emits: [PaymentAuthorized, PaymentAuthenticationRequired, PaymentDeclined]}
+  - {name: CompleteAuthentication, input: "{id, authenticationResult}", emits: [PaymentAuthorized, PaymentDeclined]}
+  - {name: CapturePayment, input: "{id, amount, final}", emits: [PaymentCaptured]}
+  - {name: VoidPaymentIntent, input: "{id, reason}", emits: [PaymentVoided]}
+  - {name: RefundPayment, input: "{id, captureId, amount, reasonCode, approvalRef?}", emits: [PaymentRefundRequested, PaymentRefunded, PaymentRefundFailed]}
+  - {name: RecordProviderNotification, input: "{provider, rawNotification (signature-verified by adapter)}", emits: ["state events per mapped outcome", DisputeOpened]}
+  - {name: RespondToDispute, input: "{disputeId, evidenceRefs[]}", emits: [DisputeEvidenceSubmitted]}
+  - {name: ImportSettlementReport, input: "{provider, reportRef}", emits: [SettlementReportImported, ReconciliationCompleted], async: true}
+
+queries:
+  - {name: GetPaymentIntent, input: "{id}", output: PaymentIntent}
+  - {name: FindPaymentIntents, input: "{payer?, purposeRef?, state?, from?, to?, cursor, limit}", output: "page"}
+  - {name: GetPaymentMethods, input: "{owner}", output: "PaymentMethod[] (display data only)"}
+  - {name: GetDispute, input: "{id}", output: Dispute}
+  - {name: GetReconciliationReport, input: "{provider, date}", output: "{matched, unmatchedInternal[], unmatchedProvider[], fees}"}
+
+apis:
+  - {style: REST, path: "/v1/settlement/payment-methods", methods: {POST: RegisterPaymentMethod, GET: GetPaymentMethods}}
+  - {style: REST, path: "/v1/settlement/payment-methods/{id}", methods: {DELETE: RemovePaymentMethod}}
+  - {style: REST, path: "/v1/settlement/payment-intents", methods: {POST: CreatePaymentIntent, GET: FindPaymentIntents}}
+  - {style: REST, path: "/v1/settlement/payment-intents/{id}", methods: {GET: GetPaymentIntent}}
+  - {style: REST, path: "/v1/settlement/payment-intents/{id}:authorize", methods: {POST: AuthorizePaymentIntent}}
+  - {style: REST, path: "/v1/settlement/payment-intents/{id}:complete-authentication", methods: {POST: CompleteAuthentication}}
+  - {style: REST, path: "/v1/settlement/payment-intents/{id}:capture", methods: {POST: CapturePayment}}
+  - {style: REST, path: "/v1/settlement/payment-intents/{id}:void", methods: {POST: VoidPaymentIntent}}
+  - {style: REST, path: "/v1/settlement/payment-intents/{id}/refunds", methods: {POST: RefundPayment}}
+  - {style: REST, path: "/v1/settlement/providers/{provider}/notifications", methods: {POST: RecordProviderNotification}, note: "Public webhook endpoint; adapter verifies signature; Z3 ingress"}
+  - {style: REST, path: "/v1/settlement/disputes/{id}", methods: {GET: GetDispute}}
+  - {style: REST, path: "/v1/settlement/disputes/{id}:respond", methods: {POST: RespondToDispute}}
+  - {style: REST, path: "/v1/settlement/providers/{provider}/settlement-reports", methods: {POST: ImportSettlementReport}}
+  - {style: REST, path: "/v1/settlement/providers/{provider}/reconciliation/{date}", methods: {GET: GetReconciliationReport}}
+
+events:
+  - {type: ucos.settlement.payment-method.registered.v1, payload: "{id, owner, kind, display}"}
+  - {type: ucos.settlement.payment-method.removed.v1, payload: "{id}"}
+  - {type: ucos.settlement.payment.intent-created.v1, payload: "{id, payer, amount, purpose}"}
+  - {type: ucos.settlement.payment.authentication-required.v1, payload: "{id, method}"}
+  - {type: ucos.settlement.payment.authorized.v1, payload: "{id, amount, provider, purpose}", consumers: [order saga]}
+  - {type: ucos.settlement.payment.declined.v1, payload: "{id, ucosReasonCode, retryable}"}
+  - {type: ucos.settlement.payment.captured.v1, payload: "{id, captureId, amount, purpose}", consumers: [billing ApplyPayment, accounting]}
+  - {type: ucos.settlement.payment.voided.v1, payload: "{id}"}
+  - {type: ucos.settlement.payment.refund-requested.v1, payload: "{id, refundId, amount}"}
+  - {type: ucos.settlement.payment.refunded.v1, payload: "{id, refundId, amount}", consumers: [billing, accounting]}
+  - {type: ucos.settlement.payment.refund-failed.v1, payload: "{id, refundId, ucosReasonCode}"}
+  - {type: ucos.settlement.dispute.opened.v1, payload: "{disputeId, intentRef, amount, dueBy}"}
+  - {type: ucos.settlement.dispute.evidence-submitted.v1, payload: "{disputeId}"}
+  - {type: ucos.settlement.dispute.closed.v1, payload: "{disputeId, outcome}"}
+  - {type: ucos.settlement.provider.settlement-report-imported.v1, payload: "{provider, date, lines}"}
+  - {type: ucos.settlement.provider.reconciliation-completed.v1, payload: "{provider, date, matched, breaks}"}
+
+stateMachines:
+  - name: PaymentIntentLifecycle
+    initial: created
+    states: [created, requires-action, authorized, partially-captured, captured, partially-refunded, refunded, voided, declined, failed]
+    terminal: [voided, declined, refunded, failed]
+    transitions:
+      - {from: created, to: requires-action, command: AuthorizePaymentIntent, guard: "SCA required"}
+      - {from: [created, requires-action], to: authorized, trigger: "provider approved"}
+      - {from: [created, requires-action], to: declined, trigger: "provider declined and no cascade candidate"}
+      - {from: requires-action, to: failed, trigger: "authentication timeout (timer, policy payment.sca-timeout)"}
+      - {from: authorized, to: partially-captured, command: CapturePayment, guard: "final=false"}
+      - {from: [authorized, partially-captured], to: captured, command: CapturePayment, guard: "final=true or Σ = authorized"}
+      - {from: authorized, to: voided, command: VoidPaymentIntent}
+      - {from: authorized, to: voided, trigger: "authorization expiry (timer)"}
+      - {from: [captured, partially-refunded], to: partially-refunded, trigger: "refund < remaining"}
+      - {from: [captured, partially-refunded], to: refunded, trigger: "Σ refunded = Σ captured"}
+
+rules:
+  - {id: RUL-PAY-1, statement: "Cascading retries only for soft declines mapped as retryable, max 2 providers, same idempotency lineage, never after hard declines (fraud, stolen card)."}
+  - {id: RUL-PAY-2, statement: "Provider notifications are authoritative for asynchronous outcomes; synchronous responses are provisional when the provider marks them pending."}
+  - {id: RUL-PAY-3, statement: "Manual refunds above policy threshold require approval with SoD; refunds go to the original method unless policy payment.refund-routing allows alternatives."}
+  - {id: RUL-PAY-4, statement: "Reconciliation breaks older than 2 business days raise control failures (DOM-CMPL)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:payment.routing", purpose: "Provider selection and cascading"}
+  - {urn: "urn:ucos:ucos.std:policy:payment.sca", purpose: "SCA requirements/exemptions per jurisdiction (e.g. PSD2 TRA, low-value)"}
+  - {urn: "urn:ucos:ucos.std:policy:payment.sca-timeout", purpose: "Authentication timeout"}
+  - {urn: "urn:ucos:ucos.std:policy:payment.refund-approval", purpose: "Refund thresholds and SoD"}
+  - {urn: "urn:ucos:ucos.std:policy:payment.refund-routing", purpose: "Allowed refund destinations"}
+  - {urn: "urn:ucos:ucos.std:policy:payment.methods", purpose: "Methods offered per context"}
+
+decisions:
+  - {id: DEC-PAY-1, question: "Which provider processes this intent?", algorithm: "PaymentRouter (policy payment.routing); DecisionRecord type payment-routing sampled"}
+  - {id: DEC-PAY-2, question: "Is SCA required or exempt?", inputs: ["payment.sca", "risk decision (DOM-FRD)", "amount", "method"], output: "require|exempt(reason)"}
+
+security:
+  permissions: [payment.read, payment.method.manage, payment.intent.create, payment.capture, payment.void, payment.refund, payment.refund.manual, payment.dispute.respond, payment.reconcile]
+  dataClassification: "Restricted (cardholder environment Z3 for tokenization); payment metadata confidential."
+  pci: "SAQ A/A-EP target via PSP-hosted fields; if vault used, vault is the only CDE component in Z3 with PCI DSS 4.0 controls."
+  threats: ["Webhook spoofing -> adapter signature verification + replay protection (timestamp tolerance 5 min, notification id dedupe)", "Refund fraud -> approvals, SoD, velocity limits", "Card testing -> risk checks + rate limits on intent creation"]
+
+governance:
+  changeControl: "Routing, SCA, refund policies and provider plugin activation via ChangeSet with Finance and Security approval."
+  evidence: "Consents for stored credentials, mandates, dispute evidence, reconciliation reports captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per intent; provider interactions via outbox-driven commands with idempotency; notifications processed in order per intent."
+  slo: {AuthorizePaymentIntent_internal_overhead_p99_ms: 100, availability: "99.99% (excluding provider)"}
+  failureModes: ["Provider timeout: mark pending, query provider status with backoff; never re-authorize with a new idempotency key", "All providers down for a method: method hidden via payment.methods health input; orders may proceed with deferred payment if policy allows"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_settlement (event-sourced; financial) + Z3 vault (separate)
+  tables:
+    - {name: payment_intents, columns: "tenant_id uuid, id char(26), payer text, amount_minor numeric(38,0), currency char(3), purpose_kind text, purpose_ref text, provider text, provider_txn_id text, state text, revision bigint", pk: "(tenant_id, id)", indexes: ["(tenant_id, purpose_ref)", "unique(provider, provider_txn_id)"]}
+    - {name: payment_methods, columns: "tenant_id, id, owner, kind, token_ref, display jsonb, status", pk: "(tenant_id, id)", indexes: ["(tenant_id, owner)"]}
+    - {name: provider_notifications, columns: "provider, notification_id, received_at, intent_id, processed bool", pk: "(provider, notification_id)"}
+    - {name: disputes, columns: "tenant_id, id, intent_id, amount_minor, reason_code, due_by, status", pk: "(tenant_id, id)"}
+    - {name: settlement_report_lines, columns: "provider, report_date, line_no, body jsonb, matched_ref", pk: "(provider, report_date, line_no)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "payment_intents hash(tenant_id) 64; notifications range monthly."
+  retention: "Financial retention; tokens deleted on method removal (provider-side deletion requested)."
+
+extensionModel:
+  extensionPoints: ["PaymentProviderPort plugins (PSPs, acquirers, APMs, RTP schemes, crypto processors)", "Method kinds", "Routing optimizers (ML success-rate prediction) as policy inputs"]
+  forbidden: ["Provider-specific logic outside adapters", "Storing sensitive authentication data"]
+
+certificationCriteria:
+  - {id: CR-PAY-01, rule: "Idempotency test: duplicate commands and duplicate/out-of-order provider notifications never cause double capture or refund (simulated provider).", level: L1}
+  - {id: CR-PAY-02, rule: "Every certified provider adapter passes the PaymentProviderPort conformance suite (auth, 3DS, capture, partial capture, void, refund, notifications, reports).", level: L1}
+  - {id: CR-PAY-03, rule: "DLP/PCI scan: no PAN/CVV patterns in any UCOS store, log, trace, or event outside Z3.", level: L1}
+  - {id: CR-PAY-04, rule: "Reconciliation matches 100% of simulated provider report lines with injected breaks detected.", level: L1}
+  - {id: CR-PAY-05, rule: "Annual PCI DSS assessment for Z3 components passes (when vault deployed).", level: L3}
+validationRules:
+  - {id: VR-PAY-01, rule: "Every provider adapter maps all provider decline codes to ucos reason codes (coverage report)."}
+  - {id: VR-PAY-02, rule: "Every jurisdiction in reference deployments has payment.sca configuration."}

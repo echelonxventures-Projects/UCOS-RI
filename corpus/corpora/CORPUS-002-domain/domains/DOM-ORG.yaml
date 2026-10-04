@@ -1,0 +1,229 @@
+header:
+  id: DOM-ORG
+  title: Organization Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-002-001, CIC-020-001, CIC-029-001]
+  traces: [PRIN-001, PRIN-015, PRIN-017, DOM-PTY]
+  certification: [CR-ORG-01, CR-ORG-02, CR-ORG-03]
+  validation: [VR-ORG-01, VR-ORG-02]
+
+purpose: >
+  Own the operating structure of every organization that runs commerce on UCOS — tenants, legal
+  entities that contract, invoice, and remit tax, business units, sales organizations, and
+  verified namespace ownership — so that legal, financial, and metadata responsibilities resolve to
+  exactly one accountable organizational unit.
+
+scope:
+  includes:
+    - Tenant record (business view; runtime placement lives in the tenant directory, DOM-RTM)
+    - Legal entities (issuing entity for invoices, contracting party, tax registrant, merchant of record)
+    - Business units, sales organizations, cost/profit centers as OrganizationalUnit parties with roles
+    - Organization structure via PART_OF hierarchies (multiple concurrent hierarchies: legal, management, sales)
+    - Namespace registration and ownership verification (DNS TXT challenge)
+    - Fiscal calendars per legal entity
+  excludes:
+    - Party master data of organizations as parties (DOM-PTY owns the Party aggregate; ORG adds operating roles)
+    - Authority and delegations (DOM-AUTH)
+    - Runtime cell placement (DOM-RTM)
+
+responsibilities:
+  - Exactly one legal entity responsible for each invoice, contract, and tax registration.
+  - Verified namespace ownership before any metadata can be published in a namespace.
+  - Consistent multi-hierarchy organizational structure.
+
+principles: [PRIN-001, PRIN-015, PRIN-017]
+
+boundaries:
+  upstream: [DOM-PTY, DOM-REL, DOM-REF, DOM-GOV]
+  downstream: [DOM-ONT, DOM-BIL, DOM-CTR, DOM-TAX, DOM-ACC, DOM-AUTH, DOM-CTX, DOM-RTM]
+
+ownership:
+  boundedContext: party
+  owningRole: Chief Data Architect
+  service: organization-service
+  schema: ucos_party
+
+capabilities:
+  - {id: ORG-C1, name: Tenant onboarding record, description: "Create tenant business record linked to its root Organization party."}
+  - {id: ORG-C2, name: Legal entities, description: "Register legal entities with registrations, tax registrations, fiscal calendars."}
+  - {id: ORG-C3, name: Structure, description: "Maintain organizational hierarchies (legal, management, sales)."}
+  - {id: ORG-C4, name: Namespaces, description: "Register and verify metadata namespaces."}
+  - {id: ORG-C5, name: Operating roles, description: "Designate merchant of record, issuing entity, remitting entity per market."}
+
+services:
+  - {name: OrganizationCommandService, kind: application, operations: [RegisterTenant, RegisterLegalEntity, UpdateLegalEntity, AddTaxRegistration, EndTaxRegistration, DefineFiscalCalendar, RegisterNamespace, VerifyNamespace, DesignateOperatingRole]}
+  - {name: NamespaceVerifier, kind: infrastructure, contract: "verify(namespace) -> DNS TXT record _ucos-namespace.<reversed-domain> contains challenge token; or ucos.* reserved for platform"}
+  - {name: OrganizationQueryService, kind: application, operations: [GetTenant, GetLegalEntity, FindLegalEntities, ResolveOperatingEntity, GetNamespace, GetOrgStructure]}
+
+aggregates:
+  - name: Tenant
+    identity: "urn:ucos:global:tenant:<tenant-code>"
+    invariants: ["INV-ORG-1: tenant code unique globally, ^[a-z][a-z0-9-]{1,62}$; root organization party exists."]
+    fields:
+      - {name: code, type: string}
+      - {name: rootOrganization, type: PartyUrn}
+      - {name: plan, type: string}
+      - {name: residency, type: "jurisdiction codes[]"}
+      - {name: status, type: "provisioning|active|suspended|offboarding|closed"}
+  - name: LegalEntity
+    identity: "urn:ucos:<tenant>:legal-entity:<ulid>"
+    invariants:
+      - "INV-ORG-2: references an Organization party; registrationNumber unique per (country, registry)."
+      - "INV-ORG-3: tax registrations per jurisdiction do not overlap in time."
+      - "INV-ORG-4: functional currency set and registered in currency registry."
+    fields:
+      - {name: party, type: PartyUrn}
+      - {name: country, type: "ISO 3166-1"}
+      - {name: registrations, type: "[{registry, value}]"}
+      - {name: taxRegistrations, type: "[{jurisdiction, taxId, scheme, validFrom, validTo}]"}
+      - {name: functionalCurrency, type: CurrencyCode}
+      - {name: fiscalCalendarRef, type: InstanceUrn}
+      - {name: status, type: "active|dormant|dissolved"}
+  - name: OperatingRoleAssignment
+    identity: "urn:ucos:<tenant>:operating-role:<ulid>"
+    invariants: ["INV-ORG-5: for each (role, scope) exactly one legal entity at any instant (merchant-of-record, invoice-issuer, tax-remitter, contracting-entity)."]
+    fields:
+      - {name: role, type: "merchant-of-record|invoice-issuer|tax-remitter|contracting-entity|payout-entity"}
+      - {name: legalEntity, type: InstanceUrn}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+  - name: Namespace
+    identity: "urn:ucos:global:namespace:<namespace>"
+    invariants: ["INV-ORG-6: namespace published to only after verification; ucos.* reserved for the platform organization."]
+    fields:
+      - {name: namespace, type: string}
+      - {name: owner, type: OrganizationUrn}
+      - {name: verification, type: "{method: dns-txt|platform, token, verifiedAt}"}
+      - {name: status, type: "pending|verified|revoked"}
+  - name: FiscalCalendar
+    identity: "urn:ucos:<tenant>:fiscal-calendar:<ulid>"
+    fields:
+      - {name: pattern, type: "calendar-month|4-4-5|4-5-4|5-4-4|custom"}
+      - {name: yearStart, type: "MM-DD"}
+      - {name: periods, type: "[{code, start, end, status: open|closing|closed}]"}
+
+entities: []
+
+valueObjects:
+  - {name: OperatingEntityResolution, definition: "{role, legalEntity, matchedScope} — resolved via CIC-011-001 with fact kind operating-role, conflict error"}
+
+commands:
+  - {name: RegisterTenant, input: "{code, rootOrganization, plan, residency}", emits: [TenantRegistered]}
+  - {name: RegisterLegalEntity, input: "{party, country, registrations, functionalCurrency, fiscalCalendarRef}", emits: [LegalEntityRegistered]}
+  - {name: UpdateLegalEntity, input: "{id, expectedRevision, patch}", emits: [LegalEntityUpdated]}
+  - {name: AddTaxRegistration, input: "{id, jurisdiction, taxId, scheme, validFrom}", emits: [TaxRegistrationAdded]}
+  - {name: EndTaxRegistration, input: "{id, jurisdiction, validTo}", emits: [TaxRegistrationEnded]}
+  - {name: DefineFiscalCalendar, input: "FiscalCalendar", emits: [FiscalCalendarDefined]}
+  - {name: RegisterNamespace, input: "{namespace, owner}", emits: [NamespaceRegistered]}
+  - {name: VerifyNamespace, input: "{namespace}", emits: [NamespaceVerified, NamespaceVerificationFailed]}
+  - {name: DesignateOperatingRole, input: "{role, legalEntity, scope, validFrom, validTo?, changeSetRef}", emits: [OperatingRoleDesignated]}
+
+queries:
+  - {name: GetTenant, input: "{code}", output: Tenant}
+  - {name: GetLegalEntity, input: "{id}", output: LegalEntity}
+  - {name: FindLegalEntities, input: "{country?, status?, cursor, limit}", output: "page"}
+  - {name: ResolveOperatingEntity, input: "{role, context}", output: OperatingEntityResolution}
+  - {name: GetNamespace, input: "{namespace}", output: Namespace}
+  - {name: GetOrgStructure, input: "{root, hierarchy: legal|management|sales, depth<=8, asOf?}", output: "tree"}
+
+apis:
+  - {style: REST, path: "/v1/organization/tenants", methods: {POST: RegisterTenant}}
+  - {style: REST, path: "/v1/organization/tenants/{code}", methods: {GET: GetTenant}}
+  - {style: REST, path: "/v1/organization/legal-entities", methods: {POST: RegisterLegalEntity, GET: FindLegalEntities}}
+  - {style: REST, path: "/v1/organization/legal-entities/{id}", methods: {GET: GetLegalEntity, PATCH: UpdateLegalEntity}}
+  - {style: REST, path: "/v1/organization/legal-entities/{id}/tax-registrations", methods: {POST: AddTaxRegistration}}
+  - {style: REST, path: "/v1/organization/legal-entities/{id}/tax-registrations/{jurisdiction}:end", methods: {POST: EndTaxRegistration}}
+  - {style: REST, path: "/v1/organization/fiscal-calendars", methods: {POST: DefineFiscalCalendar}}
+  - {style: REST, path: "/v1/organization/namespaces", methods: {POST: RegisterNamespace}}
+  - {style: REST, path: "/v1/organization/namespaces/{namespace}", methods: {GET: GetNamespace}}
+  - {style: REST, path: "/v1/organization/namespaces/{namespace}:verify", methods: {POST: VerifyNamespace}}
+  - {style: REST, path: "/v1/organization/operating-roles", methods: {POST: DesignateOperatingRole}}
+  - {style: REST, path: "/v1/organization/operating-roles:resolve", methods: {GET: ResolveOperatingEntity}}
+  - {style: REST, path: "/v1/organization/structure", methods: {GET: GetOrgStructure}}
+
+events:
+  - {type: ucos.party.tenant.registered.v1, payload: "{code, rootOrganization, plan, residency}"}
+  - {type: ucos.party.legal-entity.registered.v1, payload: "{id, party, country, functionalCurrency}"}
+  - {type: ucos.party.legal-entity.updated.v1, payload: "{id, revision}"}
+  - {type: ucos.party.legal-entity.tax-registration-added.v1, payload: "{id, jurisdiction, scheme, validFrom}"}
+  - {type: ucos.party.legal-entity.tax-registration-ended.v1, payload: "{id, jurisdiction, validTo}"}
+  - {type: ucos.party.fiscal-calendar.defined.v1, payload: "{id, pattern}"}
+  - {type: ucos.party.namespace.registered.v1, payload: "{namespace, owner}"}
+  - {type: ucos.party.namespace.verified.v1, payload: "{namespace, owner, method}"}
+  - {type: ucos.party.namespace.verification-failed.v1, payload: "{namespace, reason}"}
+  - {type: ucos.party.operating-role.designated.v1, payload: "{id, role, legalEntity, scope, validFrom, validTo}", consumers: [billing, tax, contract, payment, accounting]}
+
+stateMachines:
+  - name: NamespaceVerification
+    initial: pending
+    states: [pending, verified, revoked]
+    terminal: [revoked]
+    transitions:
+      - {from: pending, to: verified, command: VerifyNamespace, guard: "challenge found"}
+      - {from: verified, to: revoked, trigger: "periodic re-verification fails 3 times over 7 days or owner request"}
+  - name: TenantLifecycle
+    initial: provisioning
+    states: [provisioning, active, suspended, offboarding, closed]
+    terminal: [closed]
+    transitions:
+      - {from: provisioning, to: active, trigger: "onboarding runbook complete (CIC-025-001 §5)"}
+      - {from: active, to: suspended, command: suspend}
+      - {from: suspended, to: active, command: resume}
+      - {from: [active, suspended], to: offboarding, command: offboard}
+      - {from: offboarding, to: closed, trigger: "export delivered and KEK shredded"}
+
+rules:
+  - {id: RUL-ORG-1, statement: "Invoice issuer, merchant of record, and tax remitter are resolved by ResolveOperatingEntity in the transaction context; billing accounts pin the resolved issuer at creation (INV-BIL-2)."}
+  - {id: RUL-ORG-2, statement: "Namespace re-verification runs every 30 days; revocation blocks new publications in the namespace but never invalidates published definitions."}
+  - {id: RUL-ORG-3, statement: "Closed fiscal periods are immutable for accounting postings (DOM-ACC enforces with events from ORG)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:operating-role.resolution", purpose: "ResolutionConfig for operating-role fact kind (conflict error, jurisdiction precedence)"}
+  - {urn: "urn:ucos:ucos.std:policy:organization.admin", purpose: "Who may register legal entities, designate operating roles, register namespaces"}
+
+decisions:
+  - {id: DEC-ORG-1, question: "Which legal entity issues/contracts/remits in context C?", algorithm: "CIC-011-001 with fact kind operating-role"}
+  - {id: DEC-ORG-2, question: "Is namespace N owned by organization O?", algorithm: "Namespace status verified and owner = O"}
+
+security:
+  permissions: [organization.read, organization.tenant.manage, organization.legal-entity.manage, organization.namespace.manage, organization.operating-role.designate]
+  dataClassification: "Internal; tax IDs internal; tenant commercial plan confidential."
+  threats: ["Namespace squatting -> DNS verification + reserved prefixes", "Wrong issuing entity -> conflict=error resolution and governed designation"]
+
+governance:
+  changeControl: "Operating role designations and legal entity changes affecting invoicing require ChangeSet with Finance approval."
+  evidence: "Namespace verification proofs and legal registration documents captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per aggregate; operating role resolution version-keyed cache."
+  slo: {ResolveOperatingEntity_p99_ms: 5, availability: "99.99%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_party (shared context; separate tables)
+  tables:
+    - {name: tenants, columns: "code text pk, root_org text, plan text, residency text[], status text", global: true}
+    - {name: legal_entities, columns: "tenant_id uuid, id char(26), party text, country char(2), body jsonb, status text, revision bigint", pk: "(tenant_id, id)"}
+    - {name: tax_registrations, columns: "tenant_id, legal_entity_id, jurisdiction, tax_id, scheme, valid_from, valid_to", pk: "(tenant_id, legal_entity_id, jurisdiction, valid_from)"}
+    - {name: operating_roles, columns: "tenant_id, id, role, legal_entity_id, scope jsonb, scope_digest bytea, valid_from, valid_to", pk: "(tenant_id, id)", indexes: ["EXCLUDE USING gist (tenant_id WITH =, role WITH =, scope_digest WITH =, tstzrange(valid_from, valid_to) WITH &&)"]}
+    - {name: namespaces, columns: "namespace text pk, owner text, verification jsonb, status text", global: true}
+    - {name: fiscal_calendars, columns: "tenant_id, id, body jsonb", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Small cardinality; hash(tenant_id) 16 where tenant-scoped."
+  retention: "Indefinite (legal records)."
+
+extensionModel:
+  extensionPoints: ["Operating role kinds", "Company-register verification plugins (KYB)", "Fiscal calendar patterns"]
+  forbidden: ["Hardcoded issuing entities per country"]
+
+certificationCriteria:
+  - {id: CR-ORG-01, rule: "Operating-role overlap is impossible under concurrent designations (exclusion constraint test).", level: L1}
+  - {id: CR-ORG-02, rule: "Unverified namespaces cannot receive any published definition (negative tests across ONT, LFC, CTX, POL).", level: L1}
+  - {id: CR-ORG-03, rule: "Fiscal calendar generation matches golden 4-4-5/4-5-4/5-4-4 and 53-week years.", level: L1}
+validationRules:
+  - {id: VR-ORG-01, rule: "Every reference tenant fixture designates invoice-issuer and tax-remitter for each active market."}
+  - {id: VR-ORG-02, rule: "Every namespace used by packs is registered (ucos.std reserved to platform)."}

@@ -1,0 +1,190 @@
+header:
+  id: DOM-KGR
+  title: Knowledge Graph Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-004-001, CIC-006-001, CIC-009-001, CIC-002-001]
+  traces: [PRIN-007, PRIN-017, PRIN-001, CIC-004-001]
+  certification: [CR-KGR-01, CR-KGR-02, CR-KGR-03]
+  validation: [VR-KGR-01, VR-KGR-02]
+
+purpose: >
+  Operate the cross-domain knowledge graph projection defined by CIC-004-001: projection mappings,
+  graph generations and rebuilds, named queries, impact analysis, and materialized inference — the
+  graph-native read model for traversal, governance impact, provenance navigation, and AI grounding.
+
+scope:
+  includes:
+    - ProjectionMapping metadata (event type -> graph operations)
+    - Graph generations (blue/green) and rebuild jobs
+    - NamedQuery registry, execution gateway (tenant rewrite, limits, PDP post-filter)
+    - Impact analysis service
+    - KG inference rules (materialized derived edges)
+  excludes:
+    - System-of-record relationships (DOM-REL) and all aggregate data (owning domains)
+    - Knowledge assertions and curation (DOM-KNW)
+
+responsibilities:
+  - Rebuildable, consistent projection (never a source of truth).
+  - Tenant-isolated, authorization-filtered query results.
+  - Bounded query cost.
+
+principles: [PRIN-001, PRIN-007, PRIN-017, PRIN-010]
+
+boundaries:
+  upstream: [DOM-EVT, DOM-REL, DOM-COB, DOM-ONT, DOM-PTY, DOM-POL, DOM-EVD, DOM-PRV, DOM-TXO]
+  downstream: [DOM-GOV, DOM-AGT, DOM-RCM, DOM-SRC, DOM-PRV, DOM-KNW, DOM-ANL]
+
+ownership:
+  boundedContext: graph
+  owningRole: Chief Data Architect
+  service: knowledge-graph-service
+  schema: ucos_graph
+
+capabilities:
+  - {id: KGR-C1, name: Project, description: "Consume events and apply mappings to the graph store."}
+  - {id: KGR-C2, name: Rebuild, description: "Blue/green regeneration from log or archive with validation."}
+  - {id: KGR-C3, name: Query, description: "Execute registered named queries with limits and authorization filtering."}
+  - {id: KGR-C4, name: Impact, description: "Dependency closure for governance impact analysis."}
+  - {id: KGR-C5, name: Infer, description: "Materialize derived edges from KG rules."}
+
+services:
+  - {name: KgProjector, kind: application, contract: "CIC-004-001 §3; idempotent by sourceSequence"}
+  - {name: KgAdminService, kind: application, operations: [RegisterProjectionMapping, RegisterNamedQuery, RegisterInferenceRule, StartGraphRebuild, SwitchGraphGeneration]}
+  - {name: KgQueryGateway, kind: application, operations: [ExecuteNamedQuery, Traverse, AnalyzeImpact], contract: "tenant binding rewrite + validator, limit enforcement, PDP post-filter (CIC-004-001 §5)"}
+  - {name: KgQueryService, kind: application, operations: [GetGraphGeneration, GetProjectionLag, GetNamedQuery]}
+
+aggregates:
+  - name: ProjectionMapping
+    identity: "urn:ucos:<namespace>:kgmap:<eventType>"
+    invariants: ["INV-KGR-1: mapping output labels/edge types exist in graph schema (CIC-004-001 §2) or the owning pack; mapping is pure (CEL over event)."]
+    fields:
+      - {name: eventType, type: string}
+      - {name: operations, type: "[{op: upsert-vertex|delete-vertex|upsert-edge|end-edge, labels|edgeType, key (CEL), properties (CEL map)}]"}
+  - name: NamedQuery
+    identity: "urn:ucos:<namespace>:kgquery:<name>@<semver>"
+    invariants: ["INV-KGR-2: declares maxDepth <= policy limit and maxRows; text parses as openCypher/GQL; every node pattern binds tenant (validator)."]
+    fields:
+      - {name: language, type: "opencypher|gql"}
+      - {name: text, type: string}
+      - {name: parameters, type: JsonSchema}
+      - {name: maxDepth, type: int}
+      - {name: maxRows, type: int}
+      - {name: timeoutMs, type: int}
+  - name: InferenceRule
+    identity: "urn:ucos:<namespace>:kgrule:<name>@<semver>"
+    fields:
+      - {name: derivedEdgeType, type: string}
+      - {name: pattern, type: "query text producing (src, dst) pairs"}
+      - {name: recomputeOn, type: "eventTypes[]"}
+  - name: GraphGeneration
+    identity: "urn:ucos:<cell>:kg-generation:<n>"
+    fields:
+      - {name: status, type: "building|validating|live|retired|failed"}
+      - {name: fromOffsets, type: "map<partition, offset>"}
+      - {name: counts, type: "map<label, count>"}
+      - {name: digest, type: Sha256}
+
+entities: []
+
+valueObjects:
+  - {name: ImpactReport, definition: "{root, dependentsByContext: map<context, [{urn, path, semantics}]>, truncated}"}
+  - {name: QueryResult, definition: "{rows[], removedByAuthorization: int, truncated: bool, generation}"}
+
+commands:
+  - {name: RegisterProjectionMapping, input: "ProjectionMapping + changeSetRef", emits: [ProjectionMappingRegistered]}
+  - {name: RegisterNamedQuery, input: "NamedQuery + changeSetRef", emits: [NamedQueryRegistered]}
+  - {name: RegisterInferenceRule, input: "InferenceRule + changeSetRef", emits: [InferenceRuleRegistered]}
+  - {name: StartGraphRebuild, input: "{source: log|archive, reason}", emits: [GraphRebuildStarted, GraphGenerationValidated, GraphRebuildFailed], async: true}
+  - {name: SwitchGraphGeneration, input: "{generation}", emits: [GraphGenerationSwitched], preconditions: ["generation validated (CR-004-001-01 digests)"]}
+
+queries:
+  - {name: ExecuteNamedQuery, input: "{query URN, params, asOf?}", output: QueryResult}
+  - {name: Traverse, input: TraversalSpec, output: QueryResult}
+  - {name: AnalyzeImpact, input: "{root URN, maxDepth<=8}", output: ImpactReport}
+  - {name: GetGraphGeneration, input: "{live|n}", output: GraphGeneration}
+  - {name: GetProjectionLag, input: "{}", output: "{p50, p99, maxPartitionLag}"}
+  - {name: GetNamedQuery, input: "{urn}", output: NamedQuery}
+
+apis:
+  - {style: REST, path: "/v1/knowledge-graph:query", methods: {POST: ExecuteNamedQuery}}
+  - {style: REST, path: "/v1/knowledge-graph:traverse", methods: {POST: Traverse}}
+  - {style: REST, path: "/v1/knowledge-graph:impact", methods: {POST: AnalyzeImpact}}
+  - {style: REST, path: "/v1/knowledge-graph/mappings", methods: {POST: RegisterProjectionMapping}}
+  - {style: REST, path: "/v1/knowledge-graph/queries", methods: {POST: RegisterNamedQuery}}
+  - {style: REST, path: "/v1/knowledge-graph/queries/{urn}", methods: {GET: GetNamedQuery}}
+  - {style: REST, path: "/v1/knowledge-graph/inference-rules", methods: {POST: RegisterInferenceRule}}
+  - {style: REST, path: "/ops/v1/knowledge-graph/generations", methods: {POST: StartGraphRebuild}}
+  - {style: REST, path: "/ops/v1/knowledge-graph/generations/{n}", methods: {GET: GetGraphGeneration}}
+  - {style: REST, path: "/ops/v1/knowledge-graph/generations/{n}:switch", methods: {POST: SwitchGraphGeneration}}
+  - {style: REST, path: "/ops/v1/knowledge-graph/lag", methods: {GET: GetProjectionLag}}
+
+events:
+  - {type: ucos.graph.kg-mapping.registered.v1, payload: "{eventType}"}
+  - {type: ucos.graph.kg-query.registered.v1, payload: "{urn, maxDepth, maxRows}"}
+  - {type: ucos.graph.kg-rule.registered.v1, payload: "{urn, derivedEdgeType}"}
+  - {type: ucos.graph.kg-generation.rebuild-started.v1, payload: "{generation, source}"}
+  - {type: ucos.graph.kg-generation.validated.v1, payload: "{generation, counts, digest}"}
+  - {type: ucos.graph.kg-generation.rebuild-failed.v1, payload: "{generation, reason}"}
+  - {type: ucos.graph.kg-generation.switched.v1, payload: "{from, to}"}
+
+stateMachines:
+  - name: GraphGenerationLifecycle
+    initial: building
+    states: [building, validating, live, retired, failed]
+    terminal: [retired, failed]
+    transitions:
+      - {from: building, to: validating, trigger: "caught up to live offsets"}
+      - {from: validating, to: live, command: SwitchGraphGeneration, guard: "counts and digests equal live within tolerance 0"}
+      - {from: validating, to: failed, trigger: "validation mismatch"}
+      - {from: building, to: failed, trigger: "unrecoverable error"}
+      - {from: live, to: retired, trigger: "another generation switched live"}
+
+rules:
+  - {id: RUL-KGR-1, statement: "Ad-hoc query text is rejected in production cells; only registered named queries execute (CIC-004-001 §4)."}
+  - {id: RUL-KGR-2, statement: "Projection never writes back to any domain; inferred edges are labeled inferred=true with ruleRef."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:kg.query-limits", purpose: "Max depth, rows, timeout, per-tenant cost budget"}
+  - {urn: "urn:ucos:ucos.std:policy:kg.vertex.read", purpose: "Per-label read authorization for result post-filtering"}
+
+decisions:
+  - {id: DEC-KGR-1, question: "Which dependents are impacted by changing X?", algorithm: "AnalyzeImpact over composition/dependency/requires edges up to depth 8"}
+
+security:
+  permissions: [kg.query, kg.query.adhoc, kg.admin, kg.impact]
+  dataClassification: "Internal; no personal attributes projected (CIC-004-001 §5)."
+  threats: ["Cross-tenant leakage -> query rewrite + fuzzing (CR-004-001-02)", "Inference across hidden vertices -> path pruning"]
+
+governance:
+  changeControl: "Mappings, named queries, inference rules via ChangeSet."
+  evidence: "Generation validation digests recorded."
+
+runtimeBehavior:
+  consistency: "Eventual; projection lag p99 <= 2s."
+  slo: {ExecuteNamedQuery_depth3_p99_ms: 50, AnalyzeImpact_p99_ms: 500, availability: "99.9%"}
+
+persistenceModel:
+  store: GraphStorePort (openCypher/GQL) + PostgreSQL schema ucos_graph for metadata
+  tables:
+    - {name: kg_mappings, columns: "tenant_id, event_type, body jsonb", pk: "(tenant_id, event_type)"}
+    - {name: kg_queries, columns: "tenant_id, urn, body jsonb", pk: "(tenant_id, urn)"}
+    - {name: kg_rules, columns: "tenant_id, urn, body jsonb", pk: "(tenant_id, urn)"}
+    - {name: kg_generations, columns: "cell text, n int, status text, body jsonb", pk: "(cell, n)", global: true}
+    - {name: kg_checkpoints, columns: "generation int, partition int, offset bigint", pk: "(generation, partition)", global: true}
+  partitioning: "Graph store partitioned per tenant label or per tenant database depending on adapter."
+  retention: "Projection only; retired generations dropped after 24h."
+
+extensionModel:
+  extensionPoints: ["Projection mappings for pack/plugin aggregates", "Named queries in packs", "GraphStorePort adapters"]
+  forbidden: ["Using the KG as system of record"]
+
+certificationCriteria:
+  - {id: CR-KGR-01, rule: "Passes CIC-004-001 CR-004-001-01..04.", level: L1}
+  - {id: CR-KGR-02, rule: "Named-query validator rejects any query with an unbound node pattern (tenant) in 100% of negative cases.", level: L1}
+  - {id: CR-KGR-03, rule: "Rebuild of 10^8 events completes within 6 hours per cell.", level: L2}
+validationRules:
+  - {id: VR-KGR-01, rule: "Every event type declared by specified domains whose aggregate has graph presence has a projection mapping."}
+  - {id: VR-KGR-02, rule: "Every named query declares limits within kg.query-limits."}

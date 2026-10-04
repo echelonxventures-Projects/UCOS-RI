@@ -1,0 +1,188 @@
+header:
+  id: DOM-CMPL
+  title: Compliance Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-015-001, CIC-014-001, CIC-000-004, CIC-002-001]
+  traces: [PRIN-011, PRIN-012, PRIN-005]
+  certification: [CR-CMPL-01, CR-CMPL-02, CR-CMPL-03]
+  validation: [VR-CMPL-01, VR-CMPL-02]
+
+purpose: >
+  Map regulatory and framework obligations (ISO 27001, SOC 2, PCI DSS, GDPR, SOX ITGC, consumer
+  protection, e-invoicing mandates, product safety, sector rules) to UCOS controls, test them
+  continuously, manage exceptions and remediation, and produce audit-ready compliance posture per
+  framework, tenant, and jurisdiction.
+
+scope:
+  includes:
+    - Frameworks and requirements (versioned, from compliance packs)
+    - Controls (CIC-015-001 §5) mapped to requirements; DOM-FCT financial controls are a subset
+    - Control tests (automated from policies/CR rules/monitors/reconciliations, or manual attestations)
+    - Exceptions and remediation plans
+    - Regulatory change intake (new obligations -> impact -> ChangeSets)
+    - Posture reports and auditor evidence packages (via DOM-EVD)
+  excludes:
+    - Financial reconciliations execution (DOM-FCT), audit logging (DOM-AUD), certification of software (DOM-CRT)
+
+responsibilities:
+  - Every in-scope requirement maps to >= 1 tested control.
+  - Exceptions are time-bound with owners.
+  - Posture is current and evidence-backed.
+
+principles: [PRIN-005, PRIN-011, PRIN-012]
+
+boundaries:
+  upstream: [DOM-POL, DOM-CRT, DOM-FCT, DOM-AUD, DOM-SEC, DOM-PRI, DOM-EVD, DOM-OBS]
+  downstream: [DOM-GOV, DOM-EVD, DOM-ORK]
+
+ownership:
+  boundedContext: governance
+  owningRole: Chief Governance Architect
+  service: compliance-service
+  schema: ucos_governance
+
+capabilities:
+  - {id: CMPL-C1, name: Frameworks, description: "Import frameworks and requirements from packs."}
+  - {id: CMPL-C2, name: Controls, description: "Define controls and map to requirements."}
+  - {id: CMPL-C3, name: Test, description: "Continuous automated tests and manual attestations."}
+  - {id: CMPL-C4, name: Exceptions, description: "Exceptions with remediation and expiry."}
+  - {id: CMPL-C5, name: Posture, description: "Posture reports and evidence packages."}
+  - {id: CMPL-C6, name: Regulatory change, description: "Intake new obligations and drive impact analysis."}
+
+services:
+  - {name: ComplianceCommandService, kind: application, operations: [ImportFramework, DefineControl, MapControl, RunControlTests, RecordAttestation, RaiseException, CloseException, RegisterRegulatoryChange]}
+  - {name: ControlTestRunner, kind: application, contract: "Executes control implementations (policy test vectors, CR rule results from DOM-CRT, monitor states from DOM-MON, reconciliation results from DOM-FCT) per frequency; writes ControlTestResults with evidence"}
+  - {name: ComplianceQueryService, kind: application, operations: [GetPosture, GetControl, FindExceptions, BuildEvidencePackage]}
+
+aggregates:
+  - name: Framework
+    identity: "urn:ucos:<namespace>:framework:<code>@<version>"
+    fields:
+      - {name: code, type: "string (iso27001-2022, soc2-tsc-2017, pci-dss-4.0, gdpr, sox-itgc, …)"}
+      - {name: requirements, type: "[{id, text: LocalizedText, applicability}]"}
+  - name: Control
+    identity: "urn:ucos:<tenant|platform>:control:<code>"
+    invariants: ["INV-CMPL-1: implementation references an existing policy, CR rule, monitor, reconciliation, or manual procedure; owner set."]
+    fields:
+      - {name: objective, type: string}
+      - {name: kind, type: "preventive|detective|corrective"}
+      - {name: implementation, type: "{kind: policy|cr-rule|monitor|reconciliation|manual, ref}"}
+      - {name: frequency, type: "continuous|daily|weekly|monthly|quarterly|annual"}
+      - {name: owner, type: PartyUrn}
+      - {name: mappings, type: "[{framework, requirementId}]"}
+  - name: ComplianceException
+    identity: "urn:ucos:<tenant|platform>:compliance-exception:<ulid>"
+    invariants: ["INV-CMPL-2: expiresAt <= 180 days; remediation plan and risk acceptance by owner role."]
+    fields:
+      - {name: controlRef, type: string}
+      - {name: description, type: string}
+      - {name: riskRating, type: "low|medium|high|critical"}
+      - {name: remediation, type: "{plan, dueAt, owner}"}
+      - {name: expiresAt, type: Instant}
+      - {name: status, type: "open|remediating|closed|expired"}
+
+entities:
+  - {name: ControlTestResult, within: Control, fields: [period, outcome, population, exceptions, evidenceRef, testedAt]}
+
+valueObjects:
+  - {name: Posture, definition: "{framework, scope (tenant/jurisdiction), requirements: [{id, controls, status: compliant|partial|non-compliant|not-applicable}], score}"}
+
+commands:
+  - {name: ImportFramework, input: "{packRef}", emits: [FrameworkImported]}
+  - {name: DefineControl, input: "Control + changeSetRef", emits: [ControlDefined]}
+  - {name: MapControl, input: "{controlCode, framework, requirementId}", emits: [ControlMapped]}
+  - {name: RunControlTests, input: "{scope, period}", emits: [ControlTested], async: true}
+  - {name: RecordAttestation, input: "{controlCode, period, attestor, evidenceRefs}", emits: [ControlTested]}
+  - {name: RaiseException, input: "ComplianceException", emits: [ComplianceExceptionRaised]}
+  - {name: CloseException, input: "{id, resolution}", emits: [ComplianceExceptionClosed]}
+  - {name: RegisterRegulatoryChange, input: "{source, jurisdiction, summary, effectiveAt, affectedRequirements}", emits: [RegulatoryChangeRegistered], note: "Creates impact analysis task and draft ChangeSets for policy/pack updates"}
+
+queries:
+  - {name: GetPosture, input: "{framework, scope, asOf?}", output: Posture}
+  - {name: GetControl, input: "{code}", output: "Control + recent results"}
+  - {name: FindExceptions, input: "{status?, risk?, expiringBefore?}", output: "page"}
+  - {name: BuildEvidencePackage, input: "{framework, period, scope}", output: "DOM-EVD package ref"}
+
+apis:
+  - {style: REST, path: "/v1/compliance/frameworks", methods: {POST: ImportFramework}}
+  - {style: REST, path: "/v1/compliance/controls", methods: {POST: DefineControl}}
+  - {style: REST, path: "/v1/compliance/controls/{code}", methods: {GET: GetControl}}
+  - {style: REST, path: "/v1/compliance/controls/{code}/mappings", methods: {POST: MapControl}}
+  - {style: REST, path: "/v1/compliance/controls/{code}/attestations", methods: {POST: RecordAttestation}}
+  - {style: REST, path: "/v1/compliance/control-tests", methods: {POST: RunControlTests}}
+  - {style: REST, path: "/v1/compliance/exceptions", methods: {POST: RaiseException, GET: FindExceptions}}
+  - {style: REST, path: "/v1/compliance/exceptions/{id}:close", methods: {POST: CloseException}}
+  - {style: REST, path: "/v1/compliance/regulatory-changes", methods: {POST: RegisterRegulatoryChange}}
+  - {style: REST, path: "/v1/compliance/posture", methods: {GET: GetPosture}}
+  - {style: REST, path: "/v1/compliance/evidence-packages", methods: {POST: BuildEvidencePackage}}
+
+events:
+  - {type: ucos.governance.framework.imported.v1, payload: "{code, version, requirements}"}
+  - {type: ucos.governance.control.defined.v1, payload: "{code, implementation}"}
+  - {type: ucos.governance.control.mapped.v1, payload: "{code, framework, requirementId}"}
+  - {type: ucos.governance.control.tested.v1, payload: "{code, period, outcome}", consumers: [posture, operational risk, close checklists]}
+  - {type: ucos.governance.compliance-exception.raised.v1, payload: "{id, controlRef, riskRating, expiresAt}"}
+  - {type: ucos.governance.compliance-exception.closed.v1, payload: "{id, resolution}"}
+  - {type: ucos.governance.regulatory-change.registered.v1, payload: "{id, jurisdiction, effectiveAt}"}
+
+stateMachines:
+  - name: ExceptionLifecycle
+    initial: open
+    states: [open, remediating, closed, expired]
+    terminal: [closed]
+    transitions:
+      - {from: open, to: remediating, trigger: "remediation plan accepted"}
+      - {from: [open, remediating], to: closed, command: CloseException}
+      - {from: [open, remediating], to: expired, trigger: "expiresAt (timer) -> escalation"}
+      - {from: expired, to: closed, command: CloseException}
+
+rules:
+  - {id: RUL-CMPL-1, statement: "Requirements without a mapped, tested control in the period are reported non-compliant (never 'not tested = compliant')."}
+  - {id: RUL-CMPL-2, statement: "Expired exceptions escalate to the control owner's management chain and to DOM-ORK as risk events."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:compliance.scope", purpose: "Applicable frameworks per tenant/jurisdiction/legal entity"}
+
+decisions:
+  - {id: DEC-CMPL-1, question: "Is requirement R compliant in scope S for period P?", algorithm: "All mapped controls have passing results or open approved exceptions within expiry"}
+
+security:
+  permissions: [compliance.read, compliance.manage, compliance.attest, compliance.exception.manage, compliance.package.build]
+  dataClassification: "Confidential."
+  threats: ["False attestations -> evidence required, attestor SoD from control operator"]
+
+governance:
+  changeControl: "Framework imports and control definitions via ChangeSet with Compliance approval."
+  evidence: "All results evidence-backed; packages sealed."
+
+runtimeBehavior:
+  consistency: "Results append-only; posture eventual (hourly)."
+  slo: {GetPosture_p95_s: 3, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_governance (separate tables)
+  tables:
+    - {name: frameworks, columns: "code, version, body jsonb", pk: "(code, version)", global: true}
+    - {name: controls, columns: "scope, code, body jsonb", pk: "(scope, code)"}
+    - {name: control_mappings, columns: "scope, control_code, framework, requirement_id", pk: "(scope, control_code, framework, requirement_id)"}
+    - {name: control_results, columns: "scope, control_code, period, outcome, body jsonb, evidence_ref", pk: "(scope, control_code, period)"}
+    - {name: compliance_exceptions, columns: "scope, id, body jsonb, status, expires_at", pk: "(scope, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None required."
+  retention: "7 years."
+
+extensionModel:
+  extensionPoints: ["Compliance packs (frameworks + mappings + control templates)", "GRC tool connectors via DOM-DXC"]
+  forbidden: ["Posture computed from unmapped or untested controls"]
+
+certificationCriteria:
+  - {id: CR-CMPL-01, rule: "Posture computation golden tests (missing results, exceptions, expiry) pass.", level: L1}
+  - {id: CR-CMPL-02, rule: "Every automated control implementation resolves and runs in reference deployments.", level: L1}
+  - {id: CR-CMPL-03, rule: "Evidence packages verify independently (CR-EVD-02).", level: L1}
+validationRules:
+  - {id: VR-CMPL-01, rule: "Every key financial control (DOM-FCT) maps to >= 1 framework requirement."}
+  - {id: VR-CMPL-02, rule: "Every control implementation ref resolves to an existing artifact."}

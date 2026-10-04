@@ -1,0 +1,229 @@
+header:
+  id: DOM-AGT
+  title: Agents Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief AI Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-017-001, CIC-009-001, CIC-010-001, CIC-014-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-010, PRIN-011, PRIN-022, CIC-017-001]
+  certification: [CR-AGT-01, CR-AGT-02, CR-AGT-03, CR-AGT-04]
+  validation: [VR-AGT-01, VR-AGT-02]
+
+purpose: >
+  Operate AI agents as accountable economic actors inside UCOS (CIC-017-001): agent definitions and
+  profiles, the tool catalog generated from published APIs (MCP-compatible), agent sessions with
+  grounding, approvals for autonomy limits, spend tracking, kill switches, and complete action
+  records — for tenant-built agents, platform assistants, and external agents acting for parties.
+
+scope:
+  includes:
+    - AgentDefinition (purpose, model ref via DOM-INT/ModelPort, prompt templates, tools, autonomy, guardrails)
+    - Agent instances bound to Agent identities (DOM-IDN) and Agent parties (DOM-PTY)
+    - Tool catalog (from OpenAPI operations tagged x-ucos-agent-tool) and tenant MCP server
+    - Sessions: grounding (DOM-KNW, DOM-SRC, KG named queries), tool calls through PEP, approval requests
+    - Spend and action ledgers per agent; kill switch; external agent onboarding
+  excludes:
+    - Model serving (DOM-INT), identity issuance (DOM-IDN), authority/mandates (DOM-AUTH), autonomous agent-to-agent negotiation protocol (DOM-ACM extension)
+
+responsibilities:
+  - Every agent action is attributable (act chain), authorized, recorded, and within limits.
+  - High-risk tools always pass human approval unless policy explicitly allows.
+  - Prompt-injection defenses at every untrusted-content boundary.
+
+principles: [PRIN-005, PRIN-010, PRIN-011, PRIN-022]
+
+boundaries:
+  upstream: [DOM-IDN, DOM-PTY, DOM-AUTH, DOM-POL, DOM-INT, DOM-KNW, DOM-SRC, DOM-KGR, DOM-CFG, DOM-SOV, DOM-CYR]
+  downstream: [DOM-DEC, DOM-ORD, DOM-QTE, DOM-WFL, DOM-AUD, DOM-FRD]
+
+ownership:
+  boundedContext: automation
+  owningRole: Chief AI Architect
+  service: agent-service
+  schema: ucos_automation
+
+capabilities:
+  - {id: AGT-C1, name: Define agents, description: "Agent definitions with tools, autonomy, guardrails."}
+  - {id: AGT-C2, name: Tool catalog, description: "Generate and publish tool schemas from APIs; MCP server."}
+  - {id: AGT-C3, name: Sessions, description: "Run agent sessions with grounding and tool calls."}
+  - {id: AGT-C4, name: Approvals, description: "Human approval of proposed actions within sessions."}
+  - {id: AGT-C5, name: Limits & kill, description: "Spend ledgers, rate limits, kill switches."}
+  - {id: AGT-C6, name: External agents, description: "Onboard third-party agents acting for parties via OAuth + mandates."}
+
+services:
+  - {name: AgentCommandService, kind: application, operations: [DefineAgent, PublishAgent, ProvisionAgentInstance, SuspendAgent, ResumeAgent, OnboardExternalAgent, ApproveAgentAction, RejectAgentAction]}
+  - {name: ToolCatalogService, kind: application, operations: [RegenerateToolCatalog, GetToolCatalog], contract: "From published contracts: operationId -> tool {name, description (LocalizedText), inputSchema, riskClass, requiresIdempotencyKey}"}
+  - {name: AgentRuntime, kind: application, operations: [StartAgentSession, SendAgentMessage, EndAgentSession], contract: "Loop: ground (authorized retrieval) -> model call (InferenceGateway, sovereignty-checked) -> tool proposals validated against schemas -> PEP (agent token with act chain) -> execute or create approval -> record DecisionRecord agent-action"}
+  - {name: AgentQueryService, kind: application, operations: [GetAgent, GetAgentSession, GetSpendLedger, FindAgentActions]}
+
+aggregates:
+  - name: AgentDefinition
+    identity: "urn:ucos:<namespace|tenant>:agent-definition:<name>@<semver>"
+    invariants:
+      - "INV-AGT-1: tools subset of published tool catalog; high-risk tools require autonomy act-with-approval unless policy ai.high-risk-tools allows."
+      - "INV-AGT-2: model reference is an approved model version (DOM-INT) or certified provider plugin allowed by sovereignty profile."
+      - "INV-AGT-3: prompt templates are governed content (no tenant secrets; untrusted inputs inserted only into designated data slots)."
+    fields:
+      - {name: purpose, type: LocalizedText}
+      - {name: modelRef, type: string}
+      - {name: promptTemplates, type: "[{role, templateRef, digest}]"}
+      - {name: tools, type: "toolName[]"}
+      - {name: autonomy, type: "suggest|act-with-approval|act-within-limits|act"}
+      - {name: guardrails, type: "{maxStepsPerSession, maxSpendPerSession: Money, blockedTopics[], outputFilters[]}"}
+      - {name: groundingSources, type: "[knowledge|search|kg-query refs]"}
+      - {name: state, type: DefinitionState}
+  - name: AgentInstance
+    identity: "urn:ucos:<tenant>:agent:<ulid>"
+    invariants: ["INV-AGT-4: bound to exactly one Agent identity and Agent party with accountable owner (INV-IDN-3); spend within profile limits at all times."]
+    fields:
+      - {name: definitionRef, type: "name@version"}
+      - {name: identityRef, type: IdentityUrn}
+      - {name: partyRef, type: PartyUrn}
+      - {name: ownerParty, type: PartyUrn}
+      - {name: mandateRefs, type: "InstanceUrn[] (DOM-AUTH)"}
+      - {name: status, type: "active|suspended|retired"}
+  - name: AgentSession
+    identity: "urn:ucos:<tenant>:agent-session:<ulid>"
+    fields:
+      - {name: agentRef, type: InstanceUrn}
+      - {name: onBehalfOf, type: PartyUrn}
+      - {name: turns, type: "digests + redacted transcript (retention policy)"}
+      - {name: actions, type: "[{toolCall, decisionRef, status: executed|pending-approval|rejected|blocked}]"}
+      - {name: spend, type: Money}
+      - {name: status, type: "active|ended|terminated"}
+
+entities:
+  - {name: ApprovalRequest, within: AgentSession, fields: [requestId, toolCall (args), riskClass, approverRoles, expiresAt, decision, decidedBy]}
+
+valueObjects:
+  - {name: ToolDescriptor, definition: "{name, operationId, description, inputSchema, outputSchema, riskClass: read|write-low|write-high|financial, idempotent}"}
+
+commands:
+  - {name: DefineAgent, input: "AgentDefinition draft", emits: [AgentDefined]}
+  - {name: PublishAgent, input: "{urn, approvalRef}", emits: [AgentPublished], preconditions: ["red-team suite passed (CR-017-001-02)"]}
+  - {name: ProvisionAgentInstance, input: "{definitionRef, ownerParty, profile}", emits: [AgentProvisioned], note: "Registers Agent party + identity (DOM-PTY/DOM-IDN)"}
+  - {name: SuspendAgent, input: "{agentId, reason}", emits: [AgentSuspended], note: "Revokes tokens (kill switch, <= 60s)"}
+  - {name: ResumeAgent, input: "{agentId}", emits: [AgentResumed]}
+  - {name: OnboardExternalAgent, input: "{clientRegistration, ownerParty, mandateRef}", emits: [ExternalAgentOnboarded]}
+  - {name: ApproveAgentAction, input: "{sessionId, requestId}", emits: [AgentActionApproved]}
+  - {name: RejectAgentAction, input: "{sessionId, requestId, reason}", emits: [AgentActionRejected]}
+  - {name: RegenerateToolCatalog, input: "{}", emits: [ToolCatalogRegenerated]}
+  - {name: StartAgentSession, input: "{agentId, onBehalfOf, channel}", emits: [AgentSessionStarted]}
+  - {name: SendAgentMessage, input: "{sessionId, message}", emits: [AgentActionExecuted, AgentActionProposed, AgentActionBlocked]}
+  - {name: EndAgentSession, input: "{sessionId}", emits: [AgentSessionEnded]}
+
+queries:
+  - {name: GetAgent, input: "{agentId}", output: "AgentInstance + definition"}
+  - {name: GetAgentSession, input: "{sessionId}", output: AgentSession}
+  - {name: GetToolCatalog, input: "{tenant, format: ucos|mcp}", output: "ToolDescriptor[]"}
+  - {name: GetSpendLedger, input: "{agentId, period}", output: "spend entries + remaining limits"}
+  - {name: FindAgentActions, input: "{agentId?, onBehalfOf?, status?, from?, cursor}", output: "page"}
+
+apis:
+  - {style: REST, path: "/v1/agents/definitions", methods: {POST: DefineAgent}}
+  - {style: REST, path: "/v1/agents/definitions/{urn}:publish", methods: {POST: PublishAgent}}
+  - {style: REST, path: "/v1/agents", methods: {POST: ProvisionAgentInstance}}
+  - {style: REST, path: "/v1/agents/{agentId}", methods: {GET: GetAgent}}
+  - {style: REST, path: "/v1/agents/{agentId}:suspend", methods: {POST: SuspendAgent}}
+  - {style: REST, path: "/v1/agents/{agentId}:resume", methods: {POST: ResumeAgent}}
+  - {style: REST, path: "/v1/agents/{agentId}/spend", methods: {GET: GetSpendLedger}}
+  - {style: REST, path: "/v1/agents/external", methods: {POST: OnboardExternalAgent}}
+  - {style: REST, path: "/v1/agents/sessions", methods: {POST: StartAgentSession}}
+  - {style: REST, path: "/v1/agents/sessions/{sessionId}", methods: {GET: GetAgentSession}}
+  - {style: REST, path: "/v1/agents/sessions/{sessionId}/messages", methods: {POST: SendAgentMessage}}
+  - {style: REST, path: "/v1/agents/sessions/{sessionId}:end", methods: {POST: EndAgentSession}}
+  - {style: REST, path: "/v1/agents/sessions/{sessionId}/approvals/{requestId}:approve", methods: {POST: ApproveAgentAction}}
+  - {style: REST, path: "/v1/agents/sessions/{sessionId}/approvals/{requestId}:reject", methods: {POST: RejectAgentAction}}
+  - {style: REST, path: "/v1/agents/actions", methods: {GET: FindAgentActions}}
+  - {style: REST, path: "/v1/agents/tools", methods: {GET: GetToolCatalog}}
+  - {style: REST, path: "/ops/v1/agents/tools:regenerate", methods: {POST: RegenerateToolCatalog}}
+  - {style: REST, path: "/mcp/v1/{tenant}", methods: {GET: GetToolCatalog}, note: "MCP-compatible tool server endpoint; tool invocations proxied through AgentRuntime PEP"}
+
+events:
+  - {type: ucos.automation.agent-definition.defined.v1, payload: "{urn, autonomy, tools}"}
+  - {type: ucos.automation.agent-definition.published.v1, payload: "{urn}"}
+  - {type: ucos.automation.agent.provisioned.v1, payload: "{agentId, identityRef, partyRef, ownerParty}"}
+  - {type: ucos.automation.agent.suspended.v1, payload: "{agentId, reason}", consumers: [identity (revoke), gateways]}
+  - {type: ucos.automation.agent.resumed.v1, payload: "{agentId}"}
+  - {type: ucos.automation.agent.external-onboarded.v1, payload: "{agentId, clientId, ownerParty}"}
+  - {type: ucos.automation.agent-session.started.v1, payload: "{sessionId, agentId, onBehalfOf}"}
+  - {type: ucos.automation.agent-session.ended.v1, payload: "{sessionId, actions, spend}"}
+  - {type: ucos.automation.agent-action.executed.v1, payload: "{sessionId, tool, decisionRef}", consumers: [audit, fraud, decisions]}
+  - {type: ucos.automation.agent-action.proposed.v1, payload: "{sessionId, requestId, tool, riskClass}", consumers: [approval inboxes]}
+  - {type: ucos.automation.agent-action.approved.v1, payload: "{sessionId, requestId, approver}"}
+  - {type: ucos.automation.agent-action.rejected.v1, payload: "{sessionId, requestId, reason}"}
+  - {type: ucos.automation.agent-action.blocked.v1, payload: "{sessionId, tool, reason (policy|guardrail|injection|limit)}"}
+  - {type: ucos.automation.tool-catalog.regenerated.v1, payload: "{tools, contractDigest}"}
+
+stateMachines:
+  - name: AgentInstanceLifecycle
+    initial: active
+    states: [active, suspended, retired]
+    terminal: [retired]
+    transitions:
+      - {from: active, to: suspended, command: SuspendAgent}
+      - {from: active, to: suspended, trigger: "cyber anomaly critical (DOM-CYR) or spend limit breach"}
+      - {from: suspended, to: active, command: ResumeAgent}
+      - {from: [active, suspended], to: retired, command: retire}
+  - name: ApprovalRequestLifecycle
+    initial: pending
+    states: [pending, approved, rejected, expired]
+    terminal: [approved, rejected, expired]
+    transitions:
+      - {from: pending, to: approved, command: ApproveAgentAction}
+      - {from: pending, to: rejected, command: RejectAgentAction}
+      - {from: pending, to: expired, trigger: "expiresAt (timer)"}
+
+rules:
+  - {id: RUL-AGT-1, statement: "Tool calls execute with the agent token obtained by token exchange carrying act chain (owner -> agent); PDP evaluates the narrowest of agent profile, delegation, and mandate."}
+  - {id: RUL-AGT-2, statement: "Content from tools, search, knowledge, and users is wrapped as data with provenance tags; instructions found in data are never executed (CIC-017-001 §6)."}
+  - {id: RUL-AGT-3, statement: "Quoted prices/availability in agent outputs must reference Price/ResolveAvailability results from the same session (snapshot IDs), else output filter blocks the message."}
+  - {id: RUL-AGT-4, statement: "Spend is reserved before financial tool execution and released on failure; cumulative spend never exceeds limits (CR-017-001-05)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:identity.agent-delegation", purpose: "Delegation depth, scopes, spend limits (DOM-IDN)"}
+  - {urn: "urn:ucos:ucos.std:policy:ai.high-risk-tools", purpose: "Tools allowed to execute without human approval per autonomy level"}
+  - {urn: "urn:ucos:ucos.std:policy:ai.model-residency", purpose: "Allowed model processing locations (CIC-017-001 §2.6)"}
+
+decisions:
+  - {id: DEC-AGT-1, question: "May agent A execute tool T with args X now?", algorithm: "Schema validation -> guardrails -> PDP (act chain) -> autonomy/high-risk policy -> spend reservation -> execute or create ApprovalRequest; DecisionRecord agent-action"}
+
+security:
+  permissions: [agents.read, agents.define, agents.publish, agents.provision, agents.suspend, agents.session.start, agents.action.approve, agents.external.onboard]
+  dataClassification: "Session transcripts confidential/personal; stored redacted with digests; full content only under retention policy and purpose."
+  threats: ["Prompt injection -> RUL-AGT-2 + red-team certification", "Runaway spend -> reservations + limits + kill switch", "Tool overreach -> catalog subset + PDP + approvals"]
+
+governance:
+  changeControl: "Agent definitions via ChangeSet with AI governance approval; tool risk classes governed."
+  evidence: "Red-team results and approvals captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Session state strongly consistent per session; actions idempotent per tool call id."
+  slo: {tool_dispatch_overhead_p99_ms: 50, kill_switch_effect_p99_s: 60, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_automation (separate tables)
+  tables:
+    - {name: agent_definitions, columns: "tenant_id, urn, body jsonb, state", pk: "(tenant_id, urn)"}
+    - {name: agents, columns: "tenant_id, id, definition_ref, identity_ref, party_ref, owner_party, status", pk: "(tenant_id, id)"}
+    - {name: agent_sessions, columns: "tenant_id, id, agent_id, on_behalf_of, body_enc bytea, spend_minor, status, started_at", pk: "(tenant_id, id)"}
+    - {name: agent_actions, columns: "tenant_id, session_id, call_id, tool, decision_ref, status, at", pk: "(tenant_id, session_id, call_id)", indexes: ["(tenant_id, status)"]}
+    - {name: spend_ledger, columns: "tenant_id, agent_id, entry_id, amount_minor, currency, kind (reserve|commit|release), at", pk: "(tenant_id, agent_id, entry_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "agent_actions range(at) monthly."
+  retention: "Actions per decision retention; transcripts per policy (default 90 days redacted)."
+
+extensionModel:
+  extensionPoints: ["ModelPort providers", "Guardrail/output filter plugins", "Agent templates in packs"]
+  forbidden: ["Tools that bypass published APIs", "Unrecorded agent actions"]
+
+certificationCriteria:
+  - {id: CR-AGT-01, rule: "Passes CIC-017-001 CR-017-001-01..05.", level: L2}
+  - {id: CR-AGT-02, rule: "Tool catalog regenerated from contracts matches published operations tagged for agents (no extra tools).", level: L1}
+  - {id: CR-AGT-03, rule: "Agent outputs quoting prices without session snapshot references are blocked (test conversations).", level: L1}
+  - {id: CR-AGT-04, rule: "External agent without valid mandate cannot execute write tools.", level: L1}
+validationRules:
+  - {id: VR-AGT-01, rule: "Every tool risk class is set (VR-017-001-01)."}
+  - {id: VR-AGT-02, rule: "Every agent definition references an approved model version or certified provider."}

@@ -1,0 +1,221 @@
+header:
+  id: DOM-EVT
+  title: Events Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-006-001, CIC-003-001, CIC-002-001]
+  traces: [PRIN-008, PRIN-015, PRIN-022, CIC-006-001]
+  certification: [CR-EVT-01, CR-EVT-02, CR-EVT-03, CR-EVT-04]
+  validation: [VR-EVT-01, VR-EVT-02]
+
+purpose: >
+  Provide the event backbone of UCOS: the event type and schema registry, topic provisioning,
+  outbox relay, consumer framework, replay, dead-letter handling, subscriptions for external
+  consumers (webhooks), and cross-region replication — implementing CIC-006-001.
+
+scope:
+  includes:
+    - EventType registry (type, owning context, schemas per version, compatibility, classification)
+    - Schema registry (JSON Schema 2020-12) with compatibility enforcement
+    - Topic provisioning from registry metadata
+    - Outbox relay and consumer framework libraries (ucos-eventing)
+    - Event replay API and DLQ redrive
+    - External subscriptions (webhooks with signing, CloudEvents HTTP binding)
+    - Cross-region replication configuration
+  excludes:
+    - The meaning/content of domain events (owned by each producing domain)
+    - Audit log pipeline (DOM-AUD), telemetry (DOM-OBS)
+
+responsibilities:
+  - Guarantee per-aggregate ordering and at-least-once delivery.
+  - Reject incompatible schemas.
+  - Provide replay from log or archive for any consumer.
+
+principles: [PRIN-008, PRIN-009, PRIN-015, PRIN-022]
+
+boundaries:
+  upstream: [DOM-GOV, DOM-SEC, DOM-RTM]
+  downstream: [DOM-KGR, DOM-SRC, DOM-ANL, DOM-AUD, DOM-ORC, DOM-DXC]
+
+ownership:
+  boundedContext: eventing
+  owningRole: Chief Platform Architect
+  service: event-platform-service
+  schema: ucos_eventing
+
+capabilities:
+  - {id: EVT-C1, name: Register event type, description: "Declare event type, owner, classification, schema versions."}
+  - {id: EVT-C2, name: Validate schema evolution, description: "FULL_TRANSITIVE compatibility within MAJOR."}
+  - {id: EVT-C3, name: Provision topics, description: "Create topics/partitions/ACLs/retention from registry."}
+  - {id: EVT-C4, name: Replay, description: "Serve event history for an aggregate or a topic range, from log or archive."}
+  - {id: EVT-C5, name: Dead-letter management, description: "Inspect, redrive, discard DLQ messages with audit."}
+  - {id: EVT-C6, name: External subscriptions, description: "Webhook subscriptions filtered by type/subject with HMAC/JWS signing."}
+
+services:
+  - {name: EventRegistryService, kind: application, operations: [RegisterEventType, RegisterEventSchemaVersion, DeprecateEventType]}
+  - {name: TopicProvisioner, kind: application, operations: [ProvisionTopics], contract: "Reconciles broker state to registry desired state (idempotent, GitOps-style)"}
+  - {name: ReplayService, kind: application, operations: [ReplayAggregateEvents, StartTopicReplay]}
+  - {name: DeadLetterService, kind: application, operations: [ListDeadLetters, RedriveDeadLetters, DiscardDeadLetters]}
+  - {name: SubscriptionService, kind: application, operations: [CreateSubscription, PauseSubscription, ResumeSubscription, DeleteSubscription, GetSubscription]}
+  - {name: WebhookDispatcher, kind: infrastructure, contract: "CloudEvents HTTP structured mode; retries 1s..1h exponential over 24h; signs with tenant webhook key (JWS detached)"}
+
+aggregates:
+  - name: EventType
+    kernel: true
+    identity: "urn:ucos:ucos.std:eventtype:<type-without-version>"
+    invariants:
+      - "INV-EVT-1: type string matches CIC-000-002 grammar; context segment equals owning context."
+      - "INV-EVT-2: each schema version within a MAJOR is FULL_TRANSITIVE compatible with all prior."
+      - "INV-EVT-3: exactly one owning context (no two producers)."
+      - "INV-EVT-4: classification >= max sensitivity of any payload field."
+    fields:
+      - {name: type, type: string}
+      - {name: owningContext, type: string}
+      - {name: category, type: "enum(domain, integration, command)"}
+      - {name: versions, type: "SchemaVersion[]"}
+      - {name: classification, type: DataClassification}
+      - {name: retention, type: "{logDays, compacted: bool}"}
+      - {name: externalSubscribable, type: boolean}
+      - {name: state, type: DefinitionState}
+  - name: Subscription
+    identity: "urn:ucos:<tenant>:subscription:<ulid>"
+    invariants:
+      - "INV-EVT-5: only types with externalSubscribable=true; subscriber holds PDP grant eventing.subscribe for each type."
+      - "INV-EVT-6: endpoint is HTTPS with verified ownership (challenge handshake)."
+    fields:
+      - {name: subscriber, type: PartyUrn}
+      - {name: types, type: "string[]"}
+      - {name: filter, type: "CEL over envelope + data"}
+      - {name: endpoint, type: uri}
+      - {name: signingKeyRef, type: string}
+      - {name: status, type: "enum(pending-verification, active, paused, failing, disabled)"}
+      - {name: deliveryStats, type: "{delivered, failed, lastSuccessAt}"}
+
+entities:
+  - {name: SchemaVersion, within: EventType, fields: [semver, schema (JSON Schema), digest, registeredAt, compatibility]}
+  - {name: DeadLetter, within: "consumer (stored per consumer group)", fields: [eventId, topic, consumer, attempts, lastError, firstFailedAt, status]}
+
+valueObjects:
+  - {name: CloudEventEnvelope, definition: "CIC-006-001 §2"}
+  - {name: ReplayRange, definition: "{topic|aggregateRef, fromSequence|fromTime, toSequence|toTime, source: log|archive|auto}"}
+
+commands:
+  - {name: RegisterEventType, input: "{type, owningContext, category, classification, retention, externalSubscribable}", emits: [EventTypeRegistered]}
+  - {name: RegisterEventSchemaVersion, input: "{type, semver, schema}", emits: [EventSchemaVersionRegistered], preconditions: ["INV-EVT-2 (MINOR/PATCH)", "MAJOR creates new topic version"]}
+  - {name: DeprecateEventType, input: "{type, major, sunsetAt, successor?}", emits: [EventTypeDeprecated]}
+  - {name: ProvisionTopics, input: "{scope: all|context}", emits: [TopicsProvisioned]}
+  - {name: StartTopicReplay, input: "{consumerGroup, range: ReplayRange}", emits: [TopicReplayStarted, TopicReplayCompleted], async: true}
+  - {name: RedriveDeadLetters, input: "{consumer, eventIds[] | filter}", emits: [DeadLettersRedriven]}
+  - {name: DiscardDeadLetters, input: "{consumer, eventIds[], reason}", emits: [DeadLettersDiscarded], preconditions: ["PDP eventing.dlq.discard (dual control for financial contexts)"]}
+  - {name: CreateSubscription, input: "{types[], filter?, endpoint}", emits: [SubscriptionCreated]}
+  - {name: PauseSubscription, input: "{id}", emits: [SubscriptionPaused]}
+  - {name: ResumeSubscription, input: "{id}", emits: [SubscriptionResumed]}
+  - {name: DeleteSubscription, input: "{id}", emits: [SubscriptionDeleted]}
+
+queries:
+  - {name: GetEventType, input: "{type}", output: EventType}
+  - {name: FindEventTypes, input: "{owningContext?, category?, externalSubscribable?, cursor, limit}", output: "page"}
+  - {name: GetEventSchema, input: "{type, semver}", output: "JSON Schema"}
+  - {name: ReplayAggregateEvents, input: "{context, aggregateId, fromSequence}", output: "CloudEvent[] in sequence order", note: "Served by owning context's event_store; this API federates"}
+  - {name: ListDeadLetters, input: "{consumer, cursor, limit}", output: "page of DeadLetter"}
+  - {name: GetSubscription, input: "{id}", output: Subscription}
+
+apis:
+  - {style: REST, path: "/v1/eventing/event-types", methods: {POST: RegisterEventType, GET: FindEventTypes}}
+  - {style: REST, path: "/v1/eventing/event-types/{type}", methods: {GET: GetEventType}}
+  - {style: REST, path: "/v1/eventing/event-types/{type}/schemas", methods: {POST: RegisterEventSchemaVersion}}
+  - {style: REST, path: "/v1/eventing/event-types/{type}/schemas/{semver}", methods: {GET: GetEventSchema}}
+  - {style: REST, path: "/v1/eventing/event-types/{type}:deprecate", methods: {POST: DeprecateEventType}}
+  - {style: REST, path: "/v1/eventing/topics:provision", methods: {POST: ProvisionTopics}}
+  - {style: REST, path: "/v1/eventing/replays", methods: {POST: StartTopicReplay}}
+  - {style: REST, path: "/v1/eventing/aggregates/{context}/{aggregateId}/events", methods: {GET: ReplayAggregateEvents}}
+  - {style: REST, path: "/v1/eventing/dead-letters/{consumer}", methods: {GET: ListDeadLetters}}
+  - {style: REST, path: "/v1/eventing/dead-letters/{consumer}:redrive", methods: {POST: RedriveDeadLetters}}
+  - {style: REST, path: "/v1/eventing/dead-letters/{consumer}:discard", methods: {POST: DiscardDeadLetters}}
+  - {style: REST, path: "/v1/eventing/subscriptions", methods: {POST: CreateSubscription}}
+  - {style: REST, path: "/v1/eventing/subscriptions/{id}", methods: {GET: GetSubscription, DELETE: DeleteSubscription}}
+  - {style: REST, path: "/v1/eventing/subscriptions/{id}:pause", methods: {POST: PauseSubscription}}
+  - {style: REST, path: "/v1/eventing/subscriptions/{id}:resume", methods: {POST: ResumeSubscription}}
+
+events:
+  - {type: ucos.eventing.event-type.registered.v1, payload: "{type, owningContext, category}"}
+  - {type: ucos.eventing.event-type.schema-registered.v1, payload: "{type, semver, digest}"}
+  - {type: ucos.eventing.event-type.deprecated.v1, payload: "{type, major, sunsetAt}"}
+  - {type: ucos.eventing.topics.provisioned.v1, payload: "{created[], updated[]}"}
+  - {type: ucos.eventing.replay.started.v1, payload: "{id, consumerGroup, range}"}
+  - {type: ucos.eventing.replay.completed.v1, payload: "{id, events}"}
+  - {type: ucos.eventing.dead-letter.redriven.v1, payload: "{consumer, count}"}
+  - {type: ucos.eventing.dead-letter.discarded.v1, payload: "{consumer, eventIds[], reason}"}
+  - {type: ucos.eventing.subscription.created.v1, payload: "{id, subscriber, types}"}
+  - {type: ucos.eventing.subscription.paused.v1, payload: "{id, reason}"}
+  - {type: ucos.eventing.subscription.resumed.v1, payload: "{id}"}
+  - {type: ucos.eventing.subscription.deleted.v1, payload: "{id}"}
+
+stateMachines:
+  - name: SubscriptionStatus
+    initial: pending-verification
+    states: [pending-verification, active, paused, failing, disabled]
+    terminal: [disabled]
+    transitions:
+      - {from: pending-verification, to: active, trigger: "endpoint echoes challenge"}
+      - {from: active, to: failing, trigger: "consecutive failures > 50 or failing for > 1h"}
+      - {from: failing, to: active, trigger: "successful delivery"}
+      - {from: failing, to: disabled, trigger: "failing for > 72h"}
+      - {from: [active, failing], to: paused, command: PauseSubscription}
+      - {from: paused, to: active, command: ResumeSubscription}
+      - {from: "*", to: disabled, command: DeleteSubscription}
+
+rules:
+  - {id: RUL-EVT-1, statement: "A MAJOR schema change creates a new event type version (.v<N+1>) and topic; producers dual-publish for the deprecation window."}
+  - {id: RUL-EVT-2, statement: "External subscriptions deliver only integration events or domain events flagged externalSubscribable; personal fields are removed unless subscriber has purpose-bound grant."}
+  - {id: RUL-EVT-3, statement: "DLQ discard for event types owned by billing, revenue, settlement, accounting requires dual control."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:eventing.subscribe", purpose: "Who may subscribe to which event types"}
+  - {urn: "urn:ucos:ucos.std:policy:eventing.dlq.discard", purpose: "Discard authorization"}
+  - {urn: "urn:ucos:ucos.std:policy:eventing.retention", purpose: "Topic retention defaults per category"}
+
+decisions:
+  - {id: DEC-EVT-1, question: "Is a new schema version compatible?", algorithm: "FULL_TRANSITIVE JSON Schema compatibility check (all prior versions in MAJOR)"}
+  - {id: DEC-EVT-2, question: "Should event E be delivered to subscription S?", inputs: ["type match", "CEL filter", "PDP eventing.subscribe", "field redaction obligations"], output: "deliver (redacted) | skip"}
+
+security:
+  permissions: [eventing.registry.read, eventing.registry.write, eventing.replay, eventing.dlq.read, eventing.dlq.redrive, eventing.dlq.discard, eventing.subscribe]
+  dataClassification: "Registry internal. DLQ contents inherit event classification; DLQ readers need classification clearance."
+  threats: ["Rogue producer -> broker ACLs from registry (only owning context service identity may produce to its topics)", "Webhook SSRF -> endpoint allow-list rules, no private IP ranges, egress proxy", "Replay data exfiltration -> replay requires eventing.replay + classification clearance; audited"]
+
+governance:
+  changeControl: "New event types and MAJOR schema versions via ChangeSet with consumer impact list (from AsyncAPI consumer declarations)."
+  evidence: "Compatibility report attached."
+
+runtimeBehavior:
+  consistency: "Per-aggregate ordering; at-least-once."
+  slo: {outbox_to_broker_p99_ms: 500, webhook_first_attempt_p99_s: 5, registry_availability: "99.99%"}
+  failureModes: ["Broker unavailable: outbox accumulates; producers unaffected (writes succeed); alert at outbox age > 60s", "Registry unavailable: producers/consumers use cached schemas (immutable by digest)"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_eventing + broker (Kafka protocol) + archive (Parquet, object storage)
+  tables:
+    - {name: event_types, columns: "type text pk, owning_context text, category text, classification text, retention jsonb, external bool, state text", global: true}
+    - {name: schema_versions, columns: "type text, semver text, schema jsonb, digest bytea, registered_at timestamptz", pk: "(type, semver)", global: true}
+    - {name: subscriptions, columns: "tenant_id uuid, id char(26), body jsonb, status text", pk: "(tenant_id, id)"}
+    - {name: dead_letters, columns: "consumer text, event_id char(26), topic text, attempts int, last_error text, status text, envelope jsonb, first_failed_at timestamptz", pk: "(consumer, event_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "dead_letters range by first_failed_at monthly."
+  retention: "Registry indefinite. DLQ resolved entries 90 days. Topic retention per eventing.retention."
+
+extensionModel:
+  extensionPoints: ["EventBusPort adapters (Kafka-protocol, Pulsar, NATS JetStream, cloud-native buses) certified against CR-EVT-*", "Webhook signing schemes", "Archive storage adapters"]
+  forbidden: ["Producing to a topic of another context", "Unregistered event types in production"]
+
+certificationCriteria:
+  - {id: CR-EVT-01, rule: "Passes CIC-006-001 CR-006-001-01..04.", level: L1}
+  - {id: CR-EVT-02, rule: "Each EventBusPort adapter passes the ordering/at-least-once/partition-rebalance conformance suite.", level: L1}
+  - {id: CR-EVT-03, rule: "Webhook dispatcher passes SSRF test suite (private ranges, DNS rebinding, redirects).", level: L2}
+  - {id: CR-EVT-04, rule: "Archive replay of 10^8 events reproduces projections equal to log replay.", level: L2}
+validationRules:
+  - {id: VR-EVT-01, rule: "Every event type declared in any DOM-*.yaml is registered in the ucos.std event registry seed with owning context matching."}
+  - {id: VR-EVT-02, rule: "Every registered event type has at least one schema version."}

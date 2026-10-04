@@ -1,0 +1,199 @@
+header:
+  id: DOM-DEC
+  title: Decisions Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-010-001, CIC-009-001, CIC-008-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-011, PRIN-012, CIC-010-001]
+  certification: [CR-DEC-01, CR-DEC-02, CR-DEC-03]
+  validation: [VR-DEC-01, VR-DEC-02]
+
+purpose: >
+  Record, explain, replay, and govern every consequential decision UCOS makes — by policies, rules,
+  resolvers, models, agents, or humans — implementing CIC-010-001 as a service, so that any outcome
+  affecting a party can be explained, contested, and reproduced.
+
+scope:
+  includes:
+    - DecisionRecord ingestion (synchronous write-ahead and asynchronous), storage, retrieval
+    - Decision type registry with reason-code catalogues and retention classes
+    - Explanations for subjects (party-facing) and operators (full trace)
+    - Replay against recorded provider versions and snapshots
+    - Overrides and appeals (with DOM-WFL)
+    - Outcome linkage (later facts confirming/refuting decisions) and decision quality analytics
+  excludes:
+    - Making decisions (providers: PDP, rules, resolvers, models)
+    - Audit records of operations (DOM-AUD)
+
+responsibilities:
+  - Durable, tamper-evident decision history (sealed into Evidence).
+  - Explanations available within SLA, localized.
+  - Replay determinism checks for regulated types.
+
+principles: [PRIN-005, PRIN-011, PRIN-012, PRIN-014]
+
+boundaries:
+  upstream: [DOM-POL, DOM-RUL, DOM-CTX, DOM-FRD, DOM-AGT, DOM-EVD]
+  downstream: [DOM-AUD, DOM-CMPL, DOM-ANL, DOM-WFL, DOM-PRI]
+
+ownership:
+  boundedContext: policy
+  owningRole: Chief Governance Architect
+  service: decision-service
+  schema: ucos_policy
+
+capabilities:
+  - {id: DEC-C1, name: Record, description: "Write-ahead and async recording with idempotency on decision id."}
+  - {id: DEC-C2, name: Explain, description: "Subject-facing and operator explanations from reason codes and traces."}
+  - {id: DEC-C3, name: Replay, description: "Re-execute providers at recorded versions; compare."}
+  - {id: DEC-C4, name: Override & appeal, description: "Human override records and appeal workflows."}
+  - {id: DEC-C5, name: Outcomes, description: "Link outcomes and compute decision quality metrics."}
+
+services:
+  - {name: DecisionRecorder, kind: application, operations: [RecordDecision, RecordDecisionBatch, LinkOutcome]}
+  - {name: OverrideService, kind: application, operations: [OverrideDecision, OpenAppeal, ResolveAppeal]}
+  - {name: ReplayService, kind: application, operations: [ReplayDecision, StartReplayCampaign]}
+  - {name: DecisionTypeRegistry, kind: application, operations: [RegisterDecisionType]}
+  - {name: DecisionQueryService, kind: application, operations: [GetDecision, FindDecisions, ExplainDecision, GetDecisionQuality]}
+
+aggregates:
+  - name: DecisionRecord
+    kernel: true
+    identity: "urn:ucos:<tenant>:decision:<ulid>"
+    invariants:
+      - "INV-DEC-1: immutable after write; corrections only by superseding records."
+      - "INV-DEC-2: adverse decisions (decision type flags adverse outcomes) carry >= 1 registered reason code."
+      - "INV-DEC-3: no clear personal data outside encrypted inputs (CIC-010-001 §4)."
+    fields:
+      - {name: schema, type: "CIC-010-001 §2 DecisionRecord"}
+  - name: DecisionType
+    identity: "urn:ucos:<namespace>:decision-type:<code>"
+    fields:
+      - {name: code, type: string}
+      - {name: adverseOutcomes, type: "CEL over output"}
+      - {name: reasonCodes, type: "string[]"}
+      - {name: recording, type: "always|adverse-only|sampled(rate)|aggregate"}
+      - {name: writeAhead, type: boolean}
+      - {name: regulated, type: boolean}
+      - {name: retentionClass, type: string}
+      - {name: explanationAudience, type: "subject|operator|both"}
+  - name: Appeal
+    identity: "urn:ucos:<tenant>:appeal:<ulid>"
+    fields:
+      - {name: decisionRef, type: InstanceUrn}
+      - {name: appellant, type: PartyUrn}
+      - {name: grounds, type: string}
+      - {name: workflowRef, type: InstanceUrn}
+      - {name: status, type: "open|in-review|upheld|overturned|withdrawn"}
+
+entities:
+  - {name: OutcomeLink, within: DecisionRecord, fields: [outcomeKind, outcomeRef, observedAt, "confirms (bool)"]}
+
+valueObjects:
+  - {name: Explanation, definition: "{decisionId, outcomeSummary (localized), reasons: [{code, message}], whatCouldChange?: [localized hints], contact/appeal link}"}
+  - {name: ReplayResult, definition: "{original, replayed, equal, diff}"}
+
+commands:
+  - {name: RecordDecision, input: "DecisionRecord", emits: [DecisionRecorded], note: "Idempotent on id; write-ahead types use synchronous gRPC with fsync'd commit before ack"}
+  - {name: RecordDecisionBatch, input: "DecisionRecord[] <= 1000", emits: [DecisionRecorded]}
+  - {name: LinkOutcome, input: "{decisionId, outcomeKind, outcomeRef, confirms}", emits: [DecisionOutcomeLinked]}
+  - {name: OverrideDecision, input: "{decisionId, newOutput, reasonCode, evidenceRef}", emits: [DecisionOverridden, DecisionRecorded]}
+  - {name: OpenAppeal, input: "{decisionId, appellant, grounds}", emits: [AppealOpened]}
+  - {name: ResolveAppeal, input: "{appealId, outcome, overrideRef?}", emits: [AppealResolved]}
+  - {name: RegisterDecisionType, input: "DecisionType + changeSetRef", emits: [DecisionTypeRegistered]}
+  - {name: StartReplayCampaign, input: "{decisionType, sample, from, to}", emits: [ReplayCampaignCompleted], async: true}
+
+queries:
+  - {name: GetDecision, input: "{id}", output: "DecisionRecord (redacted per caller)"}
+  - {name: FindDecisions, input: "{subject?, type?, from?, to?, outcome?, cursor, limit}", output: "page"}
+  - {name: ExplainDecision, input: "{id, audience, locale}", output: Explanation}
+  - {name: ReplayDecision, input: "{id}", output: ReplayResult}
+  - {name: GetDecisionQuality, input: "{type, window}", output: "{volume, adverseRate, overrideRate, precision?, recall?, byReason}"}
+
+apis:
+  - {style: REST, path: "/v1/decisions", methods: {POST: RecordDecision, GET: FindDecisions}}
+  - {style: REST, path: "/v1/decisions:batch", methods: {POST: RecordDecisionBatch}}
+  - {style: REST, path: "/v1/decisions/{id}", methods: {GET: GetDecision}}
+  - {style: REST, path: "/v1/decisions/{id}/explanation", methods: {GET: ExplainDecision}}
+  - {style: REST, path: "/v1/decisions/{id}:replay", methods: {POST: ReplayDecision}}
+  - {style: REST, path: "/v1/decisions/{id}/outcomes", methods: {POST: LinkOutcome}}
+  - {style: REST, path: "/v1/decisions/{id}:override", methods: {POST: OverrideDecision}}
+  - {style: REST, path: "/v1/decisions/{id}/appeals", methods: {POST: OpenAppeal}}
+  - {style: REST, path: "/v1/decisions/appeals/{appealId}:resolve", methods: {POST: ResolveAppeal}}
+  - {style: REST, path: "/v1/decisions/types", methods: {POST: RegisterDecisionType}}
+  - {style: REST, path: "/v1/decisions/replay-campaigns", methods: {POST: StartReplayCampaign}}
+  - {style: REST, path: "/v1/decisions/quality", methods: {GET: GetDecisionQuality}}
+  - {style: gRPC, service: "ucos.decision.v1.Recorder", rpcs: [RecordDecision, RecordDecisionBatch], note: "Write-ahead path"}
+
+events:
+  - {type: ucos.policy.decision.recorded.v1, payload: "{id, decisionType, subject, outcomeClass, reasonCodes, provider}", consumers: [analytics, compliance, privacy (DSR access)]}
+  - {type: ucos.policy.decision.outcome-linked.v1, payload: "{id, outcomeKind, confirms}"}
+  - {type: ucos.policy.decision.overridden.v1, payload: "{id, supersededBy, reasonCode}"}
+  - {type: ucos.policy.decision.replay-mismatch.v1, payload: "{id, decisionType, diffSummary}", severity: "Sev-2 for regulated types"}
+  - {type: ucos.policy.decision-type.registered.v1, payload: "{code, regulated, writeAhead}"}
+  - {type: ucos.policy.appeal.opened.v1, payload: "{appealId, decisionRef}"}
+  - {type: ucos.policy.appeal.resolved.v1, payload: "{appealId, outcome}"}
+  - {type: ucos.policy.replay-campaign.completed.v1, payload: "{decisionType, replayed, mismatches}"}
+
+stateMachines:
+  - name: AppealLifecycle
+    initial: open
+    states: [open, in-review, upheld, overturned, withdrawn]
+    terminal: [upheld, overturned, withdrawn]
+    transitions:
+      - {from: open, to: in-review, trigger: "workflow assigns reviewer"}
+      - {from: in-review, to: upheld, command: ResolveAppeal, guard: "outcome=upheld"}
+      - {from: in-review, to: overturned, command: ResolveAppeal, guard: "outcome=overturned; requires overrideRef"}
+      - {from: [open, in-review], to: withdrawn, command: withdraw}
+
+rules:
+  - {id: RUL-DEC-1, statement: "Replay mismatch for regulated types blocks further use of the provider version pending investigation (policy decision.replay-mismatch-action)."}
+  - {id: RUL-DEC-2, statement: "Subject explanations never include other parties' data, internal thresholds, or model internals beyond reason codes and actionable hints."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:decision.sampling", purpose: "Sampling rates for non-mandatory recording"}
+  - {urn: "urn:ucos:ucos.std:policy:decision.regulated-types", purpose: "Decision types treated as regulated per jurisdiction"}
+  - {urn: "urn:ucos:ucos.std:policy:decision.replay-mismatch-action", purpose: "Action on replay mismatch"}
+
+decisions:
+  - {id: DEC-DEC-1, question: "Must this decision be recorded synchronously?", algorithm: "DecisionType.writeAhead or regulated per decision.regulated-types in context"}
+
+security:
+  permissions: [decision.read, decision.read.trace, decision.record, decision.override, decision.appeal.resolve, decision.replay, decision.type.register]
+  dataClassification: "Confidential; encrypted inputs restricted; subject explanations available to the subject."
+  threats: ["Record tampering -> immutable + hourly sealing into Evidence ledger", "Explanation leakage -> audience-specific redaction"]
+
+governance:
+  changeControl: "Decision types and reason catalogues via ChangeSet; overrides via PDP + evidence."
+  evidence: "Hourly sealed segments (digests) in the Evidence ledger."
+
+runtimeBehavior:
+  consistency: "Write-ahead records durable before ack (synchronous replication to 2 replicas)."
+  slo: {RecordDecision_writeahead_p99_ms: 8, ExplainDecision_p99_ms: 100, availability: "99.99%"}
+  scale: "10^5 records/s per region (with sampling)."
+
+persistenceModel:
+  store: PostgreSQL schema ucos_policy (separate tables) + archive
+  tables:
+    - {name: decision_records, columns: "tenant_id, id, decision_type, subject, principal, provider jsonb, inputs_digest bytea, inputs_enc bytea, context_digest bytea, output jsonb, reasons jsonb, trace jsonb, supersedes char(26), decided_at timestamptz", pk: "(tenant_id, id, decided_at)", indexes: ["(tenant_id, subject, decided_at desc)", "(tenant_id, decision_type, decided_at)"]}
+    - {name: outcome_links, columns: "tenant_id, decision_id, outcome_kind, outcome_ref, confirms, observed_at", pk: "(tenant_id, decision_id, outcome_ref)"}
+    - {name: decision_types, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: appeals, columns: "tenant_id, id, decision_id, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "decision_records range(decided_at) daily x hash(tenant_id) 16."
+  retention: "Per retentionClass (CIC-003-001 §8); regulated min 7 years."
+
+extensionModel:
+  extensionPoints: ["Decision types and reason catalogues in packs", "Explanation renderers per decision type", "Outcome sources"]
+  forbidden: ["Deleting or editing records"]
+
+certificationCriteria:
+  - {id: CR-DEC-01, rule: "Passes CIC-010-001 CR-010-001-01..04.", level: L1}
+  - {id: CR-DEC-02, rule: "Explanation endpoint never returns another party's identifiers or internal thresholds (DLP + snapshot tests).", level: L1}
+  - {id: CR-DEC-03, rule: "Write-ahead RecordDecision p99 <= 8ms at 20,000 rps.", level: L2}
+validationRules:
+  - {id: VR-DEC-01, rule: "Every decision type registered has reason codes present in the reason-code registry."}
+  - {id: VR-DEC-02, rule: "Every reason code referenced by DOM specs and policies is registered."}

@@ -1,0 +1,183 @@
+header:
+  id: DOM-TRST
+  title: Trust Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Security Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-014-001, CIC-000-004, CIC-002-001]
+  traces: [PRIN-010, PRIN-012, PRIN-022, DOM-EVD]
+  certification: [CR-TRST-01, CR-TRST-02, CR-TRST-03]
+  validation: [VR-TRST-01, VR-TRST-02]
+
+purpose: >
+  Decide whom and what UCOS trusts for which assertions: trust anchors (CA roots, signing keys,
+  TSAs), trusted issuers of claims and credentials (certification bodies, registries, verifiable
+  credential issuers), accreditation scopes, and trust lists — so that signatures, claims,
+  certifications, and credentials are verified against governed trust, never against hardcoded keys.
+
+scope:
+  includes:
+    - Trust anchors (X.509 roots/intermediates, JWKS endpoints, Sigstore roots, TSA certificates)
+    - Trusted issuers with accreditation scopes (claim types, credential types, jurisdictions) and validity
+    - Trust lists import (e.g. EU LOTL/eIDAS trusted lists, accreditation body registries)
+    - Verification service for signatures, certificate chains (incl. revocation via OCSP/CRL), and W3C Verifiable Credentials 2.0
+  excludes:
+    - Evidence storage and ledger (DOM-EVD)
+    - Authentication of UCOS principals (DOM-IDN)
+    - Claim lifecycle (DOM-PRV)
+
+responsibilities:
+  - Single governed source of trust decisions.
+  - Revocation-aware verification with deterministic results for a given asOf.
+  - Scope-limited trust (an issuer trusted for organic certification is not trusted for carbon claims).
+
+principles: [PRIN-010, PRIN-012, PRIN-022]
+
+boundaries:
+  upstream: [DOM-GOV, DOM-REF, DOM-ORG]
+  downstream: [DOM-EVD, DOM-PRV, DOM-IDN, DOM-CRT, DOM-EXT, DOM-AUTH]
+
+ownership:
+  boundedContext: evidence
+  owningRole: Chief Security Architect
+  service: trust-service
+  schema: ucos_evidence
+
+capabilities:
+  - {id: TRST-C1, name: Anchors, description: "Register and rotate trust anchors."}
+  - {id: TRST-C2, name: Issuers, description: "Accredit issuers for scopes; suspend/revoke."}
+  - {id: TRST-C3, name: Trust lists, description: "Import and refresh external trust lists."}
+  - {id: TRST-C4, name: Verify, description: "Verify signatures, chains, credentials at asOf with revocation checks."}
+
+services:
+  - {name: TrustCommandService, kind: application, operations: [RegisterTrustAnchor, RetireTrustAnchor, AccreditIssuer, SuspendIssuer, RevokeIssuerAccreditation, ImportTrustList]}
+  - {name: Verifier, kind: domain-service, contract: "verify(artifact, purpose, asOf) -> {valid, signer, issuerAccredited, chain[], revocationStatus, reasons[]}; supports JWS, COSE, CMS/PAdES, Sigstore bundles, VC 2.0 (JSON-LD and JWT)"}
+  - {name: TrustQueryService, kind: application, operations: [VerifyArtifact, GetIssuer, FindIssuers, GetTrustAnchor]}
+
+aggregates:
+  - name: TrustAnchor
+    identity: "urn:ucos:<namespace>:trust-anchor:<code>"
+    invariants: ["INV-TRST-1: anchor material fingerprint immutable; rotation creates a new anchor with overlap window."]
+    fields:
+      - {name: kind, type: "x509-root|x509-intermediate|jwks|sigstore-root|tsa"}
+      - {name: material, type: "PEM/JWKS/URL + fingerprint"}
+      - {name: purposes, type: "string[] (evidence-signature, credential, tsa, plugin-signing, pack-signing)"}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: Instant}
+      - {name: status, type: "active|retired|compromised"}
+  - name: IssuerAccreditation
+    identity: "urn:ucos:<tenant|global>:issuer-accreditation:<ulid>"
+    invariants: ["INV-TRST-2: issuer identified by verified party and key/DID; scopes non-empty; no overlapping active accreditation for same (issuer, scope)."]
+    fields:
+      - {name: issuer, type: PartyUrn}
+      - {name: identifiers, type: "[DID | key fingerprint | certificate subject]"}
+      - {name: scopes, type: "[{claimType|credentialType, jurisdictions[]}]"}
+      - {name: accreditedBy, type: "PartyUrn | trust list ref"}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: status, type: "active|suspended|revoked|expired"}
+  - name: TrustList
+    identity: "urn:ucos:global:trust-list:<code>"
+    fields:
+      - {name: source, type: uri}
+      - {name: format, type: "etsi-ts-119-612|json|csv"}
+      - {name: signatureAnchor, type: TrustAnchorUrn}
+      - {name: lastImportedAt, type: Instant}
+      - {name: entries, type: int}
+
+entities: []
+
+valueObjects:
+  - {name: VerificationResult, definition: "{valid, signer, issuerAccredited, scopeMatched, chain[], revocationStatus: good|revoked|unknown, checkedAt, asOf, reasons[]}"}
+
+commands:
+  - {name: RegisterTrustAnchor, input: "TrustAnchor + changeSetRef", emits: [TrustAnchorRegistered]}
+  - {name: RetireTrustAnchor, input: "{code, reason (retired|compromised)}", emits: [TrustAnchorRetired]}
+  - {name: AccreditIssuer, input: "IssuerAccreditation + evidenceRef", emits: [IssuerAccredited]}
+  - {name: SuspendIssuer, input: "{id, reason}", emits: [IssuerSuspended]}
+  - {name: RevokeIssuerAccreditation, input: "{id, reason, effectiveAt}", emits: [IssuerAccreditationRevoked]}
+  - {name: ImportTrustList, input: "{code}", emits: [TrustListImported], async: true}
+
+queries:
+  - {name: VerifyArtifact, input: "{artifact (bytes ref or JSON), purpose, asOf?}", output: VerificationResult}
+  - {name: GetIssuer, input: "{id}", output: IssuerAccreditation}
+  - {name: FindIssuers, input: "{scope?, jurisdiction?, status?}", output: "IssuerAccreditation[]"}
+  - {name: GetTrustAnchor, input: "{code}", output: TrustAnchor}
+
+apis:
+  - {style: REST, path: "/v1/trust/anchors", methods: {POST: RegisterTrustAnchor}}
+  - {style: REST, path: "/v1/trust/anchors/{code}", methods: {GET: GetTrustAnchor}}
+  - {style: REST, path: "/v1/trust/anchors/{code}:retire", methods: {POST: RetireTrustAnchor}}
+  - {style: REST, path: "/v1/trust/issuers", methods: {POST: AccreditIssuer, GET: FindIssuers}}
+  - {style: REST, path: "/v1/trust/issuers/{id}", methods: {GET: GetIssuer}}
+  - {style: REST, path: "/v1/trust/issuers/{id}:suspend", methods: {POST: SuspendIssuer}}
+  - {style: REST, path: "/v1/trust/issuers/{id}:revoke", methods: {POST: RevokeIssuerAccreditation}}
+  - {style: REST, path: "/v1/trust/trust-lists/{code}:import", methods: {POST: ImportTrustList}}
+  - {style: REST, path: "/v1/trust:verify", methods: {POST: VerifyArtifact}}
+
+events:
+  - {type: ucos.evidence.trust-anchor.registered.v1, payload: "{code, kind, purposes}"}
+  - {type: ucos.evidence.trust-anchor.retired.v1, payload: "{code, reason}", consumers: [all verifiers (cache purge), security]}
+  - {type: ucos.evidence.issuer.accredited.v1, payload: "{id, issuer, scopes}"}
+  - {type: ucos.evidence.issuer.suspended.v1, payload: "{id, reason}"}
+  - {type: ucos.evidence.issuer.accreditation-revoked.v1, payload: "{id, effectiveAt}", consumers: [provenance (re-verify claims)]}
+  - {type: ucos.evidence.trust-list.imported.v1, payload: "{code, entries, added, removed}"}
+
+stateMachines:
+  - name: AccreditationLifecycle
+    initial: active
+    states: [active, suspended, revoked, expired]
+    terminal: [revoked, expired]
+    transitions:
+      - {from: active, to: suspended, command: SuspendIssuer}
+      - {from: suspended, to: active, command: reinstate}
+      - {from: [active, suspended], to: revoked, command: RevokeIssuerAccreditation}
+      - {from: active, to: expired, trigger: "validTo (timer)"}
+
+rules:
+  - {id: RUL-TRST-1, statement: "Verification is evaluated at asOf: an artifact signed while the issuer was accredited and the key unrevoked remains valid after later expiry, but not after revocation flagged 'compromised' with backdated effectiveAt."}
+  - {id: RUL-TRST-2, statement: "Revocation status 'unknown' (OCSP/CRL unreachable) yields valid=false for purposes flagged strict (evidence-signature, credential) and valid=true with warning for others per policy trust.revocation-mode."}
+  - {id: RUL-TRST-3, statement: "Issuer revocation triggers re-verification of dependent claims (DOM-PRV) and certification records (DOM-CRT)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:trust.revocation-mode", purpose: "Strict vs soft revocation checking per purpose"}
+
+decisions:
+  - {id: DEC-TRST-1, question: "Is artifact A validly signed by an issuer trusted for purpose P at time T?", algorithm: "Verifier: chain to active anchor for P + issuer accreditation scope match at T + revocation status per RUL-TRST-2"}
+
+security:
+  permissions: [trust.read, trust.anchor.manage, trust.issuer.accredit, trust.list.import, trust.verify]
+  dataClassification: "Public/internal."
+  threats: ["Rogue anchor insertion -> ChangeSet with Security approval + dual control", "Downgrade to weak algorithms -> security.crypto-suite enforcement in Verifier"]
+
+governance:
+  changeControl: "Anchors and accreditations via ChangeSet with Security (anchors) or Compliance (issuers) approval."
+  evidence: "Accreditation decisions and trust-list import digests captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong for trust state; verification cache keyed (artifact digest, purpose, asOf bucket, trust version)."
+  slo: {VerifyArtifact_cached_p99_ms: 5, VerifyArtifact_uncached_p99_ms: 300, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_evidence (separate tables)
+  tables:
+    - {name: trust_anchors, columns: "tenant_id, code, kind, fingerprint, body jsonb, status, valid_from, valid_to", pk: "(tenant_id, code)"}
+    - {name: issuer_accreditations, columns: "tenant_id, id, issuer, scopes jsonb, status, valid_from, valid_to", pk: "(tenant_id, id)", indexes: ["(tenant_id, issuer)"]}
+    - {name: trust_lists, columns: "code, body jsonb", pk: "(code)", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Small; hash(tenant_id) 8."
+  retention: "Indefinite (historical verification)."
+
+extensionModel:
+  extensionPoints: ["Credential formats and DID methods (plugins)", "Trust list importers"]
+  forbidden: ["Hardcoded trust anchors in code"]
+
+certificationCriteria:
+  - {id: CR-TRST-01, rule: "Verifier passes reference test suites (X.509 path validation incl. name constraints; VC 2.0 test suite).", level: L1}
+  - {id: CR-TRST-02, rule: "asOf semantics: golden cases for expiry vs compromise revocation pass 100%.", level: L1}
+  - {id: CR-TRST-03, rule: "Issuer revocation triggers re-verification of all dependent claims within 1 hour.", level: L2}
+validationRules:
+  - {id: VR-TRST-01, rule: "Every verification purpose used by EVD, PRV, IDN, EXT maps to >= 1 active anchor in reference deployments."}
+  - {id: VR-TRST-02, rule: "Every claim type in packs lists accreditation scopes resolvable to issuers."}

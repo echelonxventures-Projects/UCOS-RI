@@ -1,0 +1,237 @@
+header:
+  id: DOM-TXO
+  title: Taxonomy and Classification Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-002-001, CIC-011-001, CIC-004-001, CIC-029-001]
+  traces: [PRIN-017, PRIN-018, PRIN-014, PRIN-004, DOM-ONT]
+  certification: [CR-TXO-01, CR-TXO-02, CR-TXO-03]
+  validation: [VR-TXO-01, VR-TXO-02]
+
+# Classification (DOM-CLS) is the assignment of terms to instances. It shares this model, service,
+# and store; specifying it separately would duplicate ownership (PRIN-001).
+subsumes:
+  - domain: DOM-CLS
+    coverage: "Classification aggregate, ClassifyObject/Declassify commands, classification events, auto-classification rules, CR-TXO-02"
+
+purpose: >
+  Own every controlled vocabulary used to categorize, navigate, segment, and derive context —
+  product categories, channels, markets, segments, regulatory classes, industry codes — as
+  tenant-definable, versioned, multi-hierarchy taxonomies, and own the classification of instances
+  against those taxonomies. No category tree is fixed in code (PRIN-018).
+
+scope:
+  includes:
+    - Taxonomy and Term aggregates (SKOS-aligned: prefLabel, altLabel, definition, broader/narrower, related, exactMatch)
+    - Multiple taxonomies per tenant; terms may have multiple broader terms (polyhierarchy) where the taxonomy allows
+    - Mappings between taxonomies (exactMatch/closeMatch/broadMatch) incl. external standards (UNSPSC, GPC, HS, NAICS)
+    - Classification of instances (CommercialObjects, Parties, etc.) with term assignments, source, and confidence
+    - Auto-classification rules (CEL) and model-based suggestions (plugins; human-confirmed)
+  excludes:
+    - Type system (DOM-ONT) — taxonomies classify, types define structure
+    - Catalog navigation trees (DOM-CAT) — may reuse taxonomies via selectors
+    - External code lists as frozen standards (DOM-REF code lists); TXO may import them as taxonomies
+
+responsibilities:
+  - Versioned, governed vocabularies with stable term URNs.
+  - Acyclic broader graphs (per taxonomy) feeding dimension hierarchies (CIC-011-001 §3.1 descendant-of).
+  - Consistent classification with provenance (who/what classified, confidence).
+
+principles: [PRIN-004, PRIN-014, PRIN-017, PRIN-018]
+
+boundaries:
+  upstream: [DOM-ONT, DOM-REF, DOM-GOV, DOM-AGT]
+  downstream: [DOM-CTX, DOM-CAT, DOM-SRC, DOM-RCM, DOM-PRC, DOM-TAX, DOM-KGR, DOM-AVL]
+
+ownership:
+  boundedContext: ontology
+  owningRole: Chief Data Architect
+  service: taxonomy-service
+  schema: ucos_ontology
+
+capabilities:
+  - {id: TXO-C1, name: Manage taxonomies, description: "Create taxonomies, terms, hierarchy, labels in all locales."}
+  - {id: TXO-C2, name: Version & publish, description: "Draft/publish taxonomy versions; term deprecation with replacement."}
+  - {id: TXO-C3, name: Map, description: "Cross-taxonomy and external-standard mappings."}
+  - {id: TXO-C4, name: Classify, description: "Assign terms to instances (manual, rule, model)."}
+  - {id: TXO-C5, name: Hierarchy queries, description: "Ancestors/descendants with closure tables for resolution and search."}
+
+services:
+  - {name: TaxonomyCommandService, kind: application, operations: [CreateTaxonomy, AddTerm, ReviseTerm, MoveTerm, DeprecateTerm, PublishTaxonomyVersion, DefineMapping, ImportTaxonomy]}
+  - {name: ClassificationService, kind: application, operations: [ClassifyObject, Declassify, DefineClassificationRule, AcceptSuggestion, RejectSuggestion]}
+  - {name: TermClosure, kind: domain-service, contract: "maintains ancestor/descendant closure per taxonomy version; isDescendant O(1)"}
+  - {name: AutoClassifier, kind: domain-service, contract: "evaluate classification rules (CEL over resolved object view) on object events; model plugins produce suggestions with confidence"}
+  - {name: TaxonomyQueryService, kind: application, operations: [GetTaxonomy, GetTerm, GetAncestors, GetDescendants, SearchTerms, GetClassifications, FindClassifiedObjects, TranslateTerm]}
+
+aggregates:
+  - name: Taxonomy
+    kernel: true
+    identity: "urn:ucos:<namespace>:taxonomy:<code>@<version>"
+    invariants:
+      - "INV-TXO-1: broader graph acyclic; if polyhierarchy=false each term has <= 1 broader."
+      - "INV-TXO-2: term codes unique within taxonomy; term URNs stable across versions."
+      - "INV-TXO-3: published versions immutable; deprecated terms keep URN with replacedBy."
+    fields:
+      - {name: code, type: string}
+      - {name: label, type: LocalizedText}
+      - {name: polyhierarchy, type: boolean}
+      - {name: purpose, type: "classification|dimension-values|navigation|regulatory|segmentation"}
+      - {name: version, type: SemVer}
+      - {name: state, type: DefinitionState}
+  - name: Term
+    identity: "urn:ucos:<namespace>:term:<taxonomy>/<code>"
+    fields:
+      - {name: code, type: string}
+      - {name: prefLabel, type: LocalizedText}
+      - {name: altLabels, type: "LocalizedText[]"}
+      - {name: definition, type: LocalizedText}
+      - {name: broader, type: "TermUrn[]"}
+      - {name: related, type: "TermUrn[]"}
+      - {name: attributes, type: "map (e.g. tax hints, sustainability class)"}
+      - {name: deprecated, type: boolean}
+      - {name: replacedBy, type: "TermUrn?"}
+  - name: Classification
+    identity: "urn:ucos:<tenant>:classification:<ulid>"
+    invariants:
+      - "INV-TXO-4: one active classification per (subject, taxonomy, term); terms must be non-deprecated at assignment."
+      - "INV-TXO-5: taxonomies flagged singleAssignment allow at most one term per subject."
+    fields:
+      - {name: subject, type: InstanceUrn}
+      - {name: term, type: TermUrn}
+      - {name: source, type: "manual|rule|model|import"}
+      - {name: sourceRef, type: "rule URN | model ref | import batch"}
+      - {name: confidence, type: "decimal 0..1"}
+      - {name: status, type: "suggested|active|rejected|ended"}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+
+entities:
+  - {name: Mapping, within: Taxonomy, fields: [fromTerm, toTerm, "matchType (exact|close|broad|narrow|related)", source]}
+  - {name: ClassificationRule, within: Taxonomy, fields: [ruleId, appliesTo (typeRef), condition (CEL), term, priority]}
+
+valueObjects:
+  - {name: TermPath, definition: "ordered list of term URNs from root to term (per broader chain)"}
+
+commands:
+  - {name: CreateTaxonomy, input: "{code, label, polyhierarchy, purpose, singleAssignment?}", emits: [TaxonomyCreated]}
+  - {name: AddTerm, input: "{taxonomy, code, prefLabel, broader[], definition?}", emits: [TermAdded], preconditions: ["INV-TXO-1,2"]}
+  - {name: ReviseTerm, input: "{term, patch}", emits: [TermRevised]}
+  - {name: MoveTerm, input: "{term, newBroader[]}", emits: [TermMoved], preconditions: ["INV-TXO-1"]}
+  - {name: DeprecateTerm, input: "{term, replacedBy?}", emits: [TermDeprecated], note: "Active classifications migrate to replacedBy via job if provided"}
+  - {name: PublishTaxonomyVersion, input: "{taxonomy, approvalRef}", emits: [TaxonomyVersionPublished]}
+  - {name: DefineMapping, input: "Mapping", emits: [TaxonomyMappingDefined]}
+  - {name: ImportTaxonomy, input: "{format: skos-rdf|csv|code-list-ref, source}", emits: [TaxonomyImported], async: true}
+  - {name: ClassifyObject, input: "{subject, term, source, confidence?}", emits: [ObjectClassified]}
+  - {name: Declassify, input: "{classificationId, reason}", emits: [ObjectDeclassified]}
+  - {name: DefineClassificationRule, input: "ClassificationRule + changeSetRef", emits: [ClassificationRuleDefined]}
+  - {name: AcceptSuggestion, input: "{classificationId}", emits: [ObjectClassified]}
+  - {name: RejectSuggestion, input: "{classificationId, reason}", emits: [ClassificationSuggestionRejected]}
+
+queries:
+  - {name: GetTaxonomy, input: "{urn, version?}", output: "Taxonomy + root terms"}
+  - {name: GetTerm, input: "{urn, locale?}", output: Term}
+  - {name: GetAncestors, input: "{term}", output: "TermPath[]"}
+  - {name: GetDescendants, input: "{term, depth?}", output: "TermUrn[]"}
+  - {name: SearchTerms, input: "{taxonomy?, text, locale, limit}", output: "Term[] (label + altLabel match)"}
+  - {name: GetClassifications, input: "{subject, taxonomy?}", output: "Classification[]"}
+  - {name: FindClassifiedObjects, input: "{term, includeDescendants, cursor, limit}", output: "page of subjects"}
+  - {name: TranslateTerm, input: "{term, targetTaxonomy}", output: "mapped terms with matchType"}
+
+apis:
+  - {style: REST, path: "/v1/taxonomy/taxonomies", methods: {POST: CreateTaxonomy}}
+  - {style: REST, path: "/v1/taxonomy/taxonomies/{urn}", methods: {GET: GetTaxonomy}}
+  - {style: REST, path: "/v1/taxonomy/taxonomies/{urn}:publish", methods: {POST: PublishTaxonomyVersion}}
+  - {style: REST, path: "/v1/taxonomy/taxonomies/{urn}/terms", methods: {POST: AddTerm}}
+  - {style: REST, path: "/v1/taxonomy/taxonomies:import", methods: {POST: ImportTaxonomy}}
+  - {style: REST, path: "/v1/taxonomy/mappings", methods: {POST: DefineMapping}}
+  - {style: REST, path: "/v1/taxonomy/terms/{urn}", methods: {GET: GetTerm, PATCH: ReviseTerm}}
+  - {style: REST, path: "/v1/taxonomy/terms/{urn}:move", methods: {POST: MoveTerm}}
+  - {style: REST, path: "/v1/taxonomy/terms/{urn}:deprecate", methods: {POST: DeprecateTerm}}
+  - {style: REST, path: "/v1/taxonomy/terms/{urn}/ancestors", methods: {GET: GetAncestors}}
+  - {style: REST, path: "/v1/taxonomy/terms/{urn}/descendants", methods: {GET: GetDescendants}}
+  - {style: REST, path: "/v1/taxonomy/terms/{urn}/objects", methods: {GET: FindClassifiedObjects}}
+  - {style: REST, path: "/v1/taxonomy/terms/{urn}:translate", methods: {GET: TranslateTerm}}
+  - {style: REST, path: "/v1/taxonomy/terms:search", methods: {GET: SearchTerms}}
+  - {style: REST, path: "/v1/taxonomy/classifications", methods: {POST: ClassifyObject, GET: GetClassifications}}
+  - {style: REST, path: "/v1/taxonomy/classifications/{id}:declassify", methods: {POST: Declassify}}
+  - {style: REST, path: "/v1/taxonomy/classifications/{id}:accept", methods: {POST: AcceptSuggestion}}
+  - {style: REST, path: "/v1/taxonomy/classifications/{id}:reject", methods: {POST: RejectSuggestion}}
+  - {style: REST, path: "/v1/taxonomy/classification-rules", methods: {POST: DefineClassificationRule}}
+
+events:
+  - {type: ucos.ontology.taxonomy.created.v1, payload: "{urn, code, purpose}"}
+  - {type: ucos.ontology.taxonomy.version-published.v1, payload: "{urn, version, termCount}", consumers: [context hierarchy index, catalog, search]}
+  - {type: ucos.ontology.taxonomy.imported.v1, payload: "{urn, terms}"}
+  - {type: ucos.ontology.taxonomy.mapping-defined.v1, payload: "{fromTerm, toTerm, matchType}"}
+  - {type: ucos.ontology.term.added.v1, payload: "{urn, broader}"}
+  - {type: ucos.ontology.term.revised.v1, payload: "{urn}"}
+  - {type: ucos.ontology.term.moved.v1, payload: "{urn, oldBroader, newBroader}"}
+  - {type: ucos.ontology.term.deprecated.v1, payload: "{urn, replacedBy}"}
+  - {type: ucos.ontology.classification.object-classified.v1, payload: "{id, subject, term, source, confidence}", consumers: [catalog membership, search, recommendations, tax]}
+  - {type: ucos.ontology.classification.object-declassified.v1, payload: "{id, subject, term}"}
+  - {type: ucos.ontology.classification.rule-defined.v1, payload: "{ruleId, appliesTo, term}"}
+  - {type: ucos.ontology.classification.suggestion-rejected.v1, payload: "{id, reason}"}
+
+stateMachines:
+  - name: ClassificationStatus
+    initial: suggested
+    states: [suggested, active, rejected, ended]
+    terminal: [rejected, ended]
+    transitions:
+      - {from: suggested, to: active, command: AcceptSuggestion}
+      - {from: suggested, to: rejected, command: RejectSuggestion}
+      - {from: active, to: ended, command: Declassify}
+    note: "Manual and rule classifications are created directly in active."
+
+rules:
+  - {id: RUL-TXO-1, statement: "Model-based classifications are created as suggested unless confidence >= policy taxonomy.auto-accept-threshold AND the taxonomy is not regulatory."}
+  - {id: RUL-TXO-2, statement: "Regulatory-purpose taxonomies (e.g. HS codes, hazmat classes) require manual or rule classification with Evidence; model suggestions never auto-accept."}
+  - {id: RUL-TXO-3, statement: "Term moves trigger closure recomputation and emit term.moved so dependent caches (dimension hierarchies, catalog selectors) invalidate."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:taxonomy.auto-accept-threshold", purpose: "Minimum model confidence for auto-accepted classifications"}
+  - {urn: "urn:ucos:ucos.std:policy:taxonomy.authoring", purpose: "Who may author which taxonomies"}
+
+decisions:
+  - {id: DEC-TXO-1, question: "Is value v a descendant of term x?", algorithm: "Closure lookup in the taxonomy version effective at asOf"}
+  - {id: DEC-TXO-2, question: "Should a suggested classification auto-activate?", algorithm: "RUL-TXO-1/2"}
+
+security:
+  permissions: [taxonomy.read, taxonomy.author, taxonomy.publish, classification.assign, classification.rule.define]
+  dataClassification: "Public/internal vocabularies; segment taxonomies applied to persons are personal when classifying persons."
+  threats: ["Classification poisoning by models -> suggestions + human acceptance for regulatory taxonomies"]
+
+governance:
+  changeControl: "Taxonomy publication and classification rules via ChangeSet; manual classifications via PDP."
+  evidence: "Regulatory classifications store Evidence (rulings, documents)."
+
+runtimeBehavior:
+  consistency: "Strong for writes; closure and classification projections eventual (p99 2s)."
+  slo: {GetAncestors_p99_ms: 3, ClassifyObject_p99_ms: 30, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_ontology (shared context; separate tables)
+  tables:
+    - {name: taxonomies, columns: "tenant_id, urn, body jsonb, state", pk: "(tenant_id, urn)"}
+    - {name: terms, columns: "tenant_id, urn, taxonomy, code, body jsonb, deprecated bool", pk: "(tenant_id, urn)", indexes: ["unique(tenant_id, taxonomy, code)", "gin(to_tsvector('simple', body->>'labelsFlat'))"]}
+    - {name: term_closure, columns: "tenant_id, taxonomy_version, ancestor, descendant, depth", pk: "(tenant_id, taxonomy_version, descendant, ancestor)"}
+    - {name: mappings, columns: "tenant_id, from_term, to_term, match_type", pk: "(tenant_id, from_term, to_term)"}
+    - {name: classifications, columns: "tenant_id, id, subject, term, taxonomy, source, confidence, status, valid_from, valid_to", pk: "(tenant_id, id)", indexes: ["(tenant_id, subject)", "(tenant_id, term, status)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "classifications hash(tenant_id) 64."
+  retention: "Indefinite for vocabularies; ended classifications 24 months hot then archive."
+
+extensionModel:
+  extensionPoints: ["Taxonomies in tenant namespaces and industry packs", "Classifier model plugins", "Importers (SKOS, GPC, UNSPSC, ECLASS)"]
+  forbidden: ["Category enums in code (UCOS-L001)"]
+
+certificationCriteria:
+  - {id: CR-TXO-01, rule: "Closure equals transitive closure after 10^5 random add/move/deprecate operations including polyhierarchy.", level: L1}
+  - {id: CR-TXO-02, rule: "Regulatory taxonomy classifications cannot be auto-accepted from model suggestions (negative tests).", level: L1}
+  - {id: CR-TXO-03, rule: "SKOS round trip (import/export) preserves labels, hierarchy, and mappings for reference vocabularies.", level: L1}
+validationRules:
+  - {id: VR-TXO-01, rule: "Every taxonomy referenced by a dimension valueSource exists in a pack."}
+  - {id: VR-TXO-02, rule: "Every pack taxonomy declares purpose and polyhierarchy."}

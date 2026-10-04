@@ -1,0 +1,170 @@
+header:
+  id: DOM-FRD
+  title: Fraud Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Security Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-016-001, CIC-010-001, CIC-008-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-010, CIC-016-001]
+  certification: [CR-FRD-01, CR-FRD-02, CR-FRD-03]
+  validation: [VR-FRD-01, VR-FRD-02]
+
+purpose: >
+  Detect and prevent fraud across commerce — payment fraud, account takeover, fake account creation,
+  promotion and refund abuse, reseller/arbitrage abuse, agent misuse — by producing RiskAssessments
+  (CIC-016-001 §1) in real time from rules and models, routing reviews, and learning from outcomes.
+
+scope:
+  includes:
+    - Fraud checkpoints (account-create, login, checkout, payment, refund, promotion redemption, payout-method change, agent action)
+    - Fraud rules (fact kind risk-rule) and models (DOM-INT) producing RiskAssessments
+    - Velocity counters and lists (allow/deny lists of devices, instruments, emails by keyed hash)
+    - Manual review queues and decisions; chargeback/outcome feedback
+  excludes:
+    - Final action decisions (policies risk.<subject>-action via PDP), payment processing (DOM-PAY)
+
+responsibilities:
+  - Assessments within latency budget with fail-mode per policy.
+  - Adverse outcomes explainable with reason codes.
+  - Continuous feedback from outcomes.
+
+principles: [PRIN-005, PRIN-010]
+
+boundaries:
+  upstream: [DOM-INT, DOM-IDN, DOM-PTY, DOM-ORD, DOM-PAY, DOM-CMP, DOM-AGT]
+  downstream: [DOM-ORD, DOM-PAY, DOM-STL, DOM-DEC, DOM-ORK]
+
+ownership:
+  boundedContext: risk
+  owningRole: Chief Security Architect
+  service: fraud-service
+  schema: ucos_risk
+
+capabilities:
+  - {id: FRD-C1, name: Assess, description: "Real-time fraud assessment per checkpoint."}
+  - {id: FRD-C2, name: Rules & lists, description: "Velocity rules, allow/deny lists."}
+  - {id: FRD-C3, name: Review, description: "Manual review queues and decisions."}
+  - {id: FRD-C4, name: Learn, description: "Outcome feedback and rule/model performance."}
+
+services:
+  - {name: FraudAssessmentService, kind: application, operations: [AssessFraud]}
+  - {name: FraudCommandService, kind: application, operations: [DefineFraudRule, AddListEntry, RemoveListEntry, DecideReview, RecordFraudOutcome]}
+  - {name: VelocityStore, kind: infrastructure, contract: "Sliding-window counters keyed by hashed identifiers (device, instrument, email, IP prefix, party); CachePort-backed with persistence for audit"}
+  - {name: FraudQueryService, kind: application, operations: [GetReviewQueue, GetRulePerformance]}
+
+aggregates:
+  - name: FraudCase
+    identity: "urn:ucos:<tenant>:fraud-case:<ulid>"
+    fields:
+      - {name: checkpoint, type: string}
+      - {name: subject, type: Urn}
+      - {name: assessmentRef, type: "DecisionRecord URN"}
+      - {name: reviewer, type: "PartyUrn?"}
+      - {name: decision, type: "approve|decline|escalate?"}
+      - {name: outcome, type: "confirmed-fraud|legitimate|unknown"}
+      - {name: status, type: "open|in-review|decided|closed"}
+  - name: ListEntry
+    identity: "urn:ucos:<tenant>:fraud-list:<list>/<keyHash>"
+    fields:
+      - {name: list, type: "allow|deny|watch"}
+      - {name: kind, type: "device|instrument|email|phone|ip-range|party"}
+      - {name: keyHash, type: "HMAC (DOM-SEC keyed hash)"}
+      - {name: reason, type: string}
+      - {name: expiresAt, type: "Instant?"}
+
+entities: []
+
+valueObjects:
+  - {name: FraudSignals, definition: "{device, ipRisk, velocity, identityAge, paymentInstrument, behavior, agentContext} — hashed, no raw personal data"}
+
+commands:
+  - {name: DefineFraudRule, input: "Rule (factKind risk-rule) + changeSetRef", emits: [FraudRuleDefined]}
+  - {name: AddListEntry, input: "ListEntry", emits: [FraudListEntryAdded]}
+  - {name: RemoveListEntry, input: "{list, keyHash}", emits: [FraudListEntryRemoved]}
+  - {name: DecideReview, input: "{caseId, decision, reasonCode}", emits: [FraudReviewDecided]}
+  - {name: RecordFraudOutcome, input: "{subject | decisionRef, outcome, source (chargeback|confirmation|release)}", emits: [FraudOutcomeRecorded]}
+
+queries:
+  - {name: AssessFraud, input: "{checkpoint, subject, signals, amount?, context}", output: "RiskAssessment (CIC-016-001 §1)", note: "Records DecisionRecord risk-score; adverse -> FraudCase when action=review"}
+  - {name: GetReviewQueue, input: "{checkpoint?, cursor}", output: "FraudCase[]"}
+  - {name: GetRulePerformance, input: "{window}", output: "per rule/model precision, recall, hit rate"}
+
+apis:
+  - {style: gRPC, service: "ucos.risk.v1.FraudAssessment", rpcs: [AssessFraud], note: "Low-latency path for checkout/payment"}
+  - {style: REST, path: "/v1/fraud:assess", methods: {POST: AssessFraud}}
+  - {style: REST, path: "/v1/fraud/rules", methods: {POST: DefineFraudRule}}
+  - {style: REST, path: "/v1/fraud/lists", methods: {POST: AddListEntry, DELETE: RemoveListEntry}}
+  - {style: REST, path: "/v1/fraud/cases", methods: {GET: GetReviewQueue}}
+  - {style: REST, path: "/v1/fraud/cases/{caseId}:decide", methods: {POST: DecideReview}}
+  - {style: REST, path: "/v1/fraud/outcomes", methods: {POST: RecordFraudOutcome}}
+  - {style: REST, path: "/v1/fraud/performance", methods: {GET: GetRulePerformance}}
+
+events:
+  - {type: ucos.risk.fraud.assessed.v1, payload: "{decisionRef, checkpoint, band, recommendedAction}", note: "Sampled for low band; always for high/critical"}
+  - {type: ucos.risk.fraud-case.opened.v1, payload: "{caseId, checkpoint, subject}"}
+  - {type: ucos.risk.fraud-case.decided.v1, payload: "{caseId, decision, reasonCode}", consumers: [order, payment]}
+  - {type: ucos.risk.fraud-rule.defined.v1, payload: "{urn}"}
+  - {type: ucos.risk.fraud-list.entry-added.v1, payload: "{list, kind}"}
+  - {type: ucos.risk.fraud-list.entry-removed.v1, payload: "{list, kind}"}
+  - {type: ucos.risk.fraud.outcome-recorded.v1, payload: "{decisionRef, outcome, source}", consumers: [ml monitoring, decisions]}
+
+stateMachines:
+  - name: FraudCaseLifecycle
+    initial: open
+    states: [open, in-review, decided, closed]
+    terminal: [closed]
+    transitions:
+      - {from: open, to: in-review, trigger: "assigned to reviewer"}
+      - {from: in-review, to: decided, command: DecideReview}
+      - {from: open, to: decided, trigger: "SLA timeout -> policy default action (risk.fail-mode)"}
+      - {from: decided, to: closed, command: RecordFraudOutcome}
+
+rules:
+  - {id: RUL-FRD-1, statement: "Assessment budget 50 ms p99; providers exceeding budget are skipped and the policy risk.fail-mode decides (CIC-016-001 §3)."}
+  - {id: RUL-FRD-2, statement: "Identifiers are matched only via keyed hashes; raw emails/devices never stored in fraud stores."}
+  - {id: RUL-FRD-3, statement: "Agent-initiated transactions add agent context signals (act chain, mandate limits) and are assessed against agent-specific rules."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:risk.order-action", purpose: "Map fraud/credit assessments to order actions (allow/review/step-up/block) — CIC-016-001 §1"}
+  - {urn: "urn:ucos:ucos.std:policy:risk.aggregation", purpose: "How multiple provider assessments combine"}
+  - {urn: "urn:ucos:ucos.std:policy:risk.fail-mode", purpose: "Fail-open/closed per decision type when providers time out"}
+  - {urn: "urn:ucos:ucos.std:policy:risk.fraud.bands", purpose: "Score-to-band thresholds for fraud"}
+
+decisions:
+  - {id: DEC-FRD-1, question: "What is the fraud risk of action A by subject S?", algorithm: "Rules + models in parallel -> risk.aggregation -> band (risk.fraud.bands) -> DecisionRecord"}
+
+security:
+  permissions: [fraud.assess, fraud.rules.manage, fraud.lists.manage, fraud.review, fraud.outcome.record]
+  dataClassification: "Restricted (fraud signals and lists)."
+  threats: ["Rule leakage helping fraudsters -> rules confidential, explanations to subjects use generic reason codes", "Review abuse -> SoD and audit"]
+
+governance:
+  changeControl: "Fraud rules via ChangeSet with simulation on recorded traffic; list entries via PDP."
+  evidence: "Review decisions and outcomes linked to DecisionRecords."
+
+runtimeBehavior:
+  consistency: "Velocity counters eventually consistent within 1s; assessments stateless."
+  slo: {AssessFraud_p99_ms: 50, availability: "99.99% (fail-mode on outage)"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_risk + CachePort (velocity)
+  tables:
+    - {name: fraud_cases, columns: "tenant_id, id, checkpoint, subject, assessment_ref, body jsonb, status", pk: "(tenant_id, id)", indexes: ["(tenant_id, status)"]}
+    - {name: fraud_lists, columns: "tenant_id, list, kind, key_hash bytea, reason, expires_at", pk: "(tenant_id, list, kind, key_hash)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 32."
+  retention: "Cases 5 years; lists until expiry."
+
+extensionModel:
+  extensionPoints: ["Fraud provider plugins (device intelligence, consortium data)", "Checkpoint registry"]
+  forbidden: ["Raw identifier storage"]
+
+certificationCriteria:
+  - {id: CR-FRD-01, rule: "Passes CIC-016-001 CR-016-001-01..03 for fraud checkpoints.", level: L2}
+  - {id: CR-FRD-02, rule: "Lists match only keyed hashes; DLP finds no raw identifiers in fraud stores.", level: L1}
+  - {id: CR-FRD-03, rule: "Outcome feedback updates rule performance metrics within 24h.", level: L1}
+validationRules:
+  - {id: VR-FRD-01, rule: "Every checkpoint has a fail-mode configured."}
+  - {id: VR-FRD-02, rule: "Every fraud reason code is registered."}

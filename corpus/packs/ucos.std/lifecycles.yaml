@@ -1,0 +1,194 @@
+# ucos.std LifecycleModels (DOM-LFC, semantics CIC-007-001). Each state carries a category (§2.2);
+# code may only depend on categories. 'from' may list several states or "*" (any non-terminal).
+lifecycles:
+  - name: commercial-object
+    appliesTo: [CommercialObject]
+    initial: draft
+    states:
+      - {code: draft, category: draft, editable: true}
+      - {code: in-review, category: review, editable: false}
+      - {code: approved, category: ready, editable: true}
+      - {code: active, category: active, editable: true}
+      - {code: suspended, category: suspended, editable: true}
+      - {code: end-of-sale, category: winding-down, editable: false}
+      - {code: end-of-life, category: closed, editable: false}
+      - {code: archived, category: archived, terminal: true, editable: false}
+    transitions:
+      - {code: submit, from: [draft], to: in-review, kind: command}
+      - {code: reject, from: [in-review], to: draft, kind: command, reasonRequired: true}
+      - {code: approve, from: [in-review], to: approved, kind: command, sod: {distinctFrom: [submit]}, requires: [{kind: evidence, params: {evidenceKind: approval}}]}
+      - {code: activate, from: [approved], to: active, kind: command, guard: "!has(aggregate.launchAt) || now >= aggregate.launchAt"}
+      - {code: suspend, from: [active], to: suspended, kind: command, reasonRequired: true}
+      - {code: resume, from: [suspended], to: active, kind: command}
+      - {code: end-sale, from: [active, suspended], to: end-of-sale, kind: command}
+      - {code: end-life, from: [end-of-sale], to: end-of-life, kind: command}
+      - {code: archive, from: [end-of-life], to: archived, kind: command}
+
+  - name: asset
+    appliesTo: [Asset]
+    initial: pending
+    states:
+      - {code: pending, category: ready, editable: true}
+      - {code: active, category: active, editable: true}
+      - {code: suspended, category: suspended, editable: true}
+      - {code: terminated, category: closed, editable: false}
+      - {code: archived, category: archived, terminal: true, editable: false}
+    transitions:
+      - {code: activate, from: [pending], to: active, kind: event, trigger: {eventType: ucos.transaction.order.line-status-changed.v1, filter: "event.data.to == 'completed'"}}
+      - {code: suspend, from: [active], to: suspended, kind: command, reasonRequired: true}
+      - {code: resume, from: [suspended], to: active, kind: command}
+      - {code: terminate, from: [pending, active, suspended], to: terminated, kind: command, reasonRequired: true}
+      - {code: archive, from: [terminated], to: archived, kind: timer, timerAfter: P2Y}
+
+  - name: party
+    appliesTo: [Party]
+    initial: prospect
+    states:
+      - {code: prospect, category: draft, editable: true}
+      - {code: active, category: active, editable: true}
+      - {code: inactive, category: suspended, editable: true}
+      - {code: blocked, category: suspended, editable: false}
+      - {code: merged, category: archived, terminal: true, editable: false}
+      - {code: erased, category: archived, terminal: true, editable: false}
+    transitions:
+      - {code: activate, from: [prospect, inactive], to: active, kind: command}
+      - {code: deactivate, from: [active], to: inactive, kind: command}
+      - {code: block, from: [prospect, active, inactive], to: blocked, kind: command, policy: party.block, reasonRequired: true}
+      - {code: unblock, from: [blocked], to: active, kind: command, requires: [{kind: evidence, params: {evidenceKind: approval}}]}
+      - {code: merge, from: ["*"], to: merged, kind: command}
+      - {code: erase, from: ["*"], to: erased, kind: command}
+
+  - name: offer
+    appliesTo: []
+    note: "Bound to the Offer aggregate of DOM-OFR (not a TypeDefinition)"
+    initial: draft
+    states:
+      - {code: draft, category: draft, editable: true}
+      - {code: in-review, category: review, editable: false}
+      - {code: approved, category: ready, editable: false}
+      - {code: scheduled, category: ready, editable: false}
+      - {code: published, category: active, editable: false}
+      - {code: withdrawn, category: winding-down, editable: false}
+      - {code: retired, category: archived, terminal: true, editable: false}
+    transitions:
+      - {code: submit, from: [draft], to: in-review, kind: command}
+      - {code: revise, from: [in-review], to: draft, kind: command}
+      - {code: approve, from: [in-review], to: approved, kind: event, trigger: {eventType: ucos.governance.changeset.approved.v1}}
+      - {code: schedule, from: [approved], to: scheduled, kind: command, guard: "cmd.effectiveAt > now"}
+      - {code: publish, from: [approved], to: published, kind: command, guard: "!has(cmd.effectiveAt) || cmd.effectiveAt <= now"}
+      - {code: go-live, from: [scheduled], to: published, kind: timer, timerAt: "aggregate.effectiveAt"}
+      - {code: withdraw, from: [published], to: withdrawn, kind: command}
+      - {code: retire, from: [withdrawn], to: retired, kind: command, guard: "aggregate.openReferences == 0"}
+
+  - name: entitlement
+    appliesTo: []
+    note: "Bound to the Entitlement aggregate of DOM-ENT"
+    initial: pending
+    states:
+      - {code: pending, category: ready, editable: true}
+      - {code: active, category: active, editable: true}
+      - {code: suspended, category: suspended, editable: true}
+      - {code: expired, category: closed, terminal: true, editable: false}
+      - {code: revoked, category: closed, terminal: true, editable: false}
+    transitions:
+      - {code: start, from: [pending], to: active, kind: timer, timerAt: "aggregate.validFrom"}
+      - {code: suspend, from: [active], to: suspended, kind: command, reasonRequired: true}
+      - {code: resume, from: [suspended], to: active, kind: command}
+      - {code: renew, from: [active], to: active, kind: command}
+      - {code: expire, from: [active, suspended], to: expired, kind: timer, timerAt: "aggregate.validTo"}
+      - {code: revoke, from: [pending, active, suspended], to: revoked, kind: command, reasonRequired: true}
+
+  - name: contract
+    appliesTo: [Contract]
+    initial: draft
+    states:
+      - {code: draft, category: draft, editable: true}
+      - {code: in-approval, category: review, editable: false}
+      - {code: approved, category: ready, editable: false}
+      - {code: out-for-signature, category: ready, editable: false}
+      - {code: signed, category: ready, editable: false}
+      - {code: active, category: active, editable: false}
+      - {code: in-renewal, category: active, editable: false}
+      - {code: terminating, category: winding-down, editable: false}
+      - {code: expired, category: closed, terminal: true, editable: false}
+      - {code: terminated, category: closed, terminal: true, editable: false}
+    transitions:
+      - {code: submit, from: [draft], to: in-approval, kind: command}
+      - {code: reject, from: [in-approval], to: draft, kind: command, reasonRequired: true}
+      - {code: approve, from: [in-approval], to: approved, kind: command, sod: {distinctFrom: [submit]}}
+      - {code: send-for-signature, from: [approved], to: out-for-signature, kind: command}
+      - {code: complete-signatures, from: [out-for-signature], to: signed, kind: command, guard: "aggregate.missingSignatures == 0"}
+      - {code: activate, from: [signed], to: active, kind: command, requires: [{kind: evidence, params: {evidenceKind: signature}}]}
+      - {code: open-renewal, from: [active], to: in-renewal, kind: timer, timerAt: "aggregate.effectiveTo - aggregate.noticePeriod"}
+      - {code: renew, from: [in-renewal], to: active, kind: command}
+      - {code: expire, from: [in-renewal], to: expired, kind: timer, timerAt: "aggregate.effectiveTo"}
+      - {code: terminate, from: [active, in-renewal], to: terminating, kind: command, reasonRequired: true}
+      - {code: complete-termination, from: [terminating], to: terminated, kind: timer, timerAt: "aggregate.terminationEffectiveAt"}
+
+  - name: quote
+    appliesTo: []
+    note: "Bound to the Quote aggregate of DOM-QTE"
+    initial: draft
+    states:
+      - {code: draft, category: draft, editable: true}
+      - {code: in-approval, category: review, editable: false}
+      - {code: approved, category: ready, editable: false}
+      - {code: presented, category: active, editable: false}
+      - {code: accepted, category: active, editable: false}
+      - {code: converted, category: closed, terminal: true, editable: false}
+      - {code: declined, category: closed, terminal: true, editable: false}
+      - {code: expired, category: closed, terminal: true, editable: false}
+    transitions:
+      - {code: submit, from: [draft], to: in-approval, kind: command, guard: "size(aggregate.approvalPlan) > 0"}
+      - {code: auto-approve, from: [draft], to: approved, kind: command, guard: "size(aggregate.approvalPlan) == 0"}
+      - {code: approve, from: [in-approval], to: approved, kind: command}
+      - {code: reject, from: [in-approval], to: draft, kind: command, reasonRequired: true}
+      - {code: present, from: [approved], to: presented, kind: command}
+      - {code: revise, from: [approved, presented], to: draft, kind: command}
+      - {code: accept, from: [presented], to: accepted, kind: command, requires: [{kind: evidence, params: {evidenceKind: acceptance}}]}
+      - {code: decline, from: [presented], to: declined, kind: command}
+      - {code: expire, from: [draft, in-approval, approved, presented], to: expired, kind: timer, timerAt: "aggregate.validUntil"}
+      - {code: convert, from: [accepted], to: converted, kind: command}
+
+  - name: order
+    appliesTo: []
+    note: "Bound to the Order aggregate of DOM-ORD; status transitions are system-driven from line progress (INV-ORD-5)"
+    initial: submitted
+    states:
+      - {code: submitted, category: draft, editable: false}
+      - {code: validating, category: review, editable: false}
+      - {code: awaiting-payment, category: review, editable: false}
+      - {code: accepted, category: active, editable: false}
+      - {code: in-progress, category: active, editable: false}
+      - {code: partially-completed, category: active, editable: false}
+      - {code: failed, category: suspended, editable: false}
+      - {code: cancelling, category: winding-down, editable: false}
+      - {code: completed, category: closed, terminal: true, editable: false}
+      - {code: rejected, category: closed, terminal: true, editable: false}
+      - {code: cancelled, category: closed, terminal: true, editable: false}
+    transitions:
+      - {code: start-validation, from: [submitted], to: validating, kind: automatic}
+      - {code: reject, from: [validating, awaiting-payment], to: rejected, kind: event, trigger: {eventType: ucos.transaction.order.rejected.v1}}
+      - {code: await-payment, from: [validating], to: awaiting-payment, kind: event, trigger: {eventType: ucos.settlement.payment.authentication-required.v1}}
+      - {code: accept, from: [validating, awaiting-payment], to: accepted, kind: event, trigger: {eventType: ucos.transaction.order.accepted.v1}}
+      - {code: payment-timeout, from: [awaiting-payment], to: rejected, kind: timer, timerAfter: PT30M}
+      - {code: start, from: [accepted], to: in-progress, kind: event, trigger: {eventType: ucos.transaction.order.fulfillment-task-issued.v1}}
+      - {code: partial, from: [in-progress], to: partially-completed, kind: event, trigger: {eventType: ucos.transaction.order.line-status-changed.v1, filter: "aggregate.completedLines > 0 && aggregate.openLines > 0"}}
+      - {code: complete, from: [in-progress, partially-completed], to: completed, kind: event, trigger: {eventType: ucos.transaction.order.line-status-changed.v1, filter: "aggregate.openLines == 0 && aggregate.completedLines > 0"}}
+      - {code: fail, from: [in-progress, partially-completed], to: failed, kind: event, trigger: {eventType: ucos.transaction.order.fulfillment-task-progressed.v1, filter: "event.data.status == 'failed'"}}
+      - {code: retry, from: [failed], to: in-progress, kind: command}
+      - {code: cancel, from: [accepted, in-progress, partially-completed], to: cancelling, kind: command, guard: "aggregate.linesPastPointOfNoReturn == 0"}
+      - {code: complete-cancellation, from: [cancelling], to: cancelled, kind: event, trigger: {eventType: ucos.transaction.order.cancelled.v1}}
+
+  - name: resource
+    appliesTo: [FulfillmentNode]
+    initial: planned
+    states:
+      - {code: planned, category: draft, editable: true}
+      - {code: active, category: active, editable: true}
+      - {code: inactive, category: suspended, editable: true}
+      - {code: retired, category: archived, terminal: true, editable: false}
+    transitions:
+      - {code: activate, from: [planned, inactive], to: active, kind: command}
+      - {code: deactivate, from: [active], to: inactive, kind: command}
+      - {code: retire, from: [inactive], to: retired, kind: command}

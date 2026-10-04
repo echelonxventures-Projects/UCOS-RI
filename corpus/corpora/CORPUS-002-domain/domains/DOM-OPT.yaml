@@ -1,0 +1,169 @@
+header:
+  id: DOM-OPT
+  title: Optimization Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief AI Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-019-001, CIC-015-001, CIC-017-001, CIC-028-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-011, PRIN-013, CIC-019-001]
+  certification: [CR-OPT-01, CR-OPT-02, CR-OPT-03]
+  validation: [VR-OPT-01, VR-OPT-02]
+
+plugin:
+  id: ucos.ext.optimization
+  isolation: I4
+  consumesPorts: [EventBusPort, AnalyticsStorePort, SolverPort]
+  providesApis: ["/v1/optimizations/*"]
+  requiredPacks: ["ucos.std@^1.0"]
+
+purpose: >
+  Recommend better commercial configurations — prices and markdowns, promotions, assortment,
+  sourcing networks, territory designs, bundle compositions — by solving declared objectives under
+  policy constraints, validating candidates on twins, and emitting proposals only as draft
+  ChangeSets (CIC-019-001 §4); never changing production directly.
+
+scope:
+  includes:
+    - Optimization problems (objective, decision variables mapped to metadata, constraints from policies and business rules)
+    - Solver runs via SolverPort (LP/MILP/CP/heuristics/ML-based)
+    - Candidate validation via DOM-SIM on twins
+    - Proposals as draft ChangeSets with expected impact and explanations
+  excludes:
+    - Applying changes (DOM-GOV), forecasting (DOM-FCS), simulation execution (DOM-SIM)
+
+responsibilities:
+  - Proposals respect every declared constraint (floors, fairness, regulatory caps).
+  - Proposals are explainable and evidence-backed.
+
+principles: [PRIN-005, PRIN-011, PRIN-013]
+
+boundaries:
+  upstream: [DOM-FCS, DOM-PRF, DOM-CST, DOM-SIM, DOM-POL, DOM-RUL, DOM-ANL]
+  downstream: [DOM-GOV, DOM-PRC, DOM-CMP, DOM-PFL, DOM-AVL, DOM-TER]
+
+ownership:
+  boundedContext: intelligence
+  owningRole: Chief AI Architect
+  service: optimization-service
+  schema: ucos_intelligence
+
+capabilities:
+  - {id: OPT-C1, name: Problems, description: "Declare objectives, variables, constraints."}
+  - {id: OPT-C2, name: Solve, description: "Run solvers with time/quality limits."}
+  - {id: OPT-C3, name: Validate, description: "Validate candidates on twins."}
+  - {id: OPT-C4, name: Propose, description: "Emit draft ChangeSets with impact."}
+
+services:
+  - {name: OptimizationCommandService, kind: application, operations: [DefineProblem, SolveProblem, ValidateSolution, ProposeSolution]}
+  - {name: ConstraintCompiler, kind: domain-service, contract: "compile(problem) -> solver model; constraints sourced from policies (pricing.floor, pricing.rounding, regulatory caps), rules, and explicit bounds; infeasibility reported with minimal conflicting set"}
+  - {name: OptimizationQueryService, kind: application, operations: [GetSolution, ExplainSolution]}
+
+aggregates:
+  - name: OptimizationProblem
+    identity: "urn:ucos:<tenant>:optimization-problem:<code>@<semver>"
+    invariants: ["INV-OPT-1: every decision variable maps to a governed metadata field (price entry, adjustment value, membership, sourcing priority, territory assignment); every policy-declared constraint for those fields is included automatically."]
+    fields:
+      - {name: kind, type: "pricing|markdown|promotion|assortment|sourcing|territory|bundle"}
+      - {name: objective, type: "{maximize|minimize, expression over metrics (e.g. margin, revenue, service level), weights}"}
+      - {name: variables, type: "[{target, domain}]"}
+      - {name: constraints, type: "[{expression, source: policy|rule|explicit}]"}
+      - {name: dataInputs, type: "forecast runs, cost, elasticity models"}
+  - name: Solution
+    identity: "urn:ucos:<tenant>:optimization-solution:<ulid>"
+    fields:
+      - {name: problemRef, type: string}
+      - {name: assignments, type: "variable -> value"}
+      - {name: objectiveValue, type: decimal}
+      - {name: gap, type: "decimal (optimality gap)"}
+      - {name: validationRunRef, type: "scenario run ref?"}
+      - {name: changeSetRef, type: "InstanceUrn?"}
+      - {name: status, type: "solved|infeasible|timeout|validated|proposed|rejected"}
+
+entities: []
+
+valueObjects:
+  - {name: Explanation, definition: "{bindingConstraints[], sensitivity (shadow prices), topDrivers}"}
+
+commands:
+  - {name: DefineProblem, input: "OptimizationProblem + changeSetRef", emits: [OptimizationProblemDefined]}
+  - {name: SolveProblem, input: "{problemRef, timeLimit, gapTarget}", emits: [OptimizationSolved, OptimizationInfeasible], async: true}
+  - {name: ValidateSolution, input: "{solutionId, scenarioTemplate}", emits: [OptimizationValidated], async: true}
+  - {name: ProposeSolution, input: "{solutionId}", emits: [OptimizationProposed], note: "Creates draft ChangeSet with impact + explanation evidence"}
+
+queries:
+  - {name: GetSolution, input: "{solutionId}", output: Solution}
+  - {name: ExplainSolution, input: "{solutionId}", output: Explanation}
+
+apis:
+  - {style: REST, path: "/v1/optimizations/problems", methods: {POST: DefineProblem}}
+  - {style: REST, path: "/v1/optimizations/problems/{ref}:solve", methods: {POST: SolveProblem}}
+  - {style: REST, path: "/v1/optimizations/solutions/{solutionId}", methods: {GET: GetSolution}}
+  - {style: REST, path: "/v1/optimizations/solutions/{solutionId}:validate", methods: {POST: ValidateSolution}}
+  - {style: REST, path: "/v1/optimizations/solutions/{solutionId}:propose", methods: {POST: ProposeSolution}}
+  - {style: REST, path: "/v1/optimizations/solutions/{solutionId}/explanation", methods: {GET: ExplainSolution}}
+
+events:
+  - {type: ucos.intelligence.optimization-problem.defined.v1, payload: "{ref, kind}"}
+  - {type: ucos.intelligence.optimization.solved.v1, payload: "{solutionId, objectiveValue, gap}"}
+  - {type: ucos.intelligence.optimization.infeasible.v1, payload: "{problemRef, conflictingConstraints}"}
+  - {type: ucos.intelligence.optimization.validated.v1, payload: "{solutionId, scenarioRunRef, deltas}"}
+  - {type: ucos.intelligence.optimization.proposed.v1, payload: "{solutionId, changeSetRef}", consumers: [governance]}
+
+stateMachines:
+  - name: SolutionLifecycle
+    initial: solving
+    states: [solving, solved, infeasible, timeout, validated, proposed, rejected]
+    terminal: [infeasible, proposed, rejected]
+    transitions:
+      - {from: solving, to: solved, trigger: "solver returned within gap"}
+      - {from: solving, to: infeasible, trigger: "solver proved infeasible"}
+      - {from: solving, to: timeout, trigger: "time limit"}
+      - {from: [solved, timeout], to: validated, command: ValidateSolution, guard: "twin KPIs within policy bounds"}
+      - {from: validated, to: proposed, command: ProposeSolution}
+      - {from: [solved, validated], to: rejected, command: reject}
+
+rules:
+  - {id: RUL-OPT-1, statement: "Pricing optimizations include fairness constraints from policy (e.g. no personalized prices where regulated; max change per period) and price floors (pricing.floor)."}
+  - {id: RUL-OPT-2, statement: "Solutions are proposed only after twin validation unless the problem kind is flagged low-risk by policy."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:optimization.guardrails", purpose: "Max change magnitudes, fairness constraints, validation requirements per problem kind"}
+
+decisions:
+  - {id: DEC-OPT-1, question: "Which configuration best meets objective O under constraints C?", algorithm: "ConstraintCompiler -> SolverPort -> validation on twin"}
+
+security:
+  permissions: [optimization.read, optimization.define, optimization.solve, optimization.propose]
+  dataClassification: "Confidential (commercial strategy)."
+  threats: ["Constraint omission causing unlawful prices -> automatic inclusion of policy constraints (INV-OPT-1)"]
+
+governance:
+  changeControl: "Problems via ChangeSet; proposals go through normal ChangeSet approval."
+  evidence: "Explanations and validation runs attached to proposals."
+
+runtimeBehavior:
+  consistency: "Batch."
+  slo: {SolveProblem_default_time_limit_min: 15, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_intelligence (separate tables)
+  tables:
+    - {name: optimization_problems, columns: "tenant_id, ref, body jsonb", pk: "(tenant_id, ref)"}
+    - {name: optimization_solutions, columns: "tenant_id, id, problem_ref, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None."
+  retention: "Proposed solutions with ChangeSet evidence; others 180 days."
+
+extensionModel:
+  extensionPoints: ["SolverPort adapters (OR-Tools, HiGHS, commercial solvers)", "Elasticity models via DOM-INT"]
+  forbidden: ["Direct application of solutions"]
+
+certificationCriteria:
+  - {id: CR-OPT-01, rule: "Solutions never violate compiled constraints (independent checker on 10^3 problems).", level: L1}
+  - {id: CR-OPT-02, rule: "Infeasibility reports a minimal conflicting constraint set on seeded cases.", level: L1}
+  - {id: CR-OPT-03, rule: "Plugin deploys as I4 with only declared ports.", level: L2}
+validationRules:
+  - {id: VR-OPT-01, rule: "Every optimizer declares objective, constraints, and output ChangeSet item kinds (VR-019-001-02)."}
+  - {id: VR-OPT-02, rule: "Every decision variable maps to a governed field."}

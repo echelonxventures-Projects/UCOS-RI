@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-ucos-id": "urn:ucos:ucos.kernel:schema:command-result@1.0.0",
+  "title": "CommandResult",
+  "description": "Default synchronous command response: affected aggregate, new revision (also returned as ETag), correlation id, emitted event types.",
+  "type": "object",
+  "required": [
+    "aggregateId",
+    "revision",
+    "correlationId"
+  ],
+  "properties": {
+    "aggregateId": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "correlationId": {
+      "$ref": "ulid.schema.json"
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^ucos\\.[a-z0-9-]+\\.[a-z0-9-]+\\.[a-z0-9-]+\\.v[0-9]+$"
+      }
+    }
+  }
+}

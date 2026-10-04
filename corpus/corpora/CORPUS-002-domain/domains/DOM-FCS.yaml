@@ -1,0 +1,173 @@
+header:
+  id: DOM-FCS
+  title: Forecasting Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief AI Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-017-001, CIC-011-001, CIC-002-001]
+  traces: [PRIN-006, PRIN-005, PRIN-001]
+  certification: [CR-FCS-01, CR-FCS-02, CR-FCS-03]
+  validation: [VR-FCS-01, VR-FCS-02]
+
+purpose: >
+  Produce governed forecasts — demand per object/node/context, revenue and bookings, usage and
+  capacity, churn and renewals, cash collections, platform capacity — as versioned forecast runs with
+  uncertainty, explainable drivers, accuracy tracking, and human overrides, consumed by replenishment,
+  availability, planning, pricing optimization, and operations.
+
+scope:
+  includes:
+    - Forecast definitions (target measure, grain, horizon, hierarchy of dimensions, method/model)
+    - Forecast runs (point + quantiles) with input data snapshots (DOM-ANL data products)
+    - Hierarchical reconciliation (top-down/bottom-up/MinT) across dimension hierarchies
+    - Overrides with reasons and approval; consensus versions
+    - Accuracy tracking (MAPE, WAPE, bias, pinball loss) against actuals
+  excludes:
+    - Model platform (DOM-INT), replenishment execution (DOM-SUPN), planning scenarios (DOM-PLN)
+
+responsibilities:
+  - Reproducible forecasts from pinned data and model versions.
+  - Quantified uncertainty and accuracy for every published forecast.
+  - Overrides traceable and measured (forecast value added).
+
+principles: [PRIN-001, PRIN-005, PRIN-006]
+
+boundaries:
+  upstream: [DOM-ANL, DOM-INT, DOM-CTX, DOM-TXO, DOM-CMP, DOM-TIM]
+  downstream: [DOM-SUPN, DOM-AVL, DOM-PLN, DOM-OPT, DOM-RTM, DOM-FRK]
+
+ownership:
+  boundedContext: intelligence
+  owningRole: Chief AI Architect
+  service: forecasting-service
+  schema: ucos_intelligence
+
+capabilities:
+  - {id: FCS-C1, name: Define, description: "Forecast definitions with grain, horizon, hierarchy, method."}
+  - {id: FCS-C2, name: Run, description: "Execute forecast runs with quantiles and drivers."}
+  - {id: FCS-C3, name: Reconcile, description: "Hierarchical reconciliation across dimension hierarchies."}
+  - {id: FCS-C4, name: Override, description: "Governed manual adjustments and consensus versions."}
+  - {id: FCS-C5, name: Accuracy, description: "Track accuracy and forecast value added."}
+
+services:
+  - {name: ForecastCommandService, kind: application, operations: [DefineForecast, RunForecast, PublishForecast, ApplyOverride, ApproveOverride]}
+  - {name: ForecastEngine, kind: domain-service, contract: "run(definition, dataSnapshot, modelVersion) -> forecasts per series with quantiles (P10/P50/P90) and driver attributions; methods via DOM-INT models or built-ins (ETS, ARIMA, Croston for intermittent demand); deterministic seeds"}
+  - {name: ForecastQueryService, kind: application, operations: [GetForecast, GetForecastSeries, GetAccuracyReport]}
+
+aggregates:
+  - name: ForecastDefinition
+    identity: "urn:ucos:<tenant>:forecast-definition:<code>@<semver>"
+    invariants: ["INV-FCS-1: hierarchy dimensions are registered context dimensions or taxonomies; horizon and grain consistent with data product freshness."]
+    fields:
+      - {name: target, type: "metric URN (DOM-ANL)"}
+      - {name: grain, type: "time grain + dimensions"}
+      - {name: horizon, type: duration}
+      - {name: hierarchy, type: "dimension hierarchy refs"}
+      - {name: method, type: "{kind: model|builtin, ref}"}
+      - {name: reconciliation, type: "none|top-down|bottom-up|mint"}
+      - {name: schedule, type: cron}
+  - name: ForecastRun
+    identity: "urn:ucos:<tenant>:forecast-run:<ulid>"
+    invariants: ["INV-FCS-2: published runs immutable; references data snapshot digest and model version."]
+    fields:
+      - {name: definitionRef, type: string}
+      - {name: dataSnapshotRef, type: "dataset version"}
+      - {name: modelVersion, type: string}
+      - {name: series, type: "stored separately (series id -> quantiles per period)"}
+      - {name: overrides, type: "Override[]"}
+      - {name: status, type: "running|completed|published|superseded|failed"}
+
+entities:
+  - {name: Override, within: ForecastRun, fields: [overrideId, seriesSelector, periods, adjustment (absolute|percent), reason, author, approvedBy]}
+
+valueObjects:
+  - {name: SeriesForecast, definition: "{seriesKey (dimension values), periods: [{start, p10, p50, p90}], drivers[]}"}
+  - {name: AccuracyReport, definition: "{definition, window, mape, wape, bias, pinball, fvaOfOverrides}"}
+
+commands:
+  - {name: DefineForecast, input: "ForecastDefinition + changeSetRef", emits: [ForecastDefined]}
+  - {name: RunForecast, input: "{definitionRef, asOf}", emits: [ForecastRunCompleted, ForecastRunFailed], async: true}
+  - {name: PublishForecast, input: "{runId}", emits: [ForecastPublished]}
+  - {name: ApplyOverride, input: "{runId, override}", emits: [ForecastOverrideApplied]}
+  - {name: ApproveOverride, input: "{runId, overrideId}", emits: [ForecastOverrideApproved]}
+
+queries:
+  - {name: GetForecast, input: "{definitionRef, version: latest-published|runId}", output: "ForecastRun summary"}
+  - {name: GetForecastSeries, input: "{runId, seriesSelector, quantiles}", output: "SeriesForecast[]"}
+  - {name: GetAccuracyReport, input: "{definitionRef, window}", output: AccuracyReport}
+
+apis:
+  - {style: REST, path: "/v1/forecasts/definitions", methods: {POST: DefineForecast}}
+  - {style: REST, path: "/v1/forecasts/runs", methods: {POST: RunForecast}}
+  - {style: REST, path: "/v1/forecasts/runs/{runId}:publish", methods: {POST: PublishForecast}}
+  - {style: REST, path: "/v1/forecasts/runs/{runId}/overrides", methods: {POST: ApplyOverride}}
+  - {style: REST, path: "/v1/forecasts/runs/{runId}/overrides/{overrideId}:approve", methods: {POST: ApproveOverride}}
+  - {style: REST, path: "/v1/forecasts/{definitionRef}", methods: {GET: GetForecast}}
+  - {style: REST, path: "/v1/forecasts/runs/{runId}/series", methods: {POST: GetForecastSeries}}
+  - {style: REST, path: "/v1/forecasts/{definitionRef}/accuracy", methods: {GET: GetAccuracyReport}}
+
+events:
+  - {type: ucos.intelligence.forecast.defined.v1, payload: "{urn, target, horizon}"}
+  - {type: ucos.intelligence.forecast.run-completed.v1, payload: "{runId, definitionRef, series}"}
+  - {type: ucos.intelligence.forecast.run-failed.v1, payload: "{runId, reason}"}
+  - {type: ucos.intelligence.forecast.published.v1, payload: "{runId, definitionRef}", consumers: [supply replenishment, planning, runtime capacity]}
+  - {type: ucos.intelligence.forecast.override-applied.v1, payload: "{runId, overrideId}"}
+  - {type: ucos.intelligence.forecast.override-approved.v1, payload: "{runId, overrideId}"}
+
+stateMachines:
+  - name: ForecastRunLifecycle
+    initial: running
+    states: [running, completed, published, superseded, failed]
+    terminal: [superseded, failed]
+    transitions:
+      - {from: running, to: completed, trigger: "engine done"}
+      - {from: running, to: failed, trigger: "error"}
+      - {from: completed, to: published, command: PublishForecast, guard: "all overrides approved"}
+      - {from: published, to: superseded, trigger: "newer run of same definition published"}
+
+rules:
+  - {id: RUL-FCS-1, statement: "Consumers read only published runs; overrides above policy forecasting.override-threshold require approval."}
+  - {id: RUL-FCS-2, statement: "Forecast value added (FVA) of overrides is computed per author; overrides with persistently negative FVA are flagged."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:forecasting.override-threshold", purpose: "Override magnitude requiring approval"}
+
+decisions:
+  - {id: DEC-FCS-1, question: "What is expected demand for series S over horizon H?", algorithm: "ForecastEngine on pinned snapshot + model; reconciled per definition"}
+
+security:
+  permissions: [forecasting.read, forecasting.define, forecasting.run, forecasting.override, forecasting.override.approve]
+  dataClassification: "Confidential (commercial plans)."
+  threats: ["Manipulated overrides -> approvals + FVA monitoring"]
+
+governance:
+  changeControl: "Definitions via ChangeSet."
+  evidence: "Published runs record snapshot and model digests."
+
+runtimeBehavior:
+  consistency: "Batch; reproducible by pinned inputs."
+  slo: {RunForecast_100k_series_p95_min: 30, availability: "99.5%"}
+
+persistenceModel:
+  store: "PostgreSQL schema ucos_intelligence (definitions, runs) + analytics store (series)"
+  tables:
+    - {name: forecast_definitions, columns: "tenant_id, urn, body jsonb", pk: "(tenant_id, urn)"}
+    - {name: forecast_runs, columns: "tenant_id, run_id, definition_ref, body jsonb, status", pk: "(tenant_id, run_id)"}
+    - {name: forecast_series, columns: "tenant_id, run_id, series_key, period_start, p10, p50, p90", pk: "(tenant_id, run_id, series_key, period_start)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "forecast_series by (tenant_id, run_id)."
+  retention: "Published runs 3 years; superseded non-published 90 days."
+
+extensionModel:
+  extensionPoints: ["Forecast methods via DOM-INT models", "Reconciliation methods"]
+  forbidden: ["Consumers reading unpublished runs"]
+
+certificationCriteria:
+  - {id: CR-FCS-01, rule: "Re-running with the same snapshot and model reproduces series exactly.", level: L1}
+  - {id: CR-FCS-02, rule: "Reconciled hierarchies are coherent (children sum to parents) within rounding.", level: L1}
+  - {id: CR-FCS-03, rule: "Accuracy metrics match reference implementations on benchmark datasets (M4 subset).", level: L1}
+validationRules:
+  - {id: VR-FCS-01, rule: "Every definition targets a certified metric."}
+  - {id: VR-FCS-02, rule: "Every hierarchy references registered dimensions."}

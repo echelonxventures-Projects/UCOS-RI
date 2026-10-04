@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-ucos-id": "urn:ucos:ucos.kernel:schema:quantity@1.0.0",
+  "title": "Quantity",
+  "description": "Exact quantity with unit.",
+  "type": "object",
+  "required": [
+    "value",
+    "unit"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "value": {
+      "$ref": "decimal.schema.json"
+    },
+    "unit": {
+      "type": "string",
+      "minLength": 1,
+      "description": "UCUM code or registered unit."
+    }
+  }
+}

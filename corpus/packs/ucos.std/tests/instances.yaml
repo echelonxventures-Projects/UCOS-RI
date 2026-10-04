@@ -1,0 +1,193 @@
+# Fixture instances proving every concrete ucos.std type is instantiable from metadata alone
+# (CR-029-001-02 static part; scenario execution is CORPUS-030). Checked by tools/validate.py:
+# required attributes present, no attributes outside the effective schema, enum/pattern constraints hold.
+instances:
+  - id: inst-product-headphones
+    type: Product
+    enabledFacets: [Stockable, Shippable]
+    values:
+      name: {default: "Studio Headphones X1"}
+      sku: "HP-X1-BLK"
+      gtin: "09506000134352"
+      brand: "Acoustica"
+      taxCategory: "standard-goods"
+      fulfillmentMode: physical
+      unitOfMeasure: "1"
+      serialized: true
+      lotControlled: false
+      countryOfOrigin: "DE"
+      hsCode: "851830"
+      netWeight: {value: "0.28", unit: "kg"}
+      shippingClass: "parcel"
+
+  - id: inst-service-installation
+    type: Service
+    enabledFacets: [Schedulable]
+    values:
+      name: {default: "Home Network Installation"}
+      sku: "SVC-NET-INSTALL"
+      taxCategory: "standard-services"
+      fulfillmentMode: service
+      deliveryMode: onsite
+      schedulingMode: appointment
+      duration: "PT2H"
+
+  - id: inst-subscription-saas
+    type: Subscription
+    enabledFacets: [Metered, Tiered]
+    values:
+      name: {default: "Analytics Cloud — Team"}
+      sku: "SAAS-ANL-TEAM"
+      taxCategory: "digital-services"
+      fulfillmentMode: activation
+      billingPeriod: "P1M"
+      periodAlignment: calendar
+      renewalMode: auto
+      renewalTerm: "P1M"
+      entitlementScope: organization-seats
+      entitlementTemplate: {capabilities: ["urn:ucos:demo:co:01J9Z3K8Q4N6XG2W7T5R0VYB1C"], meters: [{meter: api-calls, allowance: 100000, period: P1M, overage: allow-and-rate}]}
+      meterCodes: [api-calls, storage-gb-month]
+      tierLevel: 2
+      tierName: {default: "Team"}
+
+  - id: inst-subscription-mobile
+    type: Subscription
+    enabledFacets: [Metered]
+    values:
+      name: {default: "Mobile Unlimited 5G"}
+      sku: "MOB-UNL-5G"
+      taxCategory: "telecom-services"
+      fulfillmentMode: activation
+      billingPeriod: "P1M"
+      periodAlignment: anniversary
+      renewalMode: auto
+      entitlementScope: individual
+      entitlementTemplate: {capabilities: [], meters: [{meter: data-volume, allowance: 100, period: P1M, overage: deny}, {meter: voice-minutes, allowance: -1, period: P1M, overage: allow}]}
+      meterCodes: [data-volume, voice-minutes, messages]
+
+  - id: inst-membership-loyalty
+    type: Membership
+    values:
+      name: {default: "Gold Rewards"}
+      sku: "MBR-GOLD"
+      entitlementScope: individual
+      entitlementTemplate: {capabilities: [], meters: []}
+      tierLevel: 3
+      tierName: {default: "Gold"}
+
+  - id: inst-license-perpetual
+    type: License
+    enabledFacets: [Transferable]
+    values:
+      name: {default: "Design Suite Perpetual License"}
+      sku: "LIC-DS-PERP"
+      taxCategory: "digital-goods"
+      fulfillmentMode: digital
+      entitlementScope: individual
+      entitlementTemplate: {capabilities: [], meters: []}
+      transferPolicy: within-organization
+
+  - id: inst-experience-concert
+    type: Experience
+    enabledFacets: [AgeRestricted]
+    values:
+      name: {default: "Symphony Night — Main Hall"}
+      sku: "EXP-SYM-2026-11-20"
+      taxCategory: "entertainment"
+      fulfillmentMode: digital
+      schedulingMode: fixed-time
+      capacityPerSlot: 1800
+      slotDuration: "PT3H"
+      startsAt: "2026-11-20T19:30:00Z"
+      endsAt: "2026-11-20T22:30:00Z"
+      minimumAge: 6
+
+  - id: inst-bundle-home
+    type: Bundle
+    values:
+      name: {default: "Home Connect Bundle"}
+      sku: "BDL-HOME-CONNECT"
+      taxCategory: "mixed"
+      fulfillmentMode: physical
+      compositionMode: configurable
+      priceComposition: own-price-components-zero
+
+  - id: inst-package-starter
+    type: Package
+    enabledFacets: [Shippable]
+    values:
+      name: {default: "Starter Kit"}
+      sku: "PKG-STARTER"
+      taxCategory: "standard-goods"
+      fulfillmentMode: physical
+      compositionMode: fixed
+      priceComposition: own-price
+      shippingClass: "parcel"
+
+  - id: inst-capability-export
+    type: Capability
+    values:
+      name: {default: "Data Export"}
+      sku: "CAP-DATA-EXPORT"
+      capabilityKey: "analytics.export"
+
+  - id: inst-asset-router
+    type: Asset
+    values:
+      name: {default: "Router at 12 Main St"}
+      sku: "HW-ROUTER-AX"
+      serialNumber: "SN-00042-AX"
+      sourceCommercialObject: "urn:ucos:demo:co:01J9Z3K8Q4N6XG2W7T5R0VYB1D"
+      installedAt: "2026-02-01T09:00:00Z"
+
+  - id: inst-person
+    type: Person
+    values: {displayName: "Ada Example", givenName: "Ada", familyName: "Example"}
+
+  - id: inst-organization
+    type: Organization
+    values: {displayName: "Example Industries", legalName: "Example Industries GmbH", incorporationCountry: "DE", legalForm: "GmbH"}
+
+  - id: inst-agent
+    type: Agent
+    values: {displayName: "Procurement Agent 7", accountableParty: "urn:ucos:demo:party:01J9Z3K8Q4N6XG2W7T5R0VYB1E", agentModelRef: "claude-opus-5-5"}
+
+  - id: inst-sla
+    type: ServiceLevelAgreement
+    values: {governingLaw: "DE", slaMetrics: [{metricRef: availability, objective: ">= 99.9%", window: P1M, creditScheduleRef: "urn:ucos:demo:rule:sla-credits"}]}
+
+  - id: inst-node
+    type: FulfillmentNode
+    values: {name: {default: "Berlin DC"}, nodeKind: distribution-center, timezone: "Europe/Berlin"}
+
+  - id: inst-org-unit
+    type: OrganizationalUnit
+    values: {displayName: "Example Industries — Procurement"}
+
+  - id: inst-household
+    type: Household
+    values: {displayName: "Example Household"}
+
+  - id: inst-group
+    type: Group
+    values: {displayName: "Regional Buying Group North"}
+
+  - id: inst-system
+    type: System
+    values: {displayName: "Legacy ERP", systemEndpoint: "https://erp.example.com/api"}
+
+  - id: inst-master-agreement
+    type: MasterAgreement
+    values: {governingLaw: "GB", contractValue: {amountMinor: "250000000", currency: "GBP", scale: 2}}
+
+  - id: inst-framework-agreement
+    type: FrameworkAgreement
+    values: {governingLaw: "FR"}
+
+  - id: inst-subscription-agreement
+    type: SubscriptionAgreement
+    values: {governingLaw: "US-NY", renewalMode: auto, renewalTerm: "P1Y", noticePeriod: "P30D"}
+
+  - id: inst-license-agreement
+    type: LicenseAgreement
+    values: {governingLaw: "IE", transferPolicy: none}

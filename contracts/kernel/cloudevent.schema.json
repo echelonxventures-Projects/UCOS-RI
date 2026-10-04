@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-ucos-id": "urn:ucos:ucos.kernel:schema:cloudevent@1.0.0",
+  "title": "UcosCloudEvent",
+  "description": "CloudEvents 1.0 structured envelope with UCOS extension attributes (CIC-006-001 \u00a72).",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "datacontenttype",
+    "ucostenant",
+    "ucosaggregatetype",
+    "ucosaggregateid",
+    "ucossequence",
+    "ucoscorrelationid",
+    "ucosprincipal",
+    "data"
+  ],
+  "properties": {
+    "specversion": {
+      "const": "1.0"
+    },
+    "id": {
+      "$ref": "ulid.schema.json"
+    },
+    "source": {
+      "type": "string",
+      "pattern": "^urn:ucos:svc:"
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^ucos\\.[a-z0-9-]+\\.[a-z0-9-]+\\.[a-z0-9-]+\\.v[0-9]+$"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "datacontenttype": {
+      "const": "application/json"
+    },
+    "dataschema": {
+      "type": "string"
+    },
+    "ucostenant": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,62}$"
+    },
+    "ucosaggregatetype": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "ucosaggregateid": {
+      "type": "string"
+    },
+    "ucossequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ucosversion": {
+      "type": "integer"
+    },
+    "ucoscorrelationid": {
+      "$ref": "ulid.schema.json"
+    },
+    "ucoscausationid": {
+      "$ref": "ulid.schema.json"
+    },
+    "ucosprincipal": {
+      "type": "string"
+    },
+    "ucoshomeregion": {
+      "type": "string"
+    },
+    "ucoscontext": {
+      "type": "string"
+    },
+    "data": {
+      "type": "object"
+    }
+  }
+}

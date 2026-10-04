@@ -1,0 +1,49 @@
+# Hand-authored S0 contract — events produced and consumed by the echo context (CIC-006-001 §7).
+asyncapi: 3.0.0
+info: {title: Echo (S0 platform demonstration) — Events, version: 1.0.0}
+x-ucos-source: {id: S0-ECHO, version: 1.0.0, boundedContext: echo}
+defaultContentType: application/cloudevents+json
+channels:
+  ucos_echo_message_accepted_v1:
+    address: ucos.echo.message.accepted.v1
+    messages: {MessageAccepted: {$ref: '#/components/messages/MessageAccepted'}}
+  ucos_echo_message_echoed_v1:
+    address: ucos.echo.message.echoed.v1
+    messages: {MessageEchoed: {$ref: '#/components/messages/MessageEchoed'}}
+operations:
+  publishAccepted:
+    action: send
+    channel: {$ref: '#/channels/ucos_echo_message_accepted_v1'}
+  consumeAccepted:
+    action: receive
+    channel: {$ref: '#/channels/ucos_echo_message_accepted_v1'}
+    x-ucos-consumer: echo-service.echoer
+  publishEchoed:
+    action: send
+    channel: {$ref: '#/channels/ucos_echo_message_echoed_v1'}
+components:
+  messages:
+    MessageAccepted:
+      name: ucos.echo.message.accepted.v1
+      contentType: application/json
+      headers: {$ref: ../kernel/cloudevent.schema.json}
+      payload:
+        type: object
+        additionalProperties: false
+        required: [id, text, revision]
+        properties:
+          id: {type: string}
+          text: {type: string}
+          revision: {type: integer, minimum: 1}
+    MessageEchoed:
+      name: ucos.echo.message.echoed.v1
+      contentType: application/json
+      headers: {$ref: ../kernel/cloudevent.schema.json}
+      payload:
+        type: object
+        additionalProperties: false
+        required: [id, revision, echoedAt]
+        properties:
+          id: {type: string}
+          revision: {type: integer, minimum: 1}
+          echoedAt: {type: string, format: date-time}

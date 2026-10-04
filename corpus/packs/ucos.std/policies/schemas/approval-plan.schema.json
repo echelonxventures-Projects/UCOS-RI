@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ucos:ucos.std:schema:approval-plan@1.0.0",
+  "title": "Threshold-based approval plan (CIC-015-001 §4)",
+  "type": "object",
+  "required": ["tiers"],
+  "additionalProperties": false,
+  "properties": {
+    "measure": {"type": "string"},
+    "tiers": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["upTo", "stages"], "additionalProperties": false, "properties": {
+      "upTo": {"oneOf": [{"type": "integer"}, {"const": "unbounded"}]},
+      "stages": {"type": "array", "items": {"type": "object", "required": ["approverRoles", "quorum"], "properties": {
+        "approverRoles": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "quorum": {"type": "integer", "minimum": 1}}}}}}}
+  }
+}

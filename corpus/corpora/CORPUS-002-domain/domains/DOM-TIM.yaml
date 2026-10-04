@@ -1,0 +1,174 @@
+header:
+  id: DOM-TIM
+  title: Time Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-001-001, CIC-007-001, CIC-002-001]
+  traces: [PRIN-006, PRIN-015, PRIN-016]
+  certification: [CR-TIM-01, CR-TIM-02, CR-TIM-03]
+  validation: [VR-TIM-01, VR-TIM-02]
+
+purpose: >
+  Make time a governed, testable input: the time zone database version, business calendars
+  (holidays, business days, cut-offs), effective-dating and as-of semantics, clock discipline, and
+  time travel for tests and simulations — so that every date computation (proration, deadlines,
+  promise dates, renewals) is reproducible.
+
+scope:
+  includes:
+    - IANA tz database version pinning and rollout
+    - Business calendars (holidays per jurisdiction/tenant/node), business-day arithmetic
+    - Effective-dating conventions (half-open intervals, UTC instants + business zone)
+    - Clock service and time-travel offsets for non-production tenants and digital twins
+    - Recurrence rules (RFC 5545 RRULE) evaluation for schedules
+  excludes:
+    - Fiscal calendars (DOM-ORG), node calendars with cut-offs (DOM-AVL uses TIM calendars), durable timers (DOM-LFC)
+
+responsibilities:
+  - Single tz database version per release across services.
+  - Correct business-day and recurrence arithmetic across DST and calendar edge cases.
+  - Safe time travel isolated from production.
+
+principles: [PRIN-006, PRIN-015, PRIN-016]
+
+boundaries:
+  upstream: [DOM-REF, DOM-GEO, DOM-CFG]
+  downstream: [DOM-BIL, DOM-AVL, DOM-LFC, DOM-CTR, DOM-ENT, DOM-PRI, DOM-DTW]
+
+ownership:
+  boundedContext: context
+  owningRole: Chief Architect
+  service: time-service
+  schema: ucos_context
+
+capabilities:
+  - {id: TIM-C1, name: TZ data, description: "Pin and roll out tz database versions."}
+  - {id: TIM-C2, name: Calendars, description: "Business calendars and business-day arithmetic."}
+  - {id: TIM-C3, name: Recurrence, description: "Evaluate RRULEs in a zone."}
+  - {id: TIM-C4, name: Clock & time travel, description: "Authoritative now; tenant/twin clock offsets in non-prod."}
+
+services:
+  - {name: TimeCommandService, kind: application, operations: [PublishTzVersion, DefineBusinessCalendar, AddCalendarExceptions, SetClockOffset, ClearClockOffset]}
+  - {name: CalendarMath, kind: library, contract: "addBusinessDays(date, n, calendar), isBusinessDay, nextOccurrence(rrule, zone, after), periodBoundaries(anchor, period, alignment, zone); pure, used by billing/availability/lifecycle"}
+  - {name: TimeQueryService, kind: application, operations: [GetNow, GetBusinessCalendar, ComputeBusinessDate, ExpandRecurrence, GetTzVersion]}
+
+aggregates:
+  - name: BusinessCalendar
+    identity: "urn:ucos:<namespace|tenant>:calendar:<code>"
+    invariants: ["INV-TIM-1: weekend definition and holidays per year; derived calendars (extends) cannot form cycles."]
+    fields:
+      - {name: code, type: string}
+      - {name: zone, type: "IANA zone id"}
+      - {name: weekend, type: "weekday set (ISO 1-7)"}
+      - {name: holidays, type: "[{date, name: LocalizedText, observedRule?}]"}
+      - {name: extends, type: "CalendarUrn[]"}
+      - {name: scope, type: ApplicabilityScope}
+  - name: TzVersion
+    identity: "urn:ucos:global:tz:<version>"
+    fields:
+      - {name: version, type: "string (e.g. 2026b)"}
+      - {name: digest, type: Sha256}
+      - {name: status, type: "candidate|active|superseded"}
+  - name: ClockOffset
+    identity: "urn:ucos:<tenant>:clock-offset"
+    invariants: ["INV-TIM-2: offsets allowed only for tenants flagged non-production (sandbox, twin, test)."]
+    fields:
+      - {name: offset, type: duration}
+      - {name: frozenAt, type: "Instant?"}
+      - {name: setBy, type: PartyUrn}
+
+entities: []
+
+valueObjects:
+  - {name: Interval, definition: "[from, to) half-open; to=null means open-ended"}
+  - {name: BusinessInstant, definition: "{instant (UTC), zone, localDate} — persisted when calendrical meaning matters"}
+  - {name: RRule, definition: "RFC 5545 RRULE string + DTSTART in zone"}
+
+commands:
+  - {name: PublishTzVersion, input: "{version, artifactRef, approvalRef}", emits: [TzVersionPublished]}
+  - {name: DefineBusinessCalendar, input: "BusinessCalendar", emits: [BusinessCalendarDefined]}
+  - {name: AddCalendarExceptions, input: "{calendar, holidays[]}", emits: [BusinessCalendarUpdated]}
+  - {name: SetClockOffset, input: "{tenant, offset | frozenAt}", emits: [ClockOffsetSet], preconditions: ["INV-TIM-2"]}
+  - {name: ClearClockOffset, input: "{tenant}", emits: [ClockOffsetCleared]}
+
+queries:
+  - {name: GetNow, input: "{tenant}", output: "{instant, offsetApplied}"}
+  - {name: GetBusinessCalendar, input: "{code | context}", output: BusinessCalendar}
+  - {name: ComputeBusinessDate, input: "{start, businessDays, calendar}", output: Date}
+  - {name: ExpandRecurrence, input: "{rrule, zone, from, to, max<=1000}", output: "Instant[]"}
+  - {name: GetTzVersion, input: "{}", output: TzVersion}
+
+apis:
+  - {style: REST, path: "/v1/time/now", methods: {GET: GetNow}}
+  - {style: REST, path: "/v1/time/calendars", methods: {POST: DefineBusinessCalendar}}
+  - {style: REST, path: "/v1/time/calendars/{code}", methods: {GET: GetBusinessCalendar}}
+  - {style: REST, path: "/v1/time/calendars/{code}/exceptions", methods: {POST: AddCalendarExceptions}}
+  - {style: REST, path: "/v1/time:business-date", methods: {GET: ComputeBusinessDate}}
+  - {style: REST, path: "/v1/time:expand-recurrence", methods: {POST: ExpandRecurrence}}
+  - {style: REST, path: "/v1/time/tz", methods: {POST: PublishTzVersion, GET: GetTzVersion}}
+  - {style: REST, path: "/ops/v1/time/clock-offsets/{tenant}", methods: {PUT: SetClockOffset, DELETE: ClearClockOffset}}
+
+events:
+  - {type: ucos.context.tz-version.published.v1, payload: "{version, digest}", consumers: [all services (reload), deployment pipeline]}
+  - {type: ucos.context.business-calendar.defined.v1, payload: "{code, zone}"}
+  - {type: ucos.context.business-calendar.updated.v1, payload: "{code, added}"}
+  - {type: ucos.context.clock-offset.set.v1, payload: "{tenant, offset, frozenAt}"}
+  - {type: ucos.context.clock-offset.cleared.v1, payload: "{tenant}"}
+
+stateMachines:
+  - name: TzVersionLifecycle
+    initial: candidate
+    states: [candidate, active, superseded]
+    terminal: [superseded]
+    transitions:
+      - {from: candidate, to: active, command: PublishTzVersion, guard: "golden date tests pass on candidate"}
+      - {from: active, to: superseded, trigger: "newer version active"}
+
+rules:
+  - {id: RUL-TIM-1, statement: "All persisted instants are UTC; calendrical facts additionally persist zone and local date (BusinessInstant). LocalDateTime is forbidden in persisted/published models (UCOS-L003)."}
+  - {id: RUL-TIM-2, statement: "Services obtain 'now' from the Clock abstraction (respecting tenant offsets in non-prod); direct system clock calls in domain code are forbidden (lint UCOS-L005)."}
+  - {id: RUL-TIM-3, statement: "Ambiguous local times (DST fall-back) resolve to the earlier offset; non-existent local times (spring-forward) shift forward by the gap — identical in all CalendarMath implementations."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:time.default-calendar", purpose: "Default business calendar per jurisdiction context"}
+
+decisions:
+  - {id: DEC-TIM-1, question: "What is the due date n business days after D under calendar C?", algorithm: "CalendarMath.addBusinessDays"}
+
+security:
+  permissions: [time.read, time.calendar.manage, time.tz.publish, time.clock.offset]
+  dataClassification: "Public/internal."
+  threats: ["Clock manipulation in production -> INV-TIM-2 and ops-only API"]
+
+governance:
+  changeControl: "tz versions and jurisdiction calendars via ChangeSet; tenant calendars via PDP."
+  evidence: "Golden test reports for tz candidates attached."
+
+runtimeBehavior:
+  consistency: "Calendars cached version-keyed; tz version pinned per release."
+  slo: {ComputeBusinessDate_p99_ms: 2, availability: "embedded library + 99.99% service"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_context (separate tables)
+  tables:
+    - {name: business_calendars, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: tz_versions, columns: "version, digest, status", pk: "(version)", global: true}
+    - {name: clock_offsets, columns: "tenant_id, offset_ms bigint, frozen_at timestamptz, set_by text", pk: "(tenant_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None needed."
+  retention: "Indefinite."
+
+extensionModel:
+  extensionPoints: ["Holiday calendar importers per jurisdiction (packs)", "Non-Gregorian calendar support via plugins for display"]
+  forbidden: ["System clock in domain code", "Floating local times in storage"]
+
+certificationCriteria:
+  - {id: CR-TIM-01, rule: "CalendarMath golden suite (DST transitions in 30 zones, leap years, month-end anchors, RRULE edge cases) passes in every SDK language.", level: L1}
+  - {id: CR-TIM-02, rule: "Clock offsets are rejected for production tenants (negative test).", level: L1}
+  - {id: CR-TIM-03, rule: "Lint UCOS-L005 reports zero direct system-clock calls in domain modules.", level: L1}
+validationRules:
+  - {id: VR-TIM-01, rule: "Every jurisdiction in reference deployments has a default business calendar."}
+  - {id: VR-TIM-02, rule: "Every service image declares the active tz version in its manifest."}

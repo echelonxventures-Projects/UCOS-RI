@@ -1,0 +1,189 @@
+header:
+  id: DOM-PRV
+  title: Provenance Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-004-001, CIC-002-001, CIC-016-001]
+  traces: [PRIN-008, PRIN-011, PRIN-007, DOM-EVD]
+  certification: [CR-PRV-01, CR-PRV-02, CR-PRV-03]
+  validation: [VR-PRV-01, VR-PRV-02]
+
+purpose: >
+  Record where commercial things come from and what happened to them — origin, manufacturing,
+  custody, transformations, certifications, and claims (organic, conflict-free, recycled content,
+  carbon) — as verifiable provenance graphs (W3C PROV-aligned) anchored in Evidence, supporting
+  anti-counterfeit, compliance (e.g. EU DPP, deforestation, conflict minerals), and sustainability claims.
+
+scope:
+  includes:
+    - ProvenanceRecord graphs: entities (items, lots, materials), activities (produce, transform, transport, inspect, certify), agents (parties)
+    - Claims attached to objects/lots/serials with issuers and verification status
+    - Digital product passport (DPP) views assembled from provenance and ontology attributes
+    - Verification of claims against Evidence and trusted issuers (DOM-TRST)
+    - Ingestion from supply partners (EPCIS 2.0 events) via DOM-DXC
+  excludes:
+    - Dataset/derivation lineage of data (DOM-LIN)
+    - Evidence storage (DOM-EVD)
+    - Issuer accreditation (DOM-TRST)
+
+responsibilities:
+  - Tamper-evident provenance linked to evidence.
+  - Claim verification status with reasons.
+  - Serve provenance and passports under disclosure policies (public, B2B, regulator).
+
+principles: [PRIN-007, PRIN-008, PRIN-011]
+
+boundaries:
+  upstream: [DOM-EVD, DOM-TRST, DOM-COB, DOM-INV, DOM-SUPN, DOM-MFG, DOM-DXC]
+  downstream: [DOM-CFT, DOM-SUS, DOM-CMPL, DOM-SRC, DOM-KGR]
+
+ownership:
+  boundedContext: evidence
+  owningRole: Chief Governance Architect
+  service: provenance-service
+  schema: ucos_evidence
+
+capabilities:
+  - {id: PRV-C1, name: Record provenance, description: "Append activities linking input entities to output entities with agents and evidence."}
+  - {id: PRV-C2, name: Claims, description: "Attach claims with issuers; verify; expire; revoke."}
+  - {id: PRV-C3, name: Trace, description: "Backward (origin) and forward (where-used/recall) traversal."}
+  - {id: PRV-C4, name: Passports, description: "Assemble digital product passports per disclosure audience."}
+  - {id: PRV-C5, name: EPCIS ingestion, description: "Ingest EPCIS 2.0 events into provenance activities."}
+
+services:
+  - {name: ProvenanceCommandService, kind: application, operations: [RecordActivity, AttachClaim, VerifyClaim, RevokeClaim, IngestEpcisEvents, DefinePassportTemplate]}
+  - {name: ClaimVerifier, kind: domain-service, contract: "verify(claim) -> verified|unverified|failed with reasons: issuer trusted for claim type (DOM-TRST), evidence digest + signature valid (DOM-EVD), validity window, mass-balance constraints"}
+  - {name: ProvenanceQueryService, kind: application, operations: [TraceBackward, TraceForward, GetClaims, GetPassport]}
+
+aggregates:
+  - name: ProvenanceActivity
+    identity: "urn:ucos:<tenant>:prov-activity:<ulid>"
+    invariants:
+      - "INV-PRV-1: activities are append-only; corrections via superseding activity with reason."
+      - "INV-PRV-2: used/generated entity quantities satisfy mass balance within tolerance for activity kinds declaring conservation (transform, split, merge)."
+      - "INV-PRV-3: every activity has >= 1 agent (party) and time interval; evidence refs required for activity kinds flagged evidenceRequired."
+    fields:
+      - {name: kind, type: "produce|transform|split|merge|pack|ship|receive|inspect|certify|repair|recycle|custom"}
+      - {name: used, type: "[{entityRef, quantity?}]"}
+      - {name: generated, type: "[{entityRef, quantity?}]"}
+      - {name: agents, type: "[{party, role}]"}
+      - {name: startedAt, type: Instant}
+      - {name: endedAt, type: Instant}
+      - {name: location, type: "geo-point | node ref"}
+      - {name: evidenceRefs, type: "InstanceUrn[]"}
+      - {name: sourceEvent, type: "EPCIS event id?"}
+  - name: Claim
+    identity: "urn:ucos:<tenant>:claim:<ulid>"
+    invariants: ["INV-PRV-4: claim type registered with required evidence kinds and allowed issuer accreditation; verified claims reference passing verification results."]
+    fields:
+      - {name: subject, type: "entityRef (object, lot, serial)"}
+      - {name: claimType, type: "string (e.g. organic, recycled-content, carbon-footprint, origin-country, conflict-free)"}
+      - {name: value, type: json}
+      - {name: issuer, type: PartyUrn}
+      - {name: evidenceRefs, type: "InstanceUrn[]"}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: status, type: "asserted|verified|failed|expired|revoked"}
+
+entities:
+  - {name: ProvenanceEntity, within: "graph (projection keyed by entity ref)", fields: [entityRef, "kind (object|lot|serial|material|shipment)", attributes]}
+  - {name: PassportTemplate, within: "standalone metadata", fields: [code, appliesTo (typeRef), "sections (attributes, claims, provenance depth)", "disclosure (public|b2b|regulator) per field", regulationRef]}
+
+valueObjects:
+  - {name: TraceResult, definition: "{root, nodes[], edges[], claimsByNode, depth, truncated}"}
+  - {name: Passport, definition: "{subject, templateRef, audience, sections[], signature, generatedAt, resolverUrl (GS1 Digital Link)}"}
+
+commands:
+  - {name: RecordActivity, input: "ProvenanceActivity", emits: [ProvenanceActivityRecorded]}
+  - {name: AttachClaim, input: "Claim (status asserted)", emits: [ClaimAsserted]}
+  - {name: VerifyClaim, input: "{claimId}", emits: [ClaimVerified, ClaimVerificationFailed]}
+  - {name: RevokeClaim, input: "{claimId, reason}", emits: [ClaimRevoked]}
+  - {name: IngestEpcisEvents, input: "{epcisDocument (JSON-LD 2.0), sourcePartner}", emits: [ProvenanceActivityRecorded], async: true}
+  - {name: DefinePassportTemplate, input: "PassportTemplate + changeSetRef", emits: [PassportTemplateDefined]}
+
+queries:
+  - {name: TraceBackward, input: "{entityRef, depth<=16, asOf?}", output: TraceResult}
+  - {name: TraceForward, input: "{entityRef, depth<=16}", output: TraceResult, note: "Recall scope"}
+  - {name: GetClaims, input: "{subject, includeInherited: bool}", output: "Claim[] (inherited along used->generated for claim types flagged inheritable)"}
+  - {name: GetPassport, input: "{subject, audience}", output: Passport}
+
+apis:
+  - {style: REST, path: "/v1/provenance/activities", methods: {POST: RecordActivity}}
+  - {style: REST, path: "/v1/provenance/activities:ingest-epcis", methods: {POST: IngestEpcisEvents}}
+  - {style: REST, path: "/v1/provenance/claims", methods: {POST: AttachClaim, GET: GetClaims}}
+  - {style: REST, path: "/v1/provenance/claims/{id}:verify", methods: {POST: VerifyClaim}}
+  - {style: REST, path: "/v1/provenance/claims/{id}:revoke", methods: {POST: RevokeClaim}}
+  - {style: REST, path: "/v1/provenance/trace:backward", methods: {GET: TraceBackward}}
+  - {style: REST, path: "/v1/provenance/trace:forward", methods: {GET: TraceForward}}
+  - {style: REST, path: "/v1/provenance/passport-templates", methods: {POST: DefinePassportTemplate}}
+  - {style: REST, path: "/v1/provenance/passports/{subject}", methods: {GET: GetPassport}, note: "Public audience endpoint resolvable via GS1 Digital Link; rate-limited"}
+
+events:
+  - {type: ucos.evidence.provenance.activity-recorded.v1, payload: "{id, kind, used, generated, agents}"}
+  - {type: ucos.evidence.claim.asserted.v1, payload: "{id, subject, claimType, issuer}"}
+  - {type: ucos.evidence.claim.verified.v1, payload: "{id, subject, claimType}", consumers: [search, sustainability, catalog badges]}
+  - {type: ucos.evidence.claim.verification-failed.v1, payload: "{id, reasons}"}
+  - {type: ucos.evidence.claim.revoked.v1, payload: "{id, reason}"}
+  - {type: ucos.evidence.passport-template.defined.v1, payload: "{code, appliesTo}"}
+
+stateMachines:
+  - name: ClaimLifecycle
+    initial: asserted
+    states: [asserted, verified, failed, expired, revoked]
+    terminal: [failed, expired, revoked]
+    transitions:
+      - {from: asserted, to: verified, command: VerifyClaim, guard: "ClaimVerifier passes"}
+      - {from: asserted, to: failed, command: VerifyClaim, guard: "ClaimVerifier fails"}
+      - {from: verified, to: expired, trigger: "validTo (timer)"}
+      - {from: [asserted, verified], to: revoked, command: RevokeClaim}
+
+rules:
+  - {id: RUL-PRV-1, statement: "Only verified claims may be displayed as marketing badges or used in sellability/regulatory rules."}
+  - {id: RUL-PRV-2, statement: "Claim inheritance follows used->generated edges only for claim types flagged inheritable and only while mass balance holds."}
+  - {id: RUL-PRV-3, statement: "Passport fields not marked for the requesting audience are omitted, never masked with placeholders that leak existence."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:provenance.disclosure", purpose: "Audience disclosure defaults for passports"}
+
+decisions:
+  - {id: DEC-PRV-1, question: "Is claim X about subject S verified?", algorithm: "ClaimVerifier"}
+  - {id: DEC-PRV-2, question: "Which units are affected by a recall of lot L?", algorithm: "TraceForward from L"}
+
+security:
+  permissions: [provenance.read, provenance.record, provenance.claim.assert, provenance.claim.verify, provenance.passport.read.b2b, provenance.passport.read.regulator]
+  dataClassification: "Supplier identities and locations confidential; public passports contain only public-marked fields."
+  threats: ["Greenwashing via unverified claims -> RUL-PRV-1", "Supplier data leakage via traces -> audience disclosure"]
+
+governance:
+  changeControl: "Claim types, passport templates via ChangeSet."
+  evidence: "Activities and claims reference Evidence; passports signed."
+
+runtimeBehavior:
+  consistency: "Append-only, strong per activity; traces served from graph projection (eventual p99 2s)."
+  slo: {TraceBackward_depth8_p99_ms: 200, GetPassport_public_p99_ms: 150, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_evidence (separate tables) + graph projection (DOM-KGR)
+  tables:
+    - {name: prov_activities, columns: "tenant_id, id, kind, body jsonb, started_at, ended_at", pk: "(tenant_id, id)"}
+    - {name: prov_edges, columns: "tenant_id, activity_id, entity_ref, direction (used|generated), quantity", pk: "(tenant_id, activity_id, entity_ref, direction)", indexes: ["(tenant_id, entity_ref, direction)"]}
+    - {name: claims, columns: "tenant_id, id, subject, claim_type, issuer, status, valid_from, valid_to, body jsonb", pk: "(tenant_id, id)", indexes: ["(tenant_id, subject, claim_type)"]}
+    - {name: passport_templates, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "prov_edges hash(tenant_id) 64."
+  retention: "Product life + regulatory retention (policy evidence.retention)."
+
+extensionModel:
+  extensionPoints: ["Claim types with evidence requirements (packs)", "Passport templates per regulation (packs)", "EPCIS/partner connectors"]
+  forbidden: ["Editing activities"]
+
+certificationCriteria:
+  - {id: CR-PRV-01, rule: "EPCIS 2.0 conformance sample events ingest into equivalent activities (round-trip test).", level: L1}
+  - {id: CR-PRV-02, rule: "Mass-balance violations are rejected for conservation activity kinds.", level: L1}
+  - {id: CR-PRV-03, rule: "Public passport responses contain only public-marked fields (snapshot + DLP).", level: L1}
+validationRules:
+  - {id: VR-PRV-01, rule: "Every claim type declares evidence kinds registered in the evidence registry."}
+  - {id: VR-PRV-02, rule: "Every passport template references attributes present in the target type's effective schema."}

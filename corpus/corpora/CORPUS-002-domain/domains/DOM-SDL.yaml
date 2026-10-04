@@ -1,0 +1,204 @@
+header:
+  id: DOM-SDL
+  title: Service Delivery Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Systems Engineer
+  corpus: CORPUS-002
+  dependencies: [CIC-018-001, CIC-007-001, CIC-022-001, CIC-002-001]
+  traces: [PRIN-002, PRIN-016, PRIN-022]
+  certification: [CR-SDL-01, CR-SDL-02, CR-SDL-03]
+  validation: [VR-SDL-01, VR-SDL-02]
+
+purpose: >
+  Deliver services and activations: provisioning and deprovisioning of digital services, network and
+  telecom activations, appointments and field work, professional services milestones, and SLA
+  measurement with service credits — executing service tasks from order decomposition and contract
+  terms through provisioning adapters and workflows.
+
+scope:
+  includes:
+    - ServiceOrder per service task (activate, modify, suspend, resume, terminate, schedule, perform)
+    - Provisioning via ProvisioningPort adapters (SaaS tenants, telecom OSS, IoT platforms, identity systems)
+    - Appointments (capacity booking in DOM-INV pools) and field work orders
+    - Milestones and acceptance for professional services
+    - SLA monitors from contract terms (SlaTarget) with measurement windows and service credit computation
+  excludes:
+    - Physical shipment (DOM-FUL/LOG), entitlement records (DOM-ENT), asset registry (DOM-COB Asset type)
+
+responsibilities:
+  - Exactly-once provisioning actions with compensation on failure.
+  - Accurate service state for assets and entitlements.
+  - Objective SLA measurement and credit calculation.
+
+principles: [PRIN-002, PRIN-016, PRIN-022]
+
+boundaries:
+  upstream: [DOM-ORD, DOM-CTR, DOM-ENT, DOM-INV, DOM-COB, DOM-WFL, DOM-OBS]
+  downstream: [DOM-ORD, DOM-ENT, DOM-BIL, DOM-REV, DOM-COB, DOM-DTW]
+
+ownership:
+  boundedContext: fulfillment
+  owningRole: Chief Systems Engineer
+  service: service-delivery-service
+  schema: ucos_fulfillment
+
+capabilities:
+  - {id: SDL-C1, name: Service orders, description: "Execute service tasks with provisioning adapters or workflows."}
+  - {id: SDL-C2, name: Appointments, description: "Book, reschedule, dispatch appointments and field work."}
+  - {id: SDL-C3, name: Milestones, description: "Track milestones and customer acceptance."}
+  - {id: SDL-C4, name: SLA, description: "Measure SLAs and compute service credits."}
+
+services:
+  - {name: ServiceOrderCommandService, kind: application, operations: [CreateServiceOrder, ExecuteServiceOrder, RecordProvisioningResult, CompensateServiceOrder, BookAppointment, RescheduleAppointment, CompleteFieldWork, RecordMilestoneAcceptance]}
+  - {name: SlaService, kind: application, operations: [CreateSlaMonitor, RecordSlaMeasurement, CloseSlaWindow]}
+  - {name: ProvisioningGateway, kind: infrastructure, contract: "ProvisioningPort (I2): provision/modify/suspend/resume/deprovision with idempotency key = serviceOrderId; async callbacks"}
+  - {name: ServiceDeliveryQueryService, kind: application, operations: [GetServiceOrder, FindServiceOrders, GetAppointment, GetSlaReport]}
+
+aggregates:
+  - name: ServiceOrder
+    identity: "urn:ucos:<tenant>:service-order:<ulid>"
+    invariants:
+      - "INV-SDL-1: unique per (orderRef, taskId); action valid for current asset service state."
+      - "INV-SDL-2: failed provisioning after partial success triggers compensation steps declared by the task template."
+    fields:
+      - {name: orderRef, type: InstanceUrn}
+      - {name: taskId, type: string}
+      - {name: action, type: "activate|modify|suspend|resume|terminate|schedule|perform"}
+      - {name: assetRef, type: "InstanceUrn? (Asset)"}
+      - {name: serviceSpec, type: "objectRef + configuration"}
+      - {name: executionMode, type: "provisioning-adapter|workflow|manual"}
+      - {name: attempts, type: int}
+      - {name: lifecycleState, type: string}
+  - name: Appointment
+    identity: "urn:ucos:<tenant>:appointment:<ulid>"
+    fields:
+      - {name: serviceOrderRef, type: InstanceUrn}
+      - {name: capacityPoolRef, type: InstanceUrn}
+      - {name: slot, type: "{start, end, zone}"}
+      - {name: location, type: "address ref"}
+      - {name: assignee, type: "PartyUrn?"}
+      - {name: status, type: "booked|dispatched|in-progress|completed|no-show|cancelled"}
+  - name: SlaMonitor
+    identity: "urn:ucos:<tenant>:sla-monitor:<ulid>"
+    invariants: ["INV-SDL-3: measurement windows contiguous; credits computed only on closed windows from recorded measurements."]
+    fields:
+      - {name: contractRef, type: InstanceUrn}
+      - {name: target, type: SlaTarget}
+      - {name: subject, type: "assetRef | serviceRef"}
+      - {name: windows, type: "[{start, end, measured, met, creditAmount}]"}
+
+entities:
+  - {name: Milestone, within: ServiceOrder, fields: [milestoneId, description, dueAt, acceptanceRequired, acceptedBy, acceptedAt, evidenceRef]}
+
+valueObjects:
+  - {name: ProvisioningResult, definition: "{outcome: succeeded|failed|pending, externalRefs, serviceIdentifiers (e.g. MSISDN, tenant URL), error?}"}
+
+commands:
+  - {name: CreateServiceOrder, input: "{orderRef, taskId, action, assetRef?, serviceSpec}", emits: [ServiceOrderCreated]}
+  - {name: ExecuteServiceOrder, input: "{id}", emits: [ServiceOrderExecutionStarted]}
+  - {name: RecordProvisioningResult, input: "{id, result}", emits: [ServiceOrderCompleted, ServiceOrderFailed]}
+  - {name: CompensateServiceOrder, input: "{id}", emits: [ServiceOrderCompensated]}
+  - {name: BookAppointment, input: "{serviceOrderRef, capacityPoolRef, slot, location}", emits: [AppointmentBooked], note: "Books capacity in DOM-INV (BookCapacity)"}
+  - {name: RescheduleAppointment, input: "{id, newSlot}", emits: [AppointmentRescheduled]}
+  - {name: CompleteFieldWork, input: "{appointmentId, outcome, evidenceRefs}", emits: [FieldWorkCompleted]}
+  - {name: RecordMilestoneAcceptance, input: "{serviceOrderId, milestoneId, acceptedBy, evidenceRef}", emits: [MilestoneAccepted]}
+  - {name: CreateSlaMonitor, input: "{contractRef, target, subject}", emits: [SlaMonitorCreated], note: "From contract.terms-published (sla terms)"}
+  - {name: RecordSlaMeasurement, input: "{monitorId, at, value}", emits: []}
+  - {name: CloseSlaWindow, input: "{monitorId, windowEnd}", emits: [SlaWindowClosed]}
+
+queries:
+  - {name: GetServiceOrder, input: "{id}", output: ServiceOrder}
+  - {name: FindServiceOrders, input: "{orderRef?, assetRef?, state?, cursor}", output: "page"}
+  - {name: GetAppointment, input: "{id}", output: Appointment}
+  - {name: GetSlaReport, input: "{contractRef, from, to}", output: "windows with met/missed and credits"}
+
+apis:
+  - {style: REST, path: "/v1/service-delivery/service-orders", methods: {POST: CreateServiceOrder, GET: FindServiceOrders}}
+  - {style: REST, path: "/v1/service-delivery/service-orders/{id}", methods: {GET: GetServiceOrder}}
+  - {style: REST, path: "/v1/service-delivery/service-orders/{id}:execute", methods: {POST: ExecuteServiceOrder}}
+  - {style: REST, path: "/v1/service-delivery/service-orders/{id}/provisioning-results", methods: {POST: RecordProvisioningResult}}
+  - {style: REST, path: "/v1/service-delivery/service-orders/{id}:compensate", methods: {POST: CompensateServiceOrder}}
+  - {style: REST, path: "/v1/service-delivery/service-orders/{id}/milestones/{milestoneId}:accept", methods: {POST: RecordMilestoneAcceptance}}
+  - {style: REST, path: "/v1/service-delivery/appointments", methods: {POST: BookAppointment}}
+  - {style: REST, path: "/v1/service-delivery/appointments/{id}", methods: {GET: GetAppointment}}
+  - {style: REST, path: "/v1/service-delivery/appointments/{id}:reschedule", methods: {POST: RescheduleAppointment}}
+  - {style: REST, path: "/v1/service-delivery/appointments/{id}:complete", methods: {POST: CompleteFieldWork}}
+  - {style: REST, path: "/v1/service-delivery/sla-monitors", methods: {POST: CreateSlaMonitor}}
+  - {style: REST, path: "/v1/service-delivery/sla-monitors/{id}/measurements", methods: {POST: RecordSlaMeasurement}}
+  - {style: REST, path: "/v1/service-delivery/sla-monitors/{id}/windows:close", methods: {POST: CloseSlaWindow}}
+  - {style: REST, path: "/v1/service-delivery/sla-reports", methods: {GET: GetSlaReport}}
+
+events:
+  - {type: ucos.fulfillment.service-order.created.v1, payload: "{id, orderRef, taskId, action}"}
+  - {type: ucos.fulfillment.service-order.execution-started.v1, payload: "{id}"}
+  - {type: ucos.fulfillment.service-order.completed.v1, payload: "{id, orderRef, taskId, serviceIdentifiers}", consumers: [order, entitlement (activate), billing (start recurring), revenue, assets]}
+  - {type: ucos.fulfillment.service-order.failed.v1, payload: "{id, error, retryable}"}
+  - {type: ucos.fulfillment.service-order.compensated.v1, payload: "{id}"}
+  - {type: ucos.fulfillment.appointment.booked.v1, payload: "{id, slot}"}
+  - {type: ucos.fulfillment.appointment.rescheduled.v1, payload: "{id, newSlot}"}
+  - {type: ucos.fulfillment.field-work.completed.v1, payload: "{appointmentId, outcome}"}
+  - {type: ucos.fulfillment.milestone.accepted.v1, payload: "{serviceOrderId, milestoneId}", consumers: [revenue (milestone POB), billing (milestone charges)]}
+  - {type: ucos.fulfillment.sla-monitor.created.v1, payload: "{id, contractRef, target}"}
+  - {type: ucos.fulfillment.sla-window.closed.v1, payload: "{monitorId, window, met, creditAmount}", consumers: [billing (service credits), contract obligations]}
+
+stateMachines:
+  - name: ServiceOrderLifecycle
+    initial: created
+    states: [created, executing, awaiting-callback, completed, failed, compensating, compensated]
+    terminal: [completed, compensated]
+    transitions:
+      - {from: created, to: executing, command: ExecuteServiceOrder}
+      - {from: executing, to: awaiting-callback, trigger: "adapter returned pending"}
+      - {from: [executing, awaiting-callback], to: completed, command: RecordProvisioningResult, guard: "succeeded"}
+      - {from: [executing, awaiting-callback], to: failed, command: RecordProvisioningResult, guard: "failed"}
+      - {from: failed, to: executing, command: ExecuteServiceOrder, guard: "retryable and attempts < policy max"}
+      - {from: failed, to: compensating, command: CompensateServiceOrder}
+      - {from: compensating, to: compensated, trigger: "compensation steps done"}
+
+rules:
+  - {id: RUL-SDL-1, statement: "Service actions are metadata-driven task templates (order-decomposition) naming the provisioning adapter or workflow; no service-specific code."}
+  - {id: RUL-SDL-2, statement: "SLA credits computed from the contract credit schedule (pricing formula) only for closed windows; credits issued via billing credit charges."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:service-delivery.retry", purpose: "Retry limits and backoff per action"}
+
+decisions:
+  - {id: DEC-SDL-1, question: "Was SLA met in window W and what credit applies?", algorithm: "Aggregate measurements per target definition; apply credit schedule"}
+
+security:
+  permissions: [service-delivery.read, service-delivery.manage, service-delivery.provisioning.callback, service-delivery.appointment.manage, service-delivery.sla.manage]
+  dataClassification: "Confidential; service identifiers may be personal (e.g. phone numbers)."
+  threats: ["Unauthorized provisioning -> only via service orders from accepted orders/contracts; adapters authenticated"]
+
+governance:
+  changeControl: "Provisioning adapter activation and retry policy via ChangeSet."
+  evidence: "Field work and milestone acceptance evidence captured."
+
+runtimeBehavior:
+  consistency: "Strong per service order; callbacks idempotent."
+  slo: {activation_p95_s: 60, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_fulfillment (separate tables)
+  tables:
+    - {name: service_orders, columns: "tenant_id, id, order_ref, task_id, action, asset_ref, body jsonb, state, attempts", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, order_ref, task_id)"]}
+    - {name: appointments, columns: "tenant_id, id, service_order_ref, slot_start, slot_end, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: sla_monitors, columns: "tenant_id, id, contract_ref, body jsonb", pk: "(tenant_id, id)"}
+    - {name: sla_measurements, columns: "tenant_id, monitor_id, at, value", pk: "(tenant_id, monitor_id, at)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "sla_measurements range(at) monthly."
+  retention: "Service orders life of asset + 7 years; measurements 2 years (aggregates retained)."
+
+extensionModel:
+  extensionPoints: ["ProvisioningPort adapters (TMF 640/641-aligned for telecom)", "Field service management connectors", "SLA metric sources"]
+  forbidden: ["Service-specific provisioning code in core"]
+
+certificationCriteria:
+  - {id: CR-SDL-01, rule: "Duplicate callbacks and task deliveries never double-provision (idempotency).", level: L1}
+  - {id: CR-SDL-02, rule: "Compensation executes declared steps on injected failures at each step.", level: L1}
+  - {id: CR-SDL-03, rule: "SLA credit golden tests across window boundaries and partial outages.", level: L1}
+validationRules:
+  - {id: VR-SDL-01, rule: "Every Deliverable/Entitling type has decomposition templates targeting service delivery actions."}
+  - {id: VR-SDL-02, rule: "Every sla term kind in contract.term-schemas compiles to an SlaMonitor."}

@@ -1,0 +1,232 @@
+header:
+  id: DOM-WFL
+  title: Workflow Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-018-001, CIC-007-001, CIC-009-001, CIC-002-001]
+  traces: [PRIN-004, PRIN-005, PRIN-008, PRIN-011, CIC-018-001]
+  certification: [CR-WFL-01, CR-WFL-02, CR-WFL-03]
+  validation: [VR-WFL-01, VR-WFL-02]
+
+# Automation (DOM-AUT) — event-condition-action automations — is expressed as workflows with event
+# triggers (CIC-018-001 §4) and owned here.
+subsumes:
+  - domain: DOM-AUT
+    coverage: "Event-triggered WorkflowDefinitions (trigger kind event/schedule), decision steps over rules/policies, AutomationRun visibility via WorkflowInstance, CR-WFL-01..03"
+
+purpose: >
+  Run configurable, long-running, human-in-the-loop and event-triggered business processes as
+  metadata (CIC-018-001): approvals, dunning, onboarding, appeals, DSR fulfilment, operational
+  runbooks, and tenant automations — with durable execution, human tasks, timers, compensation, and
+  the same authorization as any other API caller.
+
+scope:
+  includes:
+    - WorkflowDefinition (BPMN subset; YAML/JSON + BPMN XML import/export), versions and governance
+    - WorkflowInstance execution (durable, event-sourced history), service tasks via published APIs
+    - Human tasks (queues, assignment, forms from ViewDefinitions, SLAs, escalation)
+    - Waits on events/timers with correlation; agent tasks delegated to DOM-AGT
+    - Event-triggered automations (subsumed DOM-AUT)
+  excludes:
+    - Code-owned sagas (initiating contexts), single-aggregate lifecycles (DOM-LFC), exception queues of sagas (DOM-ORC)
+
+responsibilities:
+  - No duplicate external effects on retries/crashes (idempotency keys per step).
+  - Human tasks never stall silently (SLA + escalation).
+  - Workflows obey PDP like any caller (run-as identity).
+
+principles: [PRIN-004, PRIN-005, PRIN-008, PRIN-011]
+
+boundaries:
+  upstream: [DOM-EVT, DOM-POL, DOM-RUL, DOM-IDN, DOM-AUTH, DOM-LFC, DOM-GOV]
+  downstream: [DOM-BIL, DOM-PRI, DOM-DEC, DOM-ORC, DOM-AGT, DOM-RTM]
+
+ownership:
+  boundedContext: automation
+  owningRole: Chief Platform Architect
+  service: workflow-service
+  schema: ucos_automation
+
+capabilities:
+  - {id: WFL-C1, name: Define, description: "Author and version workflow definitions."}
+  - {id: WFL-C2, name: Execute, description: "Durable execution with retries, compensation, timers."}
+  - {id: WFL-C3, name: Human tasks, description: "Queues, assignment, forms, SLAs, escalation."}
+  - {id: WFL-C4, name: Automations, description: "Event/schedule-triggered workflows."}
+  - {id: WFL-C5, name: Observe, description: "Instance history, metrics, stuck-instance detection."}
+
+services:
+  - {name: WorkflowDefinitionService, kind: application, operations: [DraftWorkflowDefinition, PublishWorkflowDefinition, DeprecateWorkflowDefinition, ImportBpmn]}
+  - {name: WorkflowRuntime, kind: application, operations: [StartWorkflow, SignalWorkflow, CancelWorkflow, RetryWorkflowStep, MigrateWorkflowInstances], contract: "WorkflowEnginePort adapters (CIC-018-001 §3)"}
+  - {name: TaskService, kind: application, operations: [ClaimTask, CompleteTask, ReassignTask, DelegateTask]}
+  - {name: WorkflowQueryService, kind: application, operations: [GetWorkflowInstance, FindWorkflowInstances, GetTaskInbox, ExportBpmn]}
+
+aggregates:
+  - name: WorkflowDefinition
+    identity: "urn:ucos:<namespace|tenant>:workflow:<name>@<semver>"
+    invariants:
+      - "INV-WFL-1: every service-task operation exists in a published contract; every human task has queue, form, SLA; run-as identity set (VR-018-001-01/02)."
+      - "INV-WFL-2: graph has a start event, reachable end events, no unreachable steps; compensation references valid steps."
+    fields:
+      - {name: schema, type: "CIC-018-001 §2 WorkflowDefinition"}
+      - {name: state, type: DefinitionState}
+  - name: WorkflowInstance
+    identity: "urn:ucos:<tenant>:workflow-instance:<ulid>"
+    invariants:
+      - "INV-WFL-3: history append-only; each side-effecting step carries idempotency key wf:<instance>:<step>:<lineage>."
+      - "INV-WFL-4: instance runs on its definition version unless migrated via MigrateWorkflowInstances with mapping."
+    fields:
+      - {name: definitionRef, type: "name@version"}
+      - {name: input, type: json}
+      - {name: variables, type: json}
+      - {name: currentSteps, type: "string[]"}
+      - {name: correlationKeys, type: "map"}
+      - {name: runAs, type: IdentityUrn}
+      - {name: status, type: string}
+  - name: HumanTask
+    identity: "urn:ucos:<tenant>:task:<ulid>"
+    fields:
+      - {name: instanceRef, type: InstanceUrn}
+      - {name: stepId, type: string}
+      - {name: queue, type: string}
+      - {name: assignee, type: "PartyUrn?"}
+      - {name: formRef, type: "ViewDefinition URN"}
+      - {name: dueAt, type: Instant}
+      - {name: status, type: "open|claimed|completed|escalated|cancelled"}
+
+entities:
+  - {name: HistoryEntry, within: WorkflowInstance, fields: [seq, at, stepId, kind (started|completed|failed|compensated|signaled|timer-fired), payloadDigest]}
+
+valueObjects:
+  - {name: TaskOutcome, definition: "{decision, formData (validated), comment}"}
+
+commands:
+  - {name: DraftWorkflowDefinition, input: "WorkflowDefinition draft", emits: [WorkflowDefinitionDrafted]}
+  - {name: PublishWorkflowDefinition, input: "{urn, approvalRef}", emits: [WorkflowDefinitionPublished]}
+  - {name: DeprecateWorkflowDefinition, input: "{urn}", emits: [WorkflowDefinitionDeprecated]}
+  - {name: ImportBpmn, input: "{bpmnXml, namespace}", emits: [WorkflowDefinitionDrafted]}
+  - {name: StartWorkflow, input: "{definition, input, idempotencyKey}", emits: [WorkflowStarted]}
+  - {name: SignalWorkflow, input: "{instanceId | correlation, signal, payload}", emits: [WorkflowSignaled]}
+  - {name: CancelWorkflow, input: "{instanceId, reason}", emits: [WorkflowCancelled]}
+  - {name: RetryWorkflowStep, input: "{instanceId, stepId}", emits: [WorkflowStepRetried]}
+  - {name: MigrateWorkflowInstances, input: "{fromVersion, toVersion, stepMapping, selector}", emits: [WorkflowInstancesMigrated], async: true}
+  - {name: ClaimTask, input: "{taskId}", emits: [TaskClaimed]}
+  - {name: CompleteTask, input: "{taskId, outcome}", emits: [TaskCompleted]}
+  - {name: ReassignTask, input: "{taskId, assignee}", emits: [TaskReassigned]}
+  - {name: DelegateTask, input: "{taskId, delegateTo}", emits: [TaskDelegated]}
+
+queries:
+  - {name: GetWorkflowInstance, input: "{id}", output: "WorkflowInstance + history"}
+  - {name: FindWorkflowInstances, input: "{definition?, status?, correlation?, stuckFor?, cursor}", output: "page"}
+  - {name: GetTaskInbox, input: "{party | queue, status?}", output: "HumanTask[]"}
+  - {name: ExportBpmn, input: "{urn}", output: "BPMN 2.0 XML"}
+
+apis:
+  - {style: REST, path: "/v1/workflows/definitions", methods: {POST: DraftWorkflowDefinition}}
+  - {style: REST, path: "/v1/workflows/definitions:import-bpmn", methods: {POST: ImportBpmn}}
+  - {style: REST, path: "/v1/workflows/definitions/{urn}:publish", methods: {POST: PublishWorkflowDefinition}}
+  - {style: REST, path: "/v1/workflows/definitions/{urn}:deprecate", methods: {POST: DeprecateWorkflowDefinition}}
+  - {style: REST, path: "/v1/workflows/definitions/{urn}/bpmn", methods: {GET: ExportBpmn}}
+  - {style: REST, path: "/v1/workflows/instances", methods: {POST: StartWorkflow, GET: FindWorkflowInstances}}
+  - {style: REST, path: "/v1/workflows/instances/{id}", methods: {GET: GetWorkflowInstance}}
+  - {style: REST, path: "/v1/workflows/instances/{id}:signal", methods: {POST: SignalWorkflow}}
+  - {style: REST, path: "/v1/workflows/instances/{id}:cancel", methods: {POST: CancelWorkflow}}
+  - {style: REST, path: "/v1/workflows/instances/{id}/steps/{stepId}:retry", methods: {POST: RetryWorkflowStep}}
+  - {style: REST, path: "/v1/workflows/migrations", methods: {POST: MigrateWorkflowInstances}}
+  - {style: REST, path: "/v1/workflows/tasks", methods: {GET: GetTaskInbox}}
+  - {style: REST, path: "/v1/workflows/tasks/{taskId}:claim", methods: {POST: ClaimTask}}
+  - {style: REST, path: "/v1/workflows/tasks/{taskId}:complete", methods: {POST: CompleteTask}}
+  - {style: REST, path: "/v1/workflows/tasks/{taskId}:reassign", methods: {POST: ReassignTask}}
+  - {style: REST, path: "/v1/workflows/tasks/{taskId}:delegate", methods: {POST: DelegateTask}}
+
+events:
+  - {type: ucos.automation.workflow-definition.drafted.v1, payload: "{urn}"}
+  - {type: ucos.automation.workflow-definition.published.v1, payload: "{urn, trigger}", consumers: [automation trigger registry]}
+  - {type: ucos.automation.workflow-definition.deprecated.v1, payload: "{urn}"}
+  - {type: ucos.automation.workflow.started.v1, payload: "{instanceId, definition, trigger}"}
+  - {type: ucos.automation.workflow.signaled.v1, payload: "{instanceId, signal}"}
+  - {type: ucos.automation.workflow.step-retried.v1, payload: "{instanceId, stepId}"}
+  - {type: ucos.automation.workflow.completed.v1, payload: "{instanceId, outcome}"}
+  - {type: ucos.automation.workflow.failed.v1, payload: "{instanceId, stepId, error}", consumers: [orchestration (exception queue)]}
+  - {type: ucos.automation.workflow.cancelled.v1, payload: "{instanceId, reason}"}
+  - {type: ucos.automation.workflow.instances-migrated.v1, payload: "{fromVersion, toVersion, count}"}
+  - {type: ucos.automation.task.created.v1, payload: "{taskId, queue, dueAt}"}
+  - {type: ucos.automation.task.claimed.v1, payload: "{taskId, assignee}"}
+  - {type: ucos.automation.task.completed.v1, payload: "{taskId, decision}"}
+  - {type: ucos.automation.task.reassigned.v1, payload: "{taskId, assignee}"}
+  - {type: ucos.automation.task.delegated.v1, payload: "{taskId, delegateTo}"}
+  - {type: ucos.automation.task.escalated.v1, payload: "{taskId, level}"}
+
+stateMachines:
+  - name: WorkflowInstanceLifecycle
+    initial: running
+    states: [running, waiting, suspended, completed, failed, compensating, compensated, cancelled]
+    terminal: [completed, compensated, cancelled]
+    transitions:
+      - {from: running, to: waiting, trigger: "human task, event wait, or timer"}
+      - {from: waiting, to: running, trigger: "task completed / signal / timer fired"}
+      - {from: [running, waiting], to: failed, trigger: "step failed after retries"}
+      - {from: failed, to: running, command: RetryWorkflowStep}
+      - {from: failed, to: compensating, trigger: "compensation policy"}
+      - {from: compensating, to: compensated, trigger: "compensations done"}
+      - {from: running, to: completed, trigger: "end event reached"}
+      - {from: [running, waiting, failed], to: cancelled, command: CancelWorkflow}
+  - name: HumanTaskLifecycle
+    initial: open
+    states: [open, claimed, escalated, completed, cancelled]
+    terminal: [completed, cancelled]
+    transitions:
+      - {from: open, to: claimed, command: ClaimTask}
+      - {from: [open, claimed], to: escalated, trigger: "dueAt passed (timer)"}
+      - {from: escalated, to: claimed, command: ReassignTask}
+      - {from: [claimed, escalated], to: completed, command: CompleteTask}
+      - {from: [open, claimed, escalated], to: cancelled, trigger: "instance cancelled"}
+
+rules:
+  - {id: RUL-WFL-1, statement: "Service tasks call only published operations as the run-as identity; workflows cannot bypass PDP (CR-018-001-03)."}
+  - {id: RUL-WFL-2, statement: "Event-triggered automations are deduplicated by (definition, triggering eventId)."}
+  - {id: RUL-WFL-3, statement: "Agent tasks inherit autonomy limits from the agent profile; act-with-approval creates a human task for each write."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:workflow.limits", purpose: "Per-tenant concurrency, steps/sec, history size"}
+
+decisions:
+  - {id: DEC-WFL-1, question: "Which branch does gateway G take?", algorithm: "CEL conditions in definition order; exclusive gateways require exactly one match else E-WFL-NO-BRANCH"}
+
+security:
+  permissions: [workflow.read, workflow.define, workflow.publish, workflow.start, workflow.signal, workflow.cancel, workflow.task.work, workflow.task.reassign]
+  dataClassification: "Instance variables may contain personal data (encrypted at rest); history stores digests for large payloads."
+  threats: ["Privilege escalation via workflows -> run-as identity least privilege + PDP", "Task hijacking -> claim authorization by queue membership"]
+
+governance:
+  changeControl: "Definitions via ChangeSet; tenant automations included."
+  evidence: "Task outcomes for approval workflows captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Durable; at-least-once step execution with idempotent effects."
+  slo: {step_dispatch_p99_ms: 200, task_escalation_latency_s: 60, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_automation + WorkflowEnginePort backend
+  tables:
+    - {name: workflow_definitions, columns: "tenant_id, urn, body jsonb, state", pk: "(tenant_id, urn)"}
+    - {name: workflow_instances, columns: "tenant_id, id, definition_ref, status, variables_enc bytea, correlation jsonb, started_at", pk: "(tenant_id, id)", indexes: ["(tenant_id, status)", "gin(correlation)"]}
+    - {name: workflow_history, columns: "tenant_id, instance_id, seq, at, step_id, kind, payload_digest", pk: "(tenant_id, instance_id, seq)"}
+    - {name: human_tasks, columns: "tenant_id, id, instance_id, queue, assignee, due_at, status", pk: "(tenant_id, id)", indexes: ["(tenant_id, queue, status)", "(tenant_id, assignee, status)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "workflow_history range(at) monthly."
+  retention: "Completed instances 90 days hot, then archived (CIC-018-001 §3)."
+
+extensionModel:
+  extensionPoints: ["WorkflowEnginePort adapters", "Custom task forms (ViewDefinitions)", "Workflow template packs"]
+  forbidden: ["Direct database access from workflow steps"]
+
+certificationCriteria:
+  - {id: CR-WFL-01, rule: "Passes CIC-018-001 CR-018-001-01..04.", level: L1}
+  - {id: CR-WFL-02, rule: "Duplicate trigger events start exactly one automation instance.", level: L1}
+  - {id: CR-WFL-03, rule: "Version migration with step mapping preserves in-flight instances (golden tests).", level: L1}
+validationRules:
+  - {id: VR-WFL-01, rule: "Every workflow referenced by specs (dunning, DSR, appeals, onboarding) exists in packs or reference fixtures."}
+  - {id: VR-WFL-02, rule: "Every published definition passes static graph checks (INV-WFL-2)."}

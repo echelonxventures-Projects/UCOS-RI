@@ -1,0 +1,292 @@
+header:
+  id: DOM-BIL
+  title: Billing Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-004, CIC-007-001, CIC-003-001, CIC-015-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-005, PRIN-008, PRIN-016]
+  certification: [CR-BIL-01, CR-BIL-02, CR-BIL-03, CR-BIL-04, CR-BIL-05]
+  validation: [VR-BIL-01, VR-BIL-02]
+
+purpose: >
+  Turn commercial events — accepted orders, recurring charges, rated usage, contract terms,
+  adjustments — into legally compliant invoices, credit/debit notes, and account balances for every
+  billing model (one-time, recurring, usage, hybrid, milestone, prepaid, postpaid) and every jurisdiction.
+
+scope:
+  includes:
+    - Billing accounts (payer, currency, bill cycle, invoice delivery, payment terms)
+    - Charges (one-time, recurring, usage-rated, adjustments) and billing schedules
+    - Usage rating (consumption events -> rated charges via DOM-PRC usage price entries)
+    - Bill runs (cycle-based and on-demand), proration, invoice generation, numbering, legal formats (e-invoicing via plugins)
+    - Credit notes, debit notes, write-offs, disputes
+    - Account receivable balance (open items) — cash application from DOM-PAY
+    - Dunning orchestration (with DOM-WFL) and collections hand-off
+  excludes:
+    - Payment execution (DOM-PAY), settlement with partners (DOM-STL)
+    - Revenue recognition (DOM-REV), general ledger (DOM-ACC)
+    - Tax determination (DOM-TAX; billing calls it and stores results)
+
+responsibilities:
+  - Correct, complete, non-duplicated charges (no revenue leakage, no double billing).
+  - Immutable issued invoices; corrections only via credit/debit notes.
+  - Gapless legal invoice numbering per issuing entity and series where required.
+
+principles: [PRIN-001, PRIN-005, PRIN-008, PRIN-015, PRIN-016]
+
+boundaries:
+  upstream: [DOM-ORD, DOM-CTR, DOM-ENT, DOM-PRC, DOM-TAX, DOM-PTY, DOM-PAY, DOM-ACC]
+  downstream: [DOM-REV, DOM-ACC, DOM-PAY, DOM-STL, DOM-ANL, DOM-DOC]
+
+ownership:
+  boundedContext: billing
+  owningRole: Chief Product Architect
+  service: billing-service
+  schema: ucos_billing
+
+capabilities:
+  - {id: BIL-C1, name: Accounts, description: "Billing account setup, hierarchy (parent pays for children), bill cycles."}
+  - {id: BIL-C2, name: Charge capture, description: "Create charges from orders/contracts/subscriptions/usage with source traceability."}
+  - {id: BIL-C3, name: Rating, description: "Rate usage consumption events with period-cumulative tiers."}
+  - {id: BIL-C4, name: Bill run, description: "Assemble due charges, prorate, tax, round, number, render, issue."}
+  - {id: BIL-C5, name: Adjustments, description: "Credit/debit notes, disputes, write-offs with approvals."}
+  - {id: BIL-C6, name: AR & dunning, description: "Open items, aging, dunning steps, collections."}
+
+services:
+  - {name: BillingAccountService, kind: application, operations: [OpenBillingAccount, UpdateBillingAccount, CloseBillingAccount]}
+  - {name: ChargeService, kind: application, operations: [CreateCharge, CreateBillingSchedule, CancelBillingSchedule, RateUsage]}
+  - {name: BillRunService, kind: application, operations: [StartBillRun, IssueInvoice, VoidDraftInvoice]}
+  - {name: AdjustmentService, kind: application, operations: [IssueCreditNote, IssueDebitNote, OpenDispute, ResolveDispute, WriteOff]}
+  - {name: ReceivablesService, kind: application, operations: [ApplyPayment, ReverseApplication]}
+  - {name: Prorator, kind: domain-service, contract: "prorate(recurringCharge, period, changeEvents, prorationPolicy) -> charge segments; methods: daily-exact, 30/360, none; deterministic in tenant timezone"}
+  - {name: InvoiceAssembler, kind: domain-service, contract: "assemble(account, dueCharges, asOf) -> draft invoice; groups per policy billing.grouping; calls DOM-TAX; rounding per pricing.rounding; Σ lines = total exactly"}
+  - {name: BillingQueryService, kind: application, operations: [GetBillingAccount, GetInvoice, FindInvoices, GetAccountBalance, GetUnbilledCharges, GetBillRun]}
+
+aggregates:
+  - name: BillingAccount
+    identity: "urn:ucos:<tenant>:billing-account:<ulid>"
+    invariants:
+      - "INV-BIL-1: single currency per account (multi-currency via multiple accounts)."
+      - "INV-BIL-2: issuing legal entity (organization) fixed per account unless migrated via governed process."
+      - "INV-BIL-3: account hierarchy acyclic; payer responsibility resolves to exactly one paying account per charge."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: payer, type: PartyUrn}
+      - {name: issuingEntity, type: OrganizationUrn}
+      - {name: currency, type: CurrencyCode}
+      - {name: billCycle, type: "{frequency, anchorDay, timezone}"}
+      - {name: paymentTerms, type: PaymentTerms}
+      - {name: invoiceDelivery, type: "{channels[], format (pdf|e-invoice standard), recipients (contact refs)}"}
+      - {name: parentAccount, type: "InstanceUrn?"}
+      - {name: taxProfile, type: "{exemptions[], taxIds[], jurisdictionHints}"}
+      - {name: lifecycleState, type: string}
+      - {name: revision, type: long}
+  - name: Charge
+    identity: "urn:ucos:<tenant>:charge:<ulid>"
+    invariants:
+      - "INV-BIL-4: unique per (sourceRef, sourceLineRef, period) — idempotent charge creation."
+      - "INV-BIL-5: a charge is billed on at most one issued invoice."
+    fields:
+      - {name: accountRef, type: InstanceUrn}
+      - {name: chargeType, type: "one-time|recurring|usage|adjustment|fee"}
+      - {name: amount, type: Money}
+      - {name: quantity, type: "Quantity?"}
+      - {name: period, type: "{from, to}?"}
+      - {name: priceComponents, type: "PriceComponent[]"}
+      - {name: source, type: "{kind: order|contract|subscription|entitlement-consumption|manual, ref, lineRef}"}
+      - {name: billableFrom, type: Instant}
+      - {name: status, type: "unbilled|billed|cancelled"}
+      - {name: invoiceRef, type: "InstanceUrn?"}
+  - name: Invoice
+    identity: "urn:ucos:<tenant>:invoice:<ulid>"
+    invariants:
+      - "INV-BIL-6: issued invoices immutable; legal number assigned at issue from gapless series (number_series table, row-locked)."
+      - "INV-BIL-7: total = Σ lines + Σ taxes exactly in minor units; tax lines reference DOM-TAX DecisionRecords."
+      - "INV-BIL-8: credit notes reference an issued invoice and cannot exceed its open creditable amount."
+    fields:
+      - {name: kind, type: "invoice|credit-note|debit-note|pro-forma"}
+      - {name: accountRef, type: InstanceUrn}
+      - {name: number, type: "string? (assigned at issue)"}
+      - {name: issueDate, type: Date}
+      - {name: dueDate, type: Date}
+      - {name: lines, type: "InvoiceLine[]"}
+      - {name: taxes, type: "TaxLine[]"}
+      - {name: totals, type: "{net, tax, gross, currency}"}
+      - {name: documentRef, type: "rendered document (DOM-DOC) + e-invoice payload"}
+      - {name: openAmount, type: Money}
+      - {name: lifecycleState, type: string}
+
+entities:
+  - {name: InvoiceLine, within: Invoice, fields: [lineNo, chargeRefs, description (LocalizedText resolved at issue), quantity, unitAmount, amount, period, "taxCategory"]}
+  - {name: TaxLine, within: Invoice, fields: [jurisdiction, taxType, rate, taxableAmount, taxAmount, decisionRef]}
+  - {name: BillingSchedule, within: "Charge source (stored per subscription/contract)", fields: [scheduleId, accountRef, recurringSpec, startAt, endAt, prorationPolicyRef, status]}
+  - {name: Dispute, within: Invoice, fields: [disputeId, lineRefs, amount, reason, status, resolution]}
+  - {name: DunningCase, within: BillingAccount, fields: [caseId, invoiceRefs, step, nextActionAt, status]}
+
+valueObjects:
+  - {name: PaymentTerms, definition: "As DOM-CTR"}
+  - {name: InvoiceNumberSeries, definition: "{issuingEntity, seriesCode, prefix, nextValue, gapless: bool, resetPolicy}"}
+
+commands:
+  - {name: OpenBillingAccount, input: "{payer, issuingEntity, currency, billCycle, paymentTerms, invoiceDelivery, parentAccount?, taxProfile}", emits: [BillingAccountOpened]}
+  - {name: UpdateBillingAccount, input: "{id, expectedRevision, patch}", emits: [BillingAccountUpdated]}
+  - {name: CloseBillingAccount, input: "{id}", emits: [BillingAccountClosed], preconditions: ["zero balance and no unbilled charges"]}
+  - {name: CreateCharge, input: "Charge draft + idempotency (INV-BIL-4)", emits: [ChargeCreated]}
+  - {name: CreateBillingSchedule, input: "BillingSchedule", emits: [BillingScheduleCreated], note: "Usually triggered by order.accepted or contract.terms-published"}
+  - {name: CancelBillingSchedule, input: "{scheduleId, effectiveAt}", emits: [BillingScheduleCancelled], note: "Generates prorated credit charges where applicable"}
+  - {name: RateUsage, input: "{consumptionEvents[] from entitlement.consumed}", emits: [UsageRated, ChargeCreated]}
+  - {name: StartBillRun, input: "{selector: cycle|accounts[], asOf, mode: draft|issue}", emits: [BillRunStarted, BillRunCompleted], async: true}
+  - {name: IssueInvoice, input: "{invoiceId}", emits: [InvoiceIssued]}
+  - {name: VoidDraftInvoice, input: "{invoiceId}", emits: [DraftInvoiceVoided]}
+  - {name: IssueCreditNote, input: "{invoiceRef, lines[], reasonCode, approvalRef?}", emits: [CreditNoteIssued], preconditions: ["PDP billing.credit-note with amount thresholds; SoD"]}
+  - {name: IssueDebitNote, input: "{invoiceRef, lines[], reasonCode}", emits: [DebitNoteIssued]}
+  - {name: OpenDispute, input: "{invoiceRef, lineRefs, amount, reason}", emits: [DisputeOpened], note: "Disputed amount excluded from dunning"}
+  - {name: ResolveDispute, input: "{disputeId, resolution (accept->credit note|reject)}", emits: [DisputeResolved]}
+  - {name: WriteOff, input: "{invoiceRef, amount, reason, approvalRef}", emits: [InvoiceWrittenOff]}
+  - {name: ApplyPayment, input: "{paymentRef, allocations: [{invoiceRef, amount}]}", emits: [PaymentApplied], note: "Default allocation oldest-first per policy billing.allocation"}
+  - {name: ReverseApplication, input: "{applicationId, reason}", emits: [PaymentApplicationReversed]}
+
+queries:
+  - {name: GetBillingAccount, input: "{id}", output: BillingAccount}
+  - {name: GetInvoice, input: "{id}", output: "Invoice (+ document link)"}
+  - {name: FindInvoices, input: "{accountRef?, state?, from?, to?, cursor, limit}", output: "page"}
+  - {name: GetAccountBalance, input: "{accountRef, asOf?}", output: "{open, overdue, aging buckets, unapplied cash, disputed}"}
+  - {name: GetUnbilledCharges, input: "{accountRef, until?}", output: "Charge[] + estimated next invoice"}
+  - {name: GetBillRun, input: "{id}", output: "{status, accounts, invoices, errors[]}"}
+
+apis:
+  - {style: REST, path: "/v1/billing/accounts", methods: {POST: OpenBillingAccount}}
+  - {style: REST, path: "/v1/billing/accounts/{id}", methods: {GET: GetBillingAccount, PATCH: UpdateBillingAccount}}
+  - {style: REST, path: "/v1/billing/accounts/{id}:close", methods: {POST: CloseBillingAccount}}
+  - {style: REST, path: "/v1/billing/accounts/{id}/balance", methods: {GET: GetAccountBalance}}
+  - {style: REST, path: "/v1/billing/accounts/{id}/unbilled-charges", methods: {GET: GetUnbilledCharges}}
+  - {style: REST, path: "/v1/billing/charges", methods: {POST: CreateCharge}}
+  - {style: REST, path: "/v1/billing/schedules", methods: {POST: CreateBillingSchedule}}
+  - {style: REST, path: "/v1/billing/schedules/{scheduleId}:cancel", methods: {POST: CancelBillingSchedule}}
+  - {style: REST, path: "/v1/billing/bill-runs", methods: {POST: StartBillRun}}
+  - {style: REST, path: "/v1/billing/bill-runs/{id}", methods: {GET: GetBillRun}}
+  - {style: REST, path: "/v1/billing/invoices", methods: {GET: FindInvoices}}
+  - {style: REST, path: "/v1/billing/invoices/{id}", methods: {GET: GetInvoice}}
+  - {style: REST, path: "/v1/billing/invoices/{id}:issue", methods: {POST: IssueInvoice}}
+  - {style: REST, path: "/v1/billing/invoices/{id}:void", methods: {POST: VoidDraftInvoice}}
+  - {style: REST, path: "/v1/billing/invoices/{id}/credit-notes", methods: {POST: IssueCreditNote}}
+  - {style: REST, path: "/v1/billing/invoices/{id}/debit-notes", methods: {POST: IssueDebitNote}}
+  - {style: REST, path: "/v1/billing/invoices/{id}/disputes", methods: {POST: OpenDispute}}
+  - {style: REST, path: "/v1/billing/disputes/{disputeId}:resolve", methods: {POST: ResolveDispute}}
+  - {style: REST, path: "/v1/billing/invoices/{id}:write-off", methods: {POST: WriteOff}}
+  - {style: REST, path: "/v1/billing/payment-applications", methods: {POST: ApplyPayment}}
+  - {style: REST, path: "/v1/billing/payment-applications/{applicationId}:reverse", methods: {POST: ReverseApplication}}
+
+events:
+  - {type: ucos.billing.account.opened.v1, payload: "{id, payer, issuingEntity, currency}"}
+  - {type: ucos.billing.account.updated.v1, payload: "{id, revision}"}
+  - {type: ucos.billing.account.closed.v1, payload: "{id}"}
+  - {type: ucos.billing.charge.created.v1, payload: "{id, accountRef, chargeType, amount, period, source}"}
+  - {type: ucos.billing.schedule.created.v1, payload: "{scheduleId, accountRef, recurringSpec}"}
+  - {type: ucos.billing.schedule.cancelled.v1, payload: "{scheduleId, effectiveAt}"}
+  - {type: ucos.billing.usage.rated.v1, payload: "{accountRef, meterRef, quantity, amount, period}"}
+  - {type: ucos.billing.bill-run.started.v1, payload: "{id, selector, asOf}"}
+  - {type: ucos.billing.bill-run.completed.v1, payload: "{id, invoices, errors}"}
+  - {type: ucos.billing.invoice.issued.v1, payload: "{id, kind, number, accountRef, issueDate, dueDate, totals, lines summary, taxes}", consumers: [revenue, accounting, payment, documents, analytics]}
+  - {type: ucos.billing.invoice.draft-voided.v1, payload: "{id}"}
+  - {type: ucos.billing.credit-note.issued.v1, payload: "{id, number, invoiceRef, totals, reasonCode}"}
+  - {type: ucos.billing.debit-note.issued.v1, payload: "{id, number, invoiceRef, totals}"}
+  - {type: ucos.billing.dispute.opened.v1, payload: "{disputeId, invoiceRef, amount}"}
+  - {type: ucos.billing.dispute.resolved.v1, payload: "{disputeId, resolution}"}
+  - {type: ucos.billing.invoice.written-off.v1, payload: "{invoiceRef, amount, reason}"}
+  - {type: ucos.billing.payment.applied.v1, payload: "{applicationId, paymentRef, allocations}"}
+  - {type: ucos.billing.payment.application-reversed.v1, payload: "{applicationId}"}
+  - {type: ucos.billing.invoice.overdue.v1, payload: "{invoiceRef, daysOverdue, openAmount}", consumers: [dunning workflow, entitlement suspension policy]}
+
+stateMachines:
+  - name: InvoiceLifecycle
+    initial: draft
+    states: [draft, issued, partially-paid, paid, overdue, disputed, written-off, credited, voided]
+    terminal: [paid, written-off, credited, voided]
+    transitions:
+      - {from: draft, to: issued, command: IssueInvoice}
+      - {from: draft, to: voided, command: VoidDraftInvoice}
+      - {from: [issued, overdue, partially-paid], to: partially-paid, trigger: "PaymentApplied < open amount"}
+      - {from: [issued, overdue, partially-paid], to: paid, trigger: "openAmount = 0"}
+      - {from: [issued, partially-paid], to: overdue, trigger: "dueDate passed (timer)"}
+      - {from: [issued, overdue, partially-paid], to: disputed, command: OpenDispute}
+      - {from: disputed, to: issued, command: ResolveDispute, guard: "rejected and not overdue"}
+      - {from: disputed, to: overdue, command: ResolveDispute, guard: "rejected and dueDate passed"}
+      - {from: [issued, overdue, partially-paid, disputed], to: credited, trigger: "credit notes reduce openAmount to 0"}
+      - {from: [overdue, partially-paid], to: written-off, command: WriteOff}
+  - name: BillRunLifecycle
+    initial: queued
+    states: [queued, running, review, issuing, completed, failed]
+    terminal: [completed, failed]
+    transitions:
+      - {from: queued, to: running, trigger: "worker claims"}
+      - {from: running, to: review, trigger: "mode=draft or anomaly detector flags > threshold"}
+      - {from: review, to: issuing, command: approve}
+      - {from: running, to: issuing, trigger: "mode=issue and no anomalies"}
+      - {from: issuing, to: completed, trigger: "all invoices issued"}
+      - {from: [running, issuing], to: failed, trigger: "unrecoverable error; partial results kept as drafts"}
+
+rules:
+  - {id: RUL-BIL-1, statement: "Charge idempotency (INV-BIL-4): duplicate source events never create duplicate charges."}
+  - {id: RUL-BIL-2, statement: "Recurring charges billed in advance or arrears per schedule spec; mid-cycle changes prorated per prorationPolicyRef."}
+  - {id: RUL-BIL-3, statement: "Bill run anomaly detection: invoices deviating > policy threshold from the account's trailing average go to review before issue."}
+  - {id: RUL-BIL-4, statement: "Invoice texts resolved in the payer's billing locale at issue time and frozen (no re-localization after issue)."}
+  - {id: RUL-BIL-5, statement: "Credit notes above policy thresholds and all write-offs require approval with SoD (CIC-015-001 §5)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:billing.grouping", purpose: "Invoice line grouping rules"}
+  - {urn: "urn:ucos:ucos.std:policy:billing.proration", purpose: "Default proration method"}
+  - {urn: "urn:ucos:ucos.std:policy:billing.credit-note", purpose: "Authorization and thresholds"}
+  - {urn: "urn:ucos:ucos.std:policy:billing.allocation", purpose: "Payment allocation order"}
+  - {urn: "urn:ucos:ucos.std:policy:billing.dunning", purpose: "Dunning steps per segment/jurisdiction (reminders, fees, suspension triggers)"}
+  - {urn: "urn:ucos:ucos.std:policy:billing.invoice-format", purpose: "Legal format/e-invoicing standard per jurisdiction (e.g. EN 16931, Peppol BIS, national clearance)"}
+  - {urn: "urn:ucos:ucos.std:policy:billing.anomaly-threshold", purpose: "Bill run review threshold"}
+
+decisions:
+  - {id: DEC-BIL-1, question: "Which charges are due on this invoice?", algorithm: "billableFrom <= asOf, status unbilled, account match incl. hierarchy payer resolution"}
+  - {id: DEC-BIL-2, question: "May this credit note / write-off be issued?", inputs: ["amount", "approvals", "SoD"], output: "allow|deny"}
+
+security:
+  permissions: [billing.read, billing.account.manage, billing.charge.create, billing.billrun.start, billing.invoice.issue, billing.creditnote.issue, billing.writeoff, billing.payment.apply]
+  dataClassification: "Confidential financial; payer personal data encrypted; invoices are legal records."
+  threats: ["Fraudulent credits -> thresholds, approvals, SoD, anomaly monitors", "Number gaps (legal non-compliance) -> gapless series with row locks; void only drafts"]
+
+governance:
+  changeControl: "Billing policies and invoice templates via ChangeSet with Finance approval."
+  evidence: "Issued invoice document digests and e-invoice clearance receipts captured as Evidence."
+  audit: "SOX-relevant controls (credit notes, write-offs, bill run approvals) mapped in DOM-CMPL."
+
+runtimeBehavior:
+  consistency: "Strong per account for issuance and payment application; charges created idempotently from events."
+  slo: {bill_run_throughput: "1,000,000 invoices/hour per region", GetAccountBalance_p99_ms: 50, availability: "99.95%"}
+  failureModes: ["Tax service down: bill run pauses affected accounts (drafts held); never issues without tax determination", "Rendering down: invoices issued with document pending; delivery retried"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_billing (event-sourced; financial)
+  tables:
+    - {name: billing_accounts, columns: "tenant_id uuid, id char(26), payer text, issuing_entity text, currency char(3), bill_cycle jsonb, parent_id char(26), state text, revision bigint", pk: "(tenant_id, id)"}
+    - {name: charges, columns: "tenant_id, id, account_id, charge_type, amount_minor numeric(38,0), currency, period_from, period_to, source_kind, source_ref, source_line_ref, billable_from, status, invoice_id", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, source_ref, source_line_ref, period_from)", "(tenant_id, account_id, status, billable_from)"]}
+    - {name: invoices, columns: "tenant_id, id, kind, account_id, number, series, issue_date, due_date, totals jsonb, open_amount_minor numeric(38,0), state, document_ref", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, series, number)", "(tenant_id, account_id, state, due_date)"]}
+    - {name: invoice_lines, columns: "tenant_id, invoice_id, line_no, body jsonb", pk: "(tenant_id, invoice_id, line_no)"}
+    - {name: number_series, columns: "tenant_id, issuing_entity, series, next_value bigint", pk: "(tenant_id, issuing_entity, series)"}
+    - {name: payment_applications, columns: "tenant_id, id, payment_ref, invoice_id, amount_minor, applied_at, reversed bool", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "charges/invoices hash(tenant_id) 64 + range(billable_from/issue_date) yearly."
+  retention: "Financial retention per jurisdiction (policy data.retention, typically 10 years); immutable."
+
+extensionModel:
+  extensionPoints: ["E-invoicing/clearance plugins per jurisdiction", "Proration methods", "Invoice templates (DOM-DOC)", "Dunning step kinds", "Billing models via schedule specs (milestone, prepaid drawdown)"]
+  forbidden: ["Editing issued invoices", "Country-specific code paths (use policies + plugins)"]
+
+certificationCriteria:
+  - {id: CR-BIL-01, rule: "Revenue assurance reconciliation: every order line/contract term/consumption maps to charges (completeness) and every charge to a source (no orphans) on 10^6-event replay.", level: L1}
+  - {id: CR-BIL-02, rule: "Duplicate event delivery never creates duplicate charges or invoice lines.", level: L1}
+  - {id: CR-BIL-03, rule: "Gapless numbering under 1,000 concurrent issuances per series: no gaps, no duplicates.", level: L1}
+  - {id: CR-BIL-04, rule: "Proration golden tests across DST, leap years, month-end anchors, and timezone changes.", level: L1}
+  - {id: CR-BIL-05, rule: "Bill run 1,000,000 invoices/hour with zero rounding mismatches (Σ lines + taxes = total).", level: L2}
+validationRules:
+  - {id: VR-BIL-01, rule: "Every jurisdiction in reference deployments has invoice-format and dunning policy configuration."}
+  - {id: VR-BIL-02, rule: "Every charge source kind maps to a producing event type registered in DOM-EVT."}

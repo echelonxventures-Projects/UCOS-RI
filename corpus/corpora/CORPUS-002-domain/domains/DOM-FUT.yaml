@@ -1,0 +1,178 @@
+header:
+  id: DOM-FUT
+  title: Future Compatibility Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-000-001, CIC-000-003, CIC-005-001, CIC-006-001, CIC-029-001, CIC-002-001]
+  traces: [PRIN-013, PRIN-019, PRIN-022, PRIN-012]
+  certification: [CR-FUT-01, CR-FUT-02, CR-FUT-03]
+  validation: [VR-FUT-01, VR-FUT-02]
+
+purpose: >
+  Keep UCOS able to absorb commercial models that do not exist yet without architectural redesign:
+  capability discovery and negotiation for clients, forward-compatibility conformance testing,
+  a governed register of emerging models with their expression in kernel primitives (fit analysis),
+  and the escalation path when a model cannot be expressed — which is the only legitimate trigger
+  for a constitutional amendment of the kernel.
+
+scope:
+  includes:
+    - Capability descriptor (what this deployment supports: API majors, event majors, packs, ports, extensions, feature levels)
+    - Client capability negotiation (UCOS-Capabilities request header, response features)
+    - Forward-compatibility conformance harness (unknown fields/enum values/event types tolerated by SDKs and consumers)
+    - Emerging model register with fit analysis (expressible as types+facets+policies+rules | needs new facet capability contract | needs plugin context | kernel gap)
+    - Kernel gap escalation records feeding constitutional amendments (CIC-000-001 §5)
+  excludes:
+    - Version catalog and sunsets (DOM-VER), evolution roadmap execution (DOM-EVO)
+
+responsibilities:
+  - Prove continuously that new models fit (expressibility tests against the kernel).
+  - Ensure clients and consumers tolerate additive evolution.
+  - Make kernel changes rare, evidence-based, and governed.
+
+principles: [PRIN-012, PRIN-013, PRIN-019, PRIN-022]
+
+boundaries:
+  upstream: [DOM-VER, DOM-META, DOM-EXT, DOM-ONT]
+  downstream: [DOM-EVO, DOM-GOV, DOM-META]
+
+ownership:
+  boundedContext: extension
+  owningRole: Chief Architect
+  service: compatibility-service
+  schema: ucos_extension
+
+capabilities:
+  - {id: FUT-C1, name: Capabilities, description: "Publish capability descriptors and negotiate features."}
+  - {id: FUT-C2, name: Forward-compat testing, description: "Inject unknown fields/enums/events into contract and consumer tests."}
+  - {id: FUT-C3, name: Model register, description: "Register emerging commercial models and their fit analysis."}
+  - {id: FUT-C4, name: Kernel gaps, description: "Escalate and track kernel gaps to amendment or resolution."}
+
+services:
+  - {name: CapabilityService, kind: application, operations: [PublishCapabilityDescriptor, GetCapabilities]}
+  - {name: ModelRegisterService, kind: application, operations: [RegisterEmergingModel, RecordFitAnalysis, RaiseKernelGap, ResolveKernelGap]}
+  - {name: ForwardCompatHarness, kind: library, contract: "mutate(contract sample) -> variants with unknown fields, unknown enum values, unknown event types, extra headers; assert clients/consumers succeed or degrade gracefully"}
+  - {name: CompatibilityQueryService, kind: application, operations: [GetEmergingModel, FindEmergingModels, GetKernelGap]}
+
+aggregates:
+  - name: CapabilityDescriptor
+    identity: "urn:ucos:<cell>:capabilities:<platformVersion>"
+    fields:
+      - {name: apiMajors, type: "map<context, int[]>"}
+      - {name: eventMajors, type: "map<eventType, int[]>"}
+      - {name: packs, type: "id@version[] (per tenant view)"}
+      - {name: ports, type: "name@version[]"}
+      - {name: features, type: "string[] (e.g. agent-tools, mcp, twin-simulation, e-invoicing)"}
+  - name: EmergingModel
+    identity: "urn:ucos:global:emerging-model:<code>"
+    invariants: ["INV-FUT-1: a model marked 'expressible' references a pack (or pack draft) and passing fixture instances/scenarios demonstrating it."]
+    fields:
+      - {name: code, type: "string (e.g. outcome-based-pricing, agent-to-agent-procurement, tokenized-assets, usage-pooled-family-plans)"}
+      - {name: description, type: LocalizedText}
+      - {name: fit, type: "expressible|needs-facet-contract|needs-plugin-context|kernel-gap|unassessed"}
+      - {name: expression, type: "{types[], facets[], policies[], rules[], plugins[], scenarios[]}"}
+      - {name: assessedAt, type: Instant}
+  - name: KernelGap
+    identity: "urn:ucos:global:kernel-gap:<ulid>"
+    invariants: ["INV-FUT-2: a gap is accepted only with evidence that no combination of types, facets, policies, rules, lifecycles, plugins, or bounded-context plugins expresses the model."]
+    fields:
+      - {name: modelRef, type: InstanceUrn}
+      - {name: analysis, type: string}
+      - {name: evidenceRefs, type: "InstanceUrn[]"}
+      - {name: proposedAmendment, type: "ChangeSet ref?"}
+      - {name: status, type: "raised|under-review|accepted|rejected|resolved"}
+
+entities: []
+
+valueObjects:
+  - {name: NegotiatedFeatures, definition: "{requested[], granted[], downgraded[{feature, to}]}"}
+
+commands:
+  - {name: PublishCapabilityDescriptor, input: "CapabilityDescriptor (generated at deploy)", emits: [CapabilityDescriptorPublished]}
+  - {name: RegisterEmergingModel, input: "{code, description}", emits: [EmergingModelRegistered]}
+  - {name: RecordFitAnalysis, input: "{code, fit, expression, evidenceRefs}", emits: [FitAnalysisRecorded], preconditions: ["INV-FUT-1 when fit=expressible"]}
+  - {name: RaiseKernelGap, input: "{modelRef, analysis, evidenceRefs}", emits: [KernelGapRaised]}
+  - {name: ResolveKernelGap, input: "{id, outcome (accepted|rejected|resolved), amendmentRef?}", emits: [KernelGapResolved]}
+
+queries:
+  - {name: GetCapabilities, input: "{tenant}", output: CapabilityDescriptor}
+  - {name: GetEmergingModel, input: "{code}", output: EmergingModel}
+  - {name: FindEmergingModels, input: "{fit?}", output: "EmergingModel[]"}
+  - {name: GetKernelGap, input: "{id}", output: KernelGap}
+
+apis:
+  - {style: REST, path: "/v1/capabilities", methods: {GET: GetCapabilities}, note: "Clients may send UCOS-Capabilities: feature1, feature2; response header UCOS-Capabilities-Granted"}
+  - {style: REST, path: "/ops/v1/capabilities", methods: {POST: PublishCapabilityDescriptor}}
+  - {style: REST, path: "/v1/compatibility/emerging-models", methods: {POST: RegisterEmergingModel, GET: FindEmergingModels}}
+  - {style: REST, path: "/v1/compatibility/emerging-models/{code}", methods: {GET: GetEmergingModel}}
+  - {style: REST, path: "/v1/compatibility/emerging-models/{code}/fit", methods: {POST: RecordFitAnalysis}}
+  - {style: REST, path: "/v1/compatibility/kernel-gaps", methods: {POST: RaiseKernelGap}}
+  - {style: REST, path: "/v1/compatibility/kernel-gaps/{id}", methods: {GET: GetKernelGap}}
+  - {style: REST, path: "/v1/compatibility/kernel-gaps/{id}:resolve", methods: {POST: ResolveKernelGap}}
+
+events:
+  - {type: ucos.extension.capabilities.published.v1, payload: "{cell, platformVersion, features}"}
+  - {type: ucos.extension.emerging-model.registered.v1, payload: "{code}"}
+  - {type: ucos.extension.emerging-model.fit-recorded.v1, payload: "{code, fit}"}
+  - {type: ucos.extension.kernel-gap.raised.v1, payload: "{id, modelRef}", consumers: [governance (constitutional review)]}
+  - {type: ucos.extension.kernel-gap.resolved.v1, payload: "{id, outcome, amendmentRef}"}
+
+stateMachines:
+  - name: KernelGapLifecycle
+    initial: raised
+    states: [raised, under-review, accepted, rejected, resolved]
+    terminal: [rejected, resolved]
+    transitions:
+      - {from: raised, to: under-review, trigger: "Constitutional Authority assigns reviewers"}
+      - {from: under-review, to: rejected, command: ResolveKernelGap, guard: "expression found (model refit to expressible)"}
+      - {from: under-review, to: accepted, command: ResolveKernelGap, guard: "INV-FUT-2 confirmed"}
+      - {from: accepted, to: resolved, trigger: "constitutional amendment ChangeSet applied"}
+
+rules:
+  - {id: RUL-FUT-1, statement: "Kernel aggregate set (CIC-000-001 K-1) may change only via an accepted KernelGap followed by a constitutional amendment."}
+  - {id: RUL-FUT-2, statement: "Every SDK and certified consumer must pass the forward-compat harness before release (unknown fields ignored, unknown enums mapped to 'unknown', unknown event types skipped and acknowledged)."}
+  - {id: RUL-FUT-3, statement: "Emerging models with fit=expressible ship as packs (CIC-029-001) with scenario tests in the reference tenant fixtures."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:compatibility.feature-negotiation", purpose: "Feature grant/downgrade rules per tenant plan"}
+
+decisions:
+  - {id: DEC-FUT-1, question: "Can emerging model M be supported without kernel change?", algorithm: "Fit analysis ladder: types+facets+policies+rules -> + lifecycle models -> + plugins (I1-I3) -> + bounded-context plugin (I4) -> kernel gap"}
+
+security:
+  permissions: [compatibility.read, compatibility.model.manage, compatibility.gap.raise, compatibility.gap.resolve]
+  dataClassification: "Public/internal."
+  threats: ["Capability descriptor leaking tenant packs -> per-tenant views only"]
+
+governance:
+  changeControl: "Kernel gap acceptance requires Constitutional Authority + two Chief Architects (CIC-000-001 §5)."
+  evidence: "Fit analyses and gap evidence captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Descriptors published per deploy; cached by clients (ETag)."
+  slo: {GetCapabilities_p99_ms: 20, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_extension (separate tables)
+  tables:
+    - {name: capability_descriptors, columns: "cell, platform_version, body jsonb", pk: "(cell, platform_version)", global: true}
+    - {name: emerging_models, columns: "code text pk, body jsonb, fit text", global: true}
+    - {name: kernel_gaps, columns: "id text pk, body jsonb, status text", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None."
+  retention: "Indefinite."
+
+extensionModel:
+  extensionPoints: ["Feature registry entries", "Harness mutators for new contract styles"]
+  forbidden: ["Kernel changes without accepted kernel gap"]
+
+certificationCriteria:
+  - {id: CR-FUT-01, rule: "All tier-1 SDKs and RI consumers pass the forward-compat harness (RUL-FUT-2).", level: L1}
+  - {id: CR-FUT-02, rule: "Every emerging model marked expressible has passing pack scenarios on the RI.", level: L1}
+  - {id: CR-FUT-03, rule: "Capability negotiation downgrades unsupported features deterministically (contract tests).", level: L1}
+validationRules:
+  - {id: VR-FUT-01, rule: "Every expressible emerging model references existing packs/types."}
+  - {id: VR-FUT-02, rule: "Kernel aggregate list in CIC-000-001 K-1 changes only with a resolved kernel gap reference in the amendment."}

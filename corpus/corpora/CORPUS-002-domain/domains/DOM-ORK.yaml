@@ -1,0 +1,184 @@
+header:
+  id: DOM-ORK
+  title: Operational Risk Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-016-001, CIC-015-001, CIC-025-001, CIC-002-001]
+  traces: [PRIN-011, PRIN-012, CIC-016-001]
+  certification: [CR-ORK-01, CR-ORK-02, CR-ORK-03]
+  validation: [VR-ORK-01, VR-ORK-02]
+
+purpose: >
+  Maintain the operational risk register of commerce operations — process, people, system, and
+  external-event risks — with likelihood/impact assessment, key risk indicators (KRIs) computed from
+  metrics, links to controls and incidents, loss events, and risk acceptance — giving management a
+  current, evidence-based risk picture.
+
+scope:
+  includes:
+    - Risk register (risks, owners, inherent/residual ratings, treatments)
+    - KRIs bound to metrics (DOM-ANL) and monitors (DOM-MON) with thresholds
+    - Loss events (incidents, financial losses, near misses) linked to risks and postmortems
+    - Risk acceptance with expiry and approval
+    - Aggregation of risk signals from FRD, FRK, CYR, CMPL exceptions, FCT breaks
+  excludes:
+    - Domain-specific risk assessment engines (FRD, FRK, CYR), incident handling (CORPUS-025)
+
+responsibilities:
+  - Every material risk has an owner, rating, and treatment.
+  - KRIs evaluated automatically; breaches escalate.
+  - Loss events captured and linked.
+
+principles: [PRIN-011, PRIN-012]
+
+boundaries:
+  upstream: [DOM-ANL, DOM-MON, DOM-CMPL, DOM-FCT, DOM-FRD, DOM-FRK, DOM-CYR, DOM-AUD]
+  downstream: [DOM-GOV, DOM-CMPL]
+
+ownership:
+  boundedContext: risk
+  owningRole: Chief Governance Architect
+  service: operational-risk-service
+  schema: ucos_risk
+
+capabilities:
+  - {id: ORK-C1, name: Register, description: "Maintain risks with ratings and treatments."}
+  - {id: ORK-C2, name: KRIs, description: "Bind indicators to metrics with thresholds."}
+  - {id: ORK-C3, name: Loss events, description: "Record and link loss events."}
+  - {id: ORK-C4, name: Acceptance, description: "Time-bound risk acceptance with approval."}
+
+services:
+  - {name: OperationalRiskCommandService, kind: application, operations: [RegisterRisk, AssessRisk, DefineTreatment, DefineKri, RecordLossEvent, AcceptRisk, CloseRisk]}
+  - {name: KriEvaluator, kind: application, contract: "Evaluates KRIs on schedule via DOM-ANL QueryMetrics; breach -> event + owner notification + residual rating review task"}
+  - {name: OperationalRiskQueryService, kind: application, operations: [GetRisk, GetRiskRegister, GetKriStatus, GetLossEvents]}
+
+aggregates:
+  - name: Risk
+    identity: "urn:ucos:<tenant|platform>:op-risk:<code>"
+    invariants: ["INV-ORK-1: owner, category, inherent and residual ratings (likelihood 1-5 x impact 1-5), and treatment required; accepted risks carry unexpired acceptance."]
+    fields:
+      - {name: code, type: string}
+      - {name: category, type: "process|people|system|external|compliance|third-party"}
+      - {name: description, type: string}
+      - {name: owner, type: PartyUrn}
+      - {name: inherent, type: "{likelihood, impact}"}
+      - {name: residual, type: "{likelihood, impact}"}
+      - {name: controls, type: "control codes"}
+      - {name: treatment, type: "{strategy: mitigate|transfer|avoid|accept, actions[], dueAt}"}
+      - {name: acceptance, type: "{approvedBy, expiresAt, rationale}?"}
+      - {name: status, type: "open|treating|accepted|closed"}
+  - name: Kri
+    identity: "urn:ucos:<tenant|platform>:kri:<code>"
+    fields:
+      - {name: riskRef, type: string}
+      - {name: metricRef, type: "DOM-ANL metric URN"}
+      - {name: thresholds, type: "{amber, red}"}
+      - {name: schedule, type: cron}
+  - name: LossEvent
+    identity: "urn:ucos:<tenant|platform>:loss-event:<ulid>"
+    fields:
+      - {name: occurredAt, type: Instant}
+      - {name: riskRefs, type: "string[]"}
+      - {name: amount, type: "Money?"}
+      - {name: kind, type: "loss|near-miss|incident"}
+      - {name: postmortemRef, type: "evidence ref?"}
+
+entities: []
+
+valueObjects:
+  - {name: HeatMap, definition: "counts of risks by (likelihood, impact) for inherent and residual"}
+
+commands:
+  - {name: RegisterRisk, input: "Risk (open)", emits: [OperationalRiskRegistered]}
+  - {name: AssessRisk, input: "{code, inherent, residual, rationale}", emits: [OperationalRiskAssessed]}
+  - {name: DefineTreatment, input: "{code, treatment}", emits: [RiskTreatmentDefined]}
+  - {name: DefineKri, input: "Kri", emits: [KriDefined]}
+  - {name: RecordLossEvent, input: "LossEvent", emits: [LossEventRecorded]}
+  - {name: AcceptRisk, input: "{code, rationale, expiresAt, approvalRef}", emits: [RiskAccepted], preconditions: ["approver authority per policy operational-risk.acceptance"]}
+  - {name: CloseRisk, input: "{code, reason}", emits: [OperationalRiskClosed]}
+
+queries:
+  - {name: GetRisk, input: "{code}", output: Risk}
+  - {name: GetRiskRegister, input: "{category?, rating?, status?}", output: "Risk[] + HeatMap"}
+  - {name: GetKriStatus, input: "{riskRef?}", output: "[{kri, value, status: green|amber|red, at}]"}
+  - {name: GetLossEvents, input: "{from, to, riskRef?}", output: "LossEvent[]"}
+
+apis:
+  - {style: REST, path: "/v1/operational-risk/risks", methods: {POST: RegisterRisk, GET: GetRiskRegister}}
+  - {style: REST, path: "/v1/operational-risk/risks/{code}", methods: {GET: GetRisk}}
+  - {style: REST, path: "/v1/operational-risk/risks/{code}/assessments", methods: {POST: AssessRisk}}
+  - {style: REST, path: "/v1/operational-risk/risks/{code}/treatment", methods: {PUT: DefineTreatment}}
+  - {style: REST, path: "/v1/operational-risk/risks/{code}:accept", methods: {POST: AcceptRisk}}
+  - {style: REST, path: "/v1/operational-risk/risks/{code}:close", methods: {POST: CloseRisk}}
+  - {style: REST, path: "/v1/operational-risk/kris", methods: {POST: DefineKri, GET: GetKriStatus}}
+  - {style: REST, path: "/v1/operational-risk/loss-events", methods: {POST: RecordLossEvent, GET: GetLossEvents}}
+
+events:
+  - {type: ucos.risk.operational-risk.registered.v1, payload: "{code, category, owner}"}
+  - {type: ucos.risk.operational-risk.assessed.v1, payload: "{code, inherent, residual}"}
+  - {type: ucos.risk.operational-risk.treatment-defined.v1, payload: "{code, strategy}"}
+  - {type: ucos.risk.operational-risk.accepted.v1, payload: "{code, expiresAt}"}
+  - {type: ucos.risk.operational-risk.closed.v1, payload: "{code}"}
+  - {type: ucos.risk.kri.defined.v1, payload: "{code, riskRef}"}
+  - {type: ucos.risk.kri.breached.v1, payload: "{code, value, level}", consumers: [owners, governance dashboards]}
+  - {type: ucos.risk.loss-event.recorded.v1, payload: "{id, kind, riskRefs, amount}"}
+
+stateMachines:
+  - name: RiskLifecycle
+    initial: open
+    states: [open, treating, accepted, closed]
+    terminal: [closed]
+    transitions:
+      - {from: open, to: treating, command: DefineTreatment}
+      - {from: [open, treating], to: accepted, command: AcceptRisk}
+      - {from: accepted, to: open, trigger: "acceptance expiresAt (timer)"}
+      - {from: [open, treating, accepted], to: closed, command: CloseRisk}
+
+rules:
+  - {id: RUL-ORK-1, statement: "Expired compliance exceptions (DOM-CMPL), unresolved FCT breaks beyond SLA, and critical cyber anomalies automatically create or update linked risks."}
+  - {id: RUL-ORK-2, statement: "Red KRIs force residual reassessment within 10 business days."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:operational-risk.acceptance", purpose: "Who may accept risks by residual rating and maximum acceptance duration"}
+
+decisions:
+  - {id: DEC-ORK-1, question: "Is risk R within appetite?", algorithm: "residual rating vs appetite thresholds per category"}
+
+security:
+  permissions: [operational-risk.read, operational-risk.manage, operational-risk.accept]
+  dataClassification: "Confidential."
+  threats: ["Risk understatement -> KRI-driven reassessment and audit"]
+
+governance:
+  changeControl: "Risk appetite and acceptance policy via constitutional/platform ChangeSet."
+  evidence: "Acceptances and loss events as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong for register; KRIs scheduled."
+  slo: {availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_risk (separate tables)
+  tables:
+    - {name: op_risks, columns: "scope, code, body jsonb, status", pk: "(scope, code)"}
+    - {name: kris, columns: "scope, code, body jsonb", pk: "(scope, code)"}
+    - {name: kri_values, columns: "scope, code, at, value, status", pk: "(scope, code, at)"}
+    - {name: loss_events, columns: "scope, id, body jsonb, occurred_at", pk: "(scope, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "kri_values range(at) monthly."
+  retention: "Register indefinite; KRI values 5 years."
+
+extensionModel:
+  extensionPoints: ["Risk taxonomies (packs)", "GRC connectors via DOM-DXC"]
+  forbidden: ["Risks without owners"]
+
+certificationCriteria:
+  - {id: CR-ORK-01, rule: "KRI breach produces event and reassessment task (scenario test).", level: L1}
+  - {id: CR-ORK-02, rule: "Expired acceptance reopens risk (time-travel test).", level: L1}
+  - {id: CR-ORK-03, rule: "RUL-ORK-1 automatic links created for seeded upstream signals.", level: L1}
+validationRules:
+  - {id: VR-ORK-01, rule: "Every KRI references a certified metric."}
+  - {id: VR-ORK-02, rule: "Every risk links >= 1 control or explicit treatment."}

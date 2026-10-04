@@ -1,0 +1,116 @@
+# Policies for DOM-TAX, ACC, REV, STL, CST, PRF, FCT.
+defaults:
+  auth: &auth
+    kind: authorization
+    layer: platform
+    scope: {}
+    combining: deny-overrides
+    outputSchema: {$ref: authorization-decision}
+  cfg: &cfg
+    kind: configuration
+    layer: platform
+    scope: {}
+  res: &res
+    kind: configuration
+    layer: platform
+    scope: {}
+    outputSchema: {$ref: resolution-config}
+
+policies:
+  # ---------------- Authorization ----------------
+  - <<: *auth
+    name: accounting.manual-entry
+    body:
+      language: cel
+      source: |
+        !('gl-accountant' in principal.roles) ? {'effect': 'deny'}
+        : principal.party == resource.preparedBy && action == 'approve' ? {'effect': 'deny'}
+        : action == 'prepare' && resource.amountMinor <= 1000000 ? {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['gl-accountant']}}]}
+        : action == 'prepare' ? {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['finance-controller']}}]}
+        : action == 'approve' && resource.amountMinor <= 1000000 ? {'effect': 'allow'}
+        : action == 'approve' && 'finance-controller' in principal.roles ? {'effect': 'allow'}
+        : {'effect': 'deny'}
+    testVectors:
+      - {name: prepare-small, input: {action: prepare, principal: {party: p1, roles: [gl-accountant]}, resource: {amountMinor: 50000, preparedBy: p1}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [gl-accountant]}}]}}
+      - {name: prepare-large, input: {action: prepare, principal: {party: p1, roles: [gl-accountant]}, resource: {amountMinor: 5000000, preparedBy: p1}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [finance-controller]}}]}}
+      - {name: self-approve, input: {action: approve, principal: {party: p1, roles: [gl-accountant, finance-controller]}, resource: {amountMinor: 50000, preparedBy: p1}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: peer-approve-small, input: {action: approve, principal: {party: p2, roles: [gl-accountant]}, resource: {amountMinor: 50000, preparedBy: p1}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: peer-approve-large-not-controller, input: {action: approve, principal: {party: p2, roles: [gl-accountant]}, resource: {amountMinor: 5000000, preparedBy: p1}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: controller-approve-large, input: {action: approve, principal: {party: p3, roles: [gl-accountant, finance-controller]}, resource: {amountMinor: 5000000, preparedBy: p1}}, context: {}, expectedOutput: {effect: allow}}
+
+  # ---------------- Resolution configs for new fact kinds ----------------
+  - <<: *res
+    name: tax-rule.resolution
+    body: {language: static, source: &taxRes {dimensionPrecedence: [jurisdiction], conflictStrategy: error, cardinality: many, relaxationAllowed: true, fallbackChains: [jurisdiction], maxFallbackSteps: 8, hitPolicy: priority}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *taxRes}]
+  - <<: *res
+    name: posting-rule.resolution
+    body: {language: static, source: &postRes {dimensionPrecedence: [organization, jurisdiction], conflictStrategy: error, cardinality: one, relaxationAllowed: true, fallbackChains: [jurisdiction], maxFallbackSteps: 4, hitPolicy: unique}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *postRes}]
+  - <<: *res
+    name: revenue-pob-rule.resolution
+    body: {language: static, source: &pobRes {conflictStrategy: error, cardinality: many, relaxationAllowed: true, fallbackChains: [market], maxFallbackSteps: 4, hitPolicy: collect}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *pobRes}]
+  - <<: *res
+    name: settlement-rule.resolution
+    body: {language: static, source: &stlRes {dimensionPrecedence: [contract, party], conflictStrategy: error, cardinality: many, relaxationAllowed: false, hitPolicy: collect}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *stlRes}]
+  - <<: *res
+    name: cost-entry.resolution
+    body: {language: static, source: &cstRes {dimensionPrecedence: [fulfillment-node], conflictStrategy: error, cardinality: one, relaxationAllowed: true, fallbackChains: [fulfillment-node, territory], maxFallbackSteps: 8}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *cstRes}]
+
+  # ---------------- Configuration ----------------
+  - <<: *cfg
+    name: tax.engine-selection
+    outputSchema: {type: object, required: [default], properties: {default: {type: string}, byJurisdiction: {type: object, additionalProperties: {type: string}}}}
+    body: {language: static, source: &taxEngine {default: native, byJurisdiction: {}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *taxEngine}]
+
+  - <<: *cfg
+    name: tax.place-of-supply
+    outputSchema: {type: object, required: [bySupplyType], properties: {bySupplyType: {type: object, additionalProperties: {type: array, items: {enum: [shipTo, billTo, serviceLocation, shipFrom, sellerEstablishment, customerEstablishment]}}}}}
+    body: {language: static, source: &taxPos {bySupplyType: {goods: [shipTo, shipFrom], services-b2b: [customerEstablishment, billTo], services-b2c: [sellerEstablishment, billTo], digital-b2c: [billTo, customerEstablishment], telecom: [serviceLocation, billTo], onsite-service: [serviceLocation]}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *taxPos}]
+
+  - <<: *cfg
+    name: accounting.fx-staleness
+    outputSchema: {type: object, required: [byRateType], properties: {byRateType: {type: object, additionalProperties: {type: string, pattern: "^P"}}}}
+    body: {language: static, source: &accFx {byRateType: {spot: PT1H, daily-close: P4D, contract: P366D, budget: P366D}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *accFx}]
+
+  - <<: *cfg
+    name: revenue.variable-consideration
+    outputSchema: {type: object, required: [defaultMethod, constraintProbability], properties: {defaultMethod: {enum: [expected-value, most-likely]}, constraintProbability: {type: number, minimum: 0.5, maximum: 1}}}
+    body: {language: static, source: &revVar {defaultMethod: expected-value, constraintProbability: 0.8}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *revVar}]
+
+  - <<: *cfg
+    name: settlement.risk-holds
+    outputSchema: {type: object, required: [byRiskBand], properties: {byRiskBand: {type: object, additionalProperties: {type: object, required: [holdPercent], properties: {holdPercent: {type: integer, minimum: 0, maximum: 100}, holdDays: {type: integer, minimum: 0}}}}}}
+    body: {language: static, source: &stlHolds {byRiskBand: {low: {holdPercent: 0}, medium: {holdPercent: 10, holdDays: 14}, high: {holdPercent: 50, holdDays: 30}, critical: {holdPercent: 100, holdDays: 90}}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *stlHolds}]
+
+  - <<: *cfg
+    name: settlement.adjustment-approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &stlAdj {measure: absoluteAmountMinor, tiers: [{upTo: 100000, stages: [{approverRoles: [partner-operations], quorum: 1}]}, {upTo: unbounded, stages: [{approverRoles: [partner-operations], quorum: 1}, {approverRoles: [finance-controller], quorum: 1}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *stlAdj}]
+
+  - <<: *cfg
+    name: cost.valuation-method
+    outputSchema: {type: object, required: [default], properties: {default: {enum: [fifo, weighted-average, standard]}, byLegalEntity: {type: object, additionalProperties: {enum: [fifo, weighted-average, standard]}}}}
+    body: {language: static, source: &cstMethod {default: weighted-average, byLegalEntity: {}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *cstMethod}]
+
+  - <<: *cfg
+    name: profitability.variance-threshold
+    outputSchema: {type: object, required: [percent], properties: {percent: {type: integer, minimum: 1, maximum: 100}}}
+    body: {language: static, source: &prfVar {percent: 15}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *prfVar}]
+
+  - <<: *cfg
+    name: financial-controls.break-sla
+    outputSchema: {type: object, required: [byCategory], properties: {byCategory: {type: object, additionalProperties: {type: string, pattern: "^P"}}}}
+    body: {language: static, source: &fctSla {byCategory: {timing: P5D, data-error: P3D, missing-posting: P2D, unexplained: P2D}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *fctSla}]

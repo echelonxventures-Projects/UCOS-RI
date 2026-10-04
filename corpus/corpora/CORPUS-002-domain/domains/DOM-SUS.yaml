@@ -1,0 +1,166 @@
+header:
+  id: DOM-SUS
+  title: Sustainability Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-002-001, CIC-028-001, CIC-011-001]
+  traces: [PRIN-001, PRIN-004, PRIN-013, DOM-PRV]
+  certification: [CR-SUS-01, CR-SUS-02, CR-SUS-03]
+  validation: [VR-SUS-01, VR-SUS-02]
+
+plugin:
+  id: ucos.ext.sustainability
+  isolation: I4
+  consumesPorts: [EventBusPort, AnalyticsStorePort]
+  providesApis: ["/v1/sustainability/*"]
+  requiredPacks: ["ucos.std@^1.0"]
+
+purpose: >
+  Quantify and disclose the environmental footprint of commerce — product carbon footprints (PCF),
+  order and shipment emissions, packaging and recyclability, energy for digital services — using
+  emission factors and methodologies (GHG Protocol, ISO 14067, PACT data exchange), feeding product
+  attributes, verified claims (DOM-PRV), customer-facing disclosures, and Scope 3 reporting.
+
+scope:
+  includes:
+    - Emission factor libraries (versioned, sourced, regionalized)
+    - Footprint calculations per object (cradle-to-gate), per order line, per shipment (DOM-LOG), per digital service usage
+    - PCF data exchange with suppliers (PACT-compatible) via DOM-DXC
+    - Sustainability attributes contributed to commercial objects (via owning commands) and claims via DOM-PRV
+    - Scope 3 category reports (purchased goods, transport, use of sold products, end of life)
+  excludes:
+    - Claims verification (DOM-PRV), carrier selection (DOM-LOG), product attributes ownership (DOM-COB)
+
+responsibilities:
+  - Methodology and factor versions recorded for every number.
+  - Customer-facing values only from verified or methodology-compliant calculations.
+
+principles: [PRIN-001, PRIN-004, PRIN-013]
+
+boundaries:
+  upstream: [DOM-COB, DOM-PRV, DOM-LOG, DOM-SUPN, DOM-DXC, DOM-ANL]
+  downstream: [DOM-COB, DOM-PRV, DOM-SRC, DOM-LOG, DOM-ANL, DOM-CMPL]
+
+ownership:
+  boundedContext: sustainability
+  owningRole: Chief Governance Architect
+  service: sustainability-service
+  schema: ucos_sustainability
+
+capabilities:
+  - {id: SUS-C1, name: Factors, description: "Maintain emission factor libraries."}
+  - {id: SUS-C2, name: Footprints, description: "Compute object, order, shipment, service footprints."}
+  - {id: SUS-C3, name: Exchange, description: "Exchange PCFs with suppliers."}
+  - {id: SUS-C4, name: Disclose, description: "Contribute attributes and claims; Scope 3 reports."}
+
+services:
+  - {name: SustainabilityCommandService, kind: application, operations: [ImportEmissionFactors, CalculateFootprint, ImportSupplierPcf, PublishFootprintAttributes, GenerateScope3Report]}
+  - {name: FootprintCalculator, kind: domain-service, contract: "calculate(subject, method, factorLibrary@version) -> {value kgCO2e, breakdown, dataQualityRating, method}; deterministic"}
+  - {name: SustainabilityQueryService, kind: application, operations: [GetFootprint, GetEmissionFactor, GetScope3Report]}
+
+aggregates:
+  - name: EmissionFactorLibrary
+    identity: "urn:ucos:<namespace>:emission-factors:<source>@<version>"
+    fields:
+      - {name: source, type: string}
+      - {name: version, type: string}
+      - {name: factors, type: "[{activity, unit, region, kgCO2ePerUnit, validFrom}]"}
+  - name: Footprint
+    identity: "urn:ucos:<tenant>:footprint:<ulid>"
+    invariants: ["INV-SUS-1: method, factor library version, boundary, and data quality rating recorded; supplier-provided PCFs reference their exchange evidence."]
+    fields:
+      - {name: subject, type: "objectRef | orderLineRef | shipmentRef | usageRef"}
+      - {name: valueKgCo2e, type: decimal}
+      - {name: boundary, type: "cradle-to-gate|cradle-to-grave|transport|use-phase"}
+      - {name: method, type: "ghg-protocol-product|iso-14067|glec (transport)|custom"}
+      - {name: factorLibraryRef, type: string}
+      - {name: primaryDataShare, type: decimal}
+      - {name: dataQualityRating, type: "1..5"}
+      - {name: status, type: "calculated|published|superseded"}
+
+entities: []
+
+valueObjects:
+  - {name: Scope3Report, definition: "{legalEntity, period, categories: [{category, tCO2e, method, primaryDataShare}]}"}
+
+commands:
+  - {name: ImportEmissionFactors, input: "{source, version, artifactRef}", emits: [EmissionFactorsImported]}
+  - {name: CalculateFootprint, input: "{subject, method}", emits: [FootprintCalculated]}
+  - {name: ImportSupplierPcf, input: "{supplier, pcfDocument (PACT JSON)}", emits: [SupplierPcfImported]}
+  - {name: PublishFootprintAttributes, input: "{footprintId}", emits: [FootprintPublished], note: "Updates COB attribute via owning command; creates claim draft in DOM-PRV"}
+  - {name: GenerateScope3Report, input: "{legalEntity, period}", emits: [Scope3ReportGenerated], async: true}
+
+queries:
+  - {name: GetFootprint, input: "{subject}", output: Footprint}
+  - {name: GetEmissionFactor, input: "{activity, region, asOf}", output: "factor"}
+  - {name: GetScope3Report, input: "{legalEntity, period}", output: Scope3Report}
+
+apis:
+  - {style: REST, path: "/v1/sustainability/emission-factors", methods: {POST: ImportEmissionFactors, GET: GetEmissionFactor}}
+  - {style: REST, path: "/v1/sustainability/footprints", methods: {POST: CalculateFootprint, GET: GetFootprint}}
+  - {style: REST, path: "/v1/sustainability/footprints/{id}:publish", methods: {POST: PublishFootprintAttributes}}
+  - {style: REST, path: "/v1/sustainability/supplier-pcfs", methods: {POST: ImportSupplierPcf}}
+  - {style: REST, path: "/v1/sustainability/scope3-reports", methods: {POST: GenerateScope3Report, GET: GetScope3Report}}
+
+events:
+  - {type: ucos.sustainability.emission-factors.imported.v1, payload: "{source, version}"}
+  - {type: ucos.sustainability.footprint.calculated.v1, payload: "{id, subject, valueKgCo2e, method}"}
+  - {type: ucos.sustainability.footprint.published.v1, payload: "{id, subject}", consumers: [commercial-object attributes, provenance claims, search]}
+  - {type: ucos.sustainability.supplier-pcf.imported.v1, payload: "{supplier, objectRef}"}
+  - {type: ucos.sustainability.scope3-report.generated.v1, payload: "{legalEntity, period}"}
+
+stateMachines:
+  - name: FootprintLifecycle
+    initial: calculated
+    states: [calculated, published, superseded]
+    terminal: [superseded]
+    transitions:
+      - {from: calculated, to: published, command: PublishFootprintAttributes, guard: "dataQualityRating >= policy minimum"}
+      - {from: [calculated, published], to: superseded, trigger: "recalculated with newer factors or data"}
+
+rules:
+  - {id: RUL-SUS-1, statement: "Customer-facing footprint values require published status and, for marketing claims, a verified claim in DOM-PRV (RUL-PRV-1)."}
+  - {id: RUL-SUS-2, statement: "Shipment footprints follow GLEC/ISO 14083 and feed carrier-selection carbon weight (DOM-LOG)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:sustainability.disclosure", purpose: "Minimum data quality for publication and allowed disclosure contexts"}
+
+decisions:
+  - {id: DEC-SUS-1, question: "What is the footprint of subject S?", algorithm: "FootprintCalculator with recorded method and factor version"}
+
+security:
+  permissions: [sustainability.read, sustainability.manage, sustainability.publish]
+  dataClassification: "Supplier PCFs confidential; published footprints public."
+  threats: ["Greenwashing -> verified claims requirement"]
+
+governance:
+  changeControl: "Factor libraries and methods via ChangeSet."
+  evidence: "Supplier PCF documents and calculation reports as Evidence."
+
+runtimeBehavior:
+  consistency: "Batch and event-driven recalculation."
+  slo: {CalculateFootprint_p95_s: 5, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_sustainability
+  tables:
+    - {name: emission_factor_libraries, columns: "namespace, source, version, body jsonb", pk: "(namespace, source, version)"}
+    - {name: footprints, columns: "tenant_id, id, subject, value_kg numeric, method, body jsonb, status", pk: "(tenant_id, id)", indexes: ["(tenant_id, subject, status)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Reported footprints 10 years (disclosure audits)."
+
+extensionModel:
+  extensionPoints: ["Factor library importers", "Calculation methods", "PACT connectors"]
+  forbidden: ["Unsourced factors"]
+
+certificationCriteria:
+  - {id: CR-SUS-01, rule: "Calculation golden tests per method (GHG product, ISO 14067, GLEC) match reference values.", level: L1}
+  - {id: CR-SUS-02, rule: "PACT PCF exchange conformance for import.", level: L1}
+  - {id: CR-SUS-03, rule: "Plugin deploys as I4 with only declared ports.", level: L2}
+validationRules:
+  - {id: VR-SUS-01, rule: "Every published footprint references an existing factor library version."}
+  - {id: VR-SUS-02, rule: "Every footprint attribute in packs maps to a calculation method."}

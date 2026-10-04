@@ -1,0 +1,208 @@
+header:
+  id: DOM-TAX
+  title: Taxation Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-004, CIC-011-001, CIC-010-001, CIC-028-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-006, PRIN-016, PRIN-020, PRIN-022]
+  certification: [CR-TAX-01, CR-TAX-02, CR-TAX-03, CR-TAX-04]
+  validation: [VR-TAX-01, VR-TAX-02]
+
+purpose: >
+  Determine, record, and report indirect taxes (VAT/GST, sales and use tax, excise, digital services
+  taxes, telecom and environmental levies, withholding on marketplace payouts) for every transaction
+  in every jurisdiction — through a provider-neutral tax determination contract backed by native
+  content packs or certified tax-engine plugins — with replayable, auditable decisions.
+
+scope:
+  includes:
+    - Tax determination API used by pricing (TAX phase), quotes, orders, billing, settlement
+    - Tax categories (taxCategory attribute values) and mappings to engine-specific codes
+    - Jurisdiction determination (ship-from/ship-to/bill-to/service location, place-of-supply rules)
+    - Exemptions and certificates (party tax profiles), reverse charge, marketplace facilitator rules
+    - Tax transaction journal (committed tax per invoice line) and returns-ready reporting extracts
+    - Native rate/rule content (jurisdiction packs) or TaxEnginePort plugins
+  excludes:
+    - Legal-entity tax registrations (DOM-ORG), invoice issuance (DOM-BIL), GL posting (DOM-ACC)
+    - Income/corporate tax
+
+responsibilities:
+  - Correct, explainable tax on every taxable line; never silently zero.
+  - Deterministic replay of committed tax (snapshot of content version / engine response).
+  - Commit/void lifecycle aligned with invoices and credit notes.
+
+principles: [PRIN-005, PRIN-006, PRIN-016, PRIN-020, PRIN-022]
+
+boundaries:
+  upstream: [DOM-GEO, DOM-ORG, DOM-PTY, DOM-TXO, DOM-COB, DOM-EXT, DOM-REF]
+  downstream: [DOM-PRC, DOM-QTE, DOM-ORD, DOM-BIL, DOM-STL, DOM-ACC, DOM-CMPL]
+  antiCorruption: "TaxEnginePort maps engine-specific codes/results into UCOS TaxResult; engine codes never leak to other contexts."
+
+ownership:
+  boundedContext: finance
+  owningRole: Chief Product Architect
+  service: tax-service
+  schema: ucos_finance
+
+capabilities:
+  - {id: TAX-C1, name: Determine, description: "Compute tax for a document draft (quote, cart, order, invoice) per line."}
+  - {id: TAX-C2, name: Commit/void, description: "Commit tax for issued invoices; void/adjust for credits."}
+  - {id: TAX-C3, name: Exemptions, description: "Manage exemption certificates and tax profiles."}
+  - {id: TAX-C4, name: Categories, description: "Govern tax categories and engine code mappings."}
+  - {id: TAX-C5, name: Reporting, description: "Produce jurisdiction filing extracts from the tax journal."}
+
+services:
+  - {name: TaxDeterminationService, kind: application, operations: [DetermineTax, CommitTax, VoidTax, AdjustTax]}
+  - {name: JurisdictionResolver, kind: domain-service, contract: "resolve(lines, addresses, sellerRegistrations, supplyRules) -> per line {jurisdictions[], placeOfSupply, rule}; uses GEO areas active at asOf and policy tax.place-of-supply"}
+  - {name: NativeTaxEngine, kind: domain-service, contract: "Rules (fact kind tax-rule) + rate tables (scoped price-entry-like facts) from jurisdiction packs; CIC-011-001 resolution with jurisdiction precedence and conflict error"}
+  - {name: TaxEngineGateway, kind: infrastructure, contract: "TaxEnginePort adapters (I2 plugins); selection by policy tax.engine-selection"}
+  - {name: TaxProfileService, kind: application, operations: [UploadExemptionCertificate, ValidateExemptionCertificate, RevokeExemptionCertificate, DefineTaxCategory, MapTaxCategory]}
+  - {name: TaxQueryService, kind: application, operations: [GetTaxTransaction, FindTaxTransactions, GetTaxProfile, ExportFilingData]}
+
+aggregates:
+  - name: TaxTransaction
+    identity: "urn:ucos:<tenant>:tax-transaction:<ulid>"
+    invariants:
+      - "INV-TAX-1: one committed TaxTransaction per issued invoice/credit note; amounts equal invoice TaxLines exactly."
+      - "INV-TAX-2: every line has a determination (taxable with rate, exempt with reason, out-of-scope with rule, reverse-charge) — never empty."
+      - "INV-TAX-3: committed transactions immutable; corrections via adjustment transactions referencing the original."
+    fields:
+      - {name: documentRef, type: "invoiceRef | creditNoteRef | orderRef (estimate)"}
+      - {name: seller, type: "LegalEntityUrn + registration used"}
+      - {name: buyer, type: "PartyUrn + tax profile snapshot"}
+      - {name: lines, type: "TaxLineResult[]"}
+      - {name: engine, type: "{kind: native|plugin, ref, contentVersion}"}
+      - {name: decisionRef, type: InstanceUrn}
+      - {name: status, type: "estimated|committed|voided|adjusted"}
+      - {name: asOf, type: Instant}
+  - name: ExemptionCertificate
+    identity: "urn:ucos:<tenant>:exemption-certificate:<ulid>"
+    invariants: ["INV-TAX-4: certificate applies only within its jurisdictions, categories, and validity; validation status recorded with evidence."]
+    fields:
+      - {name: party, type: PartyUrn}
+      - {name: jurisdictions, type: "string[]"}
+      - {name: exemptionReason, type: string}
+      - {name: categories, type: "string[]"}
+      - {name: validFrom, type: Date}
+      - {name: validTo, type: "Date?"}
+      - {name: evidenceRef, type: InstanceUrn}
+      - {name: status, type: "pending|valid|invalid|expired|revoked"}
+  - name: TaxCategory
+    identity: "urn:ucos:<namespace>:tax-category:<code>"
+    fields:
+      - {name: code, type: "string (values of taxCategory attribute)"}
+      - {name: label, type: LocalizedText}
+      - {name: engineMappings, type: "map<engineRef, engineCode>"}
+
+entities:
+  - {name: TaxLineResult, within: TaxTransaction, fields: [lineRef, taxableAmount, "taxes: [{jurisdiction, taxType, rate, amount, ruleRef, reasonCode}]", "determination (taxable|exempt|out-of-scope|reverse-charge|zero-rated)", "certificateRef?"]}
+
+valueObjects:
+  - {name: TaxRequest, definition: "{documentKind, currency, asOf, seller, buyer, addresses {shipFrom, shipTo, billTo, serviceLocation}, lines: [{lineRef, objectRef, taxCategory, amount (net), quantity, chargeType}]}"}
+  - {name: TaxResult, definition: "{lines: TaxLineResult[], totals, decisionRef, contentVersion, warnings[]}"}
+
+commands:
+  - {name: CommitTax, input: "{documentRef, taxRequest, priorEstimateRef?}", emits: [TaxCommitted], preconditions: ["document issued (billing)"]}
+  - {name: VoidTax, input: "{taxTransactionRef, reason}", emits: [TaxVoided]}
+  - {name: AdjustTax, input: "{originalRef, creditNoteRef, lines}", emits: [TaxAdjusted]}
+  - {name: UploadExemptionCertificate, input: "ExemptionCertificate (pending)", emits: [ExemptionCertificateUploaded]}
+  - {name: ValidateExemptionCertificate, input: "{id, outcome, evidenceRef}", emits: [ExemptionCertificateValidated]}
+  - {name: RevokeExemptionCertificate, input: "{id, reason}", emits: [ExemptionCertificateRevoked]}
+  - {name: DefineTaxCategory, input: "TaxCategory + changeSetRef", emits: [TaxCategoryDefined]}
+  - {name: MapTaxCategory, input: "{code, engineRef, engineCode}", emits: [TaxCategoryMapped]}
+
+queries:
+  - {name: DetermineTax, input: TaxRequest, output: TaxResult, note: "Side-effect free estimate; DecisionRecord type tax-determination recorded when bound to quote/order"}
+  - {name: GetTaxTransaction, input: "{id}", output: TaxTransaction}
+  - {name: FindTaxTransactions, input: "{seller?, jurisdiction?, period?, status?, cursor}", output: "page"}
+  - {name: GetTaxProfile, input: "{party, asOf?}", output: "{taxIds, exemptions[], buyerType}"}
+  - {name: ExportFilingData, input: "{legalEntity, jurisdiction, period, format}", output: "filing extract (CSV/XML per jurisdiction template)"}
+
+apis:
+  - {style: REST, path: "/v1/tax:determine", methods: {POST: DetermineTax}}
+  - {style: REST, path: "/v1/tax/transactions", methods: {POST: CommitTax, GET: FindTaxTransactions}}
+  - {style: REST, path: "/v1/tax/transactions/{id}", methods: {GET: GetTaxTransaction}}
+  - {style: REST, path: "/v1/tax/transactions/{id}:void", methods: {POST: VoidTax}}
+  - {style: REST, path: "/v1/tax/transactions/{id}/adjustments", methods: {POST: AdjustTax}}
+  - {style: REST, path: "/v1/tax/exemption-certificates", methods: {POST: UploadExemptionCertificate}}
+  - {style: REST, path: "/v1/tax/exemption-certificates/{id}:validate", methods: {POST: ValidateExemptionCertificate}}
+  - {style: REST, path: "/v1/tax/exemption-certificates/{id}:revoke", methods: {POST: RevokeExemptionCertificate}}
+  - {style: REST, path: "/v1/tax/profiles/{party}", methods: {GET: GetTaxProfile}}
+  - {style: REST, path: "/v1/tax/categories", methods: {POST: DefineTaxCategory}}
+  - {style: REST, path: "/v1/tax/categories/{code}/mappings", methods: {POST: MapTaxCategory}}
+  - {style: REST, path: "/v1/tax/filings:export", methods: {POST: ExportFilingData}}
+
+events:
+  - {type: ucos.finance.tax.committed.v1, payload: "{id, documentRef, seller, totals by jurisdiction}", consumers: [accounting, compliance]}
+  - {type: ucos.finance.tax.voided.v1, payload: "{id, reason}"}
+  - {type: ucos.finance.tax.adjusted.v1, payload: "{id, originalRef, creditNoteRef}"}
+  - {type: ucos.finance.exemption-certificate.uploaded.v1, payload: "{id, party, jurisdictions}"}
+  - {type: ucos.finance.exemption-certificate.validated.v1, payload: "{id, outcome}"}
+  - {type: ucos.finance.exemption-certificate.revoked.v1, payload: "{id}"}
+  - {type: ucos.finance.tax-category.defined.v1, payload: "{code}"}
+  - {type: ucos.finance.tax-category.mapped.v1, payload: "{code, engineRef}"}
+
+stateMachines:
+  - name: TaxTransactionLifecycle
+    initial: estimated
+    states: [estimated, committed, voided, adjusted]
+    terminal: [voided]
+    transitions:
+      - {from: estimated, to: committed, command: CommitTax}
+      - {from: committed, to: adjusted, command: AdjustTax}
+      - {from: adjusted, to: adjusted, command: AdjustTax}
+      - {from: [committed, adjusted], to: voided, command: VoidTax, guard: "document voided before filing period close"}
+
+rules:
+  - {id: RUL-TAX-1, statement: "Jurisdiction uses authoritative verified addresses only (geography.min-confidence authoritative); unverified addresses yield E-TAX-ADDRESS-UNVERIFIED for committed documents."}
+  - {id: RUL-TAX-2, statement: "Missing tax category on a taxable line is an error (E-TAX-NO-CATEGORY), never treated as exempt."}
+  - {id: RUL-TAX-3, statement: "Marketplace facilitator and reverse-charge determinations come from jurisdiction rules (fact kind tax-rule) and seller/buyer profiles — not code."}
+  - {id: RUL-TAX-4, statement: "Engine outage: estimates may return W-TAX-ESTIMATE-UNAVAILABLE per pricing policy; commits fail closed and billing holds the draft (DOM-BIL failure mode)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:tax.engine-selection", purpose: "Native vs plugin engine per jurisdiction/legal entity"}
+  - {urn: "urn:ucos:ucos.std:policy:tax.place-of-supply", purpose: "Address precedence per supply type (goods, services, digital, telecom)"}
+  - {urn: "urn:ucos:ucos.std:policy:tax-rule.resolution", purpose: "ResolutionConfig for tax rules (jurisdiction precedence, conflict error)"}
+
+decisions:
+  - {id: DEC-TAX-1, question: "What tax applies to line L?", algorithm: "JurisdictionResolver -> engine (native rules/rates or plugin) -> TaxLineResult; DecisionRecord tax-determination"}
+
+security:
+  permissions: [tax.determine, tax.read, tax.commit, tax.exemption.manage, tax.category.manage, tax.filing.export]
+  dataClassification: "Confidential financial; buyer addresses personal (sent to engines only under purpose tax-determination)."
+  threats: ["Exemption fraud -> certificate validation with evidence, expiry", "Engine response tampering -> mTLS + response digests stored with decision"]
+
+governance:
+  changeControl: "Tax categories, mappings, engine selection, jurisdiction packs via ChangeSet with Tax/Finance approval."
+  evidence: "Committed transactions linked to DecisionRecords; filing extracts sealed as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong for commits; DetermineTax stateless."
+  slo: {DetermineTax_native_100lines_p99_ms: 60, DetermineTax_plugin_p99_ms: 250, availability: "99.99% (native) / provider-bound (plugin)"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_finance (event-sourced; financial)
+  tables:
+    - {name: tax_transactions, columns: "tenant_id, id, document_ref, seller_entity, status, totals jsonb, engine jsonb, decision_ref, as_of, body jsonb", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, document_ref) WHERE status='committed'", "(tenant_id, seller_entity, as_of)"]}
+    - {name: tax_lines, columns: "tenant_id, transaction_id, line_ref, jurisdiction, tax_type, rate numeric(12,8), taxable_minor numeric(38,0), tax_minor numeric(38,0), determination", pk: "(tenant_id, transaction_id, line_ref, jurisdiction, tax_type)"}
+    - {name: exemption_certificates, columns: "tenant_id, id, party, body jsonb, status, valid_from, valid_to", pk: "(tenant_id, id)", indexes: ["(tenant_id, party, status)"]}
+    - {name: tax_categories, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "tax_lines range(as_of) monthly x hash(tenant_id) 16."
+  retention: "Financial retention per jurisdiction (min 10 years)."
+
+extensionModel:
+  extensionPoints: ["TaxEnginePort plugins", "Jurisdiction content packs (rates, rules, filing templates)", "Certificate validation plugins"]
+  forbidden: ["Tax rates or jurisdiction logic in code"]
+
+certificationCriteria:
+  - {id: CR-TAX-01, rule: "Golden jurisdiction suites (EU VAT incl. OSS/reverse charge, US sales tax incl. marketplace facilitator, GST/HST, AU/NZ GST, IN GST) match expected results exactly for native packs and certified plugins.", level: L1}
+  - {id: CR-TAX-02, rule: "Committed tax equals invoice tax lines for 10^6 invoices (reconciliation).", level: L1}
+  - {id: CR-TAX-03, rule: "Replay of committed transactions reproduces results from recorded content version/engine response.", level: L1}
+  - {id: CR-TAX-04, rule: "DetermineTax native 100 lines p99 <= 60ms.", level: L2}
+validationRules:
+  - {id: VR-TAX-01, rule: "Every taxCategory value used by pack fixtures is a defined TaxCategory."}
+  - {id: VR-TAX-02, rule: "Every jurisdiction with active sales in reference deployments has engine selection configured."}

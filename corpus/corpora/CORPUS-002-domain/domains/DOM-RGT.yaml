@@ -1,0 +1,172 @@
+header:
+  id: DOM-RGT
+  title: Rights Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-011-006, CIC-007-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-006, PRIN-020, PRIN-021]
+  certification: [CR-RGT-01, CR-RGT-02, CR-RGT-03]
+  validation: [VR-RGT-01, VR-RGT-02]
+
+purpose: >
+  Own the rights the tenant holds to commercialize things it does not fully own — content and media
+  distribution windows, brand and character licences, resale and distribution authorizations, IP
+  licences, data usage rights — including territories, channels, media/usage types, exclusivity,
+  holdbacks, and royalty obligations, and turn them into sellability decisions and royalty accruals.
+
+scope:
+  includes:
+    - RightsGrant (rights-in) from rights holders: subject, usage types, territories, channels, windows, exclusivity, holdbacks
+    - Rights checks (may object X be sold/distributed/used for purpose U in context C at time T)
+    - Royalty terms linkage (settlement agreements in DOM-STL with role licensor)
+    - Rights conflict detection (overlapping exclusive grants, sublicensing beyond grant)
+    - Rights-out (sublicences the tenant grants to partners) constrained by rights-in
+  excludes:
+    - Customer entitlements (DOM-ENT), contract documents (DOM-CTR), royalty payouts (DOM-STL)
+
+responsibilities:
+  - No sale or distribution outside held rights.
+  - Exclusivity and holdback windows enforced.
+  - Royalty-bearing usage reported to settlement.
+
+principles: [PRIN-005, PRIN-006, PRIN-020, PRIN-021]
+
+boundaries:
+  upstream: [DOM-CTR, DOM-PTY, DOM-COB, DOM-TER, DOM-TXO]
+  downstream: [DOM-AVL, DOM-DST, DOM-CAT, DOM-STL, DOM-MKT]
+
+ownership:
+  boundedContext: entitlement
+  owningRole: Chief Product Architect
+  service: rights-service
+  schema: ucos_entitlement
+
+capabilities:
+  - {id: RGT-C1, name: Rights-in, description: "Record grants from rights holders with all dimensions."}
+  - {id: RGT-C2, name: Check, description: "Decide permitted usage for subject/purpose/context/time."}
+  - {id: RGT-C3, name: Rights-out, description: "Grant sublicences within rights-in limits."}
+  - {id: RGT-C4, name: Conflicts, description: "Detect exclusivity/holdback conflicts."}
+  - {id: RGT-C5, name: Usage reporting, description: "Emit royalty-bearing usage for settlement."}
+
+services:
+  - {name: RightsCommandService, kind: application, operations: [RecordRightsGrant, AmendRightsGrant, TerminateRightsGrant, GrantSublicense, RevokeSublicense]}
+  - {name: RightsChecker, kind: domain-service, contract: "check(subject, usageType, ctx{territory, channel, time, partner?}) -> {permitted, grantRefs[], restrictions[], reasons[]}; union of matching non-expired grants minus holdbacks/exclusions; sublicensees require chain to a rights-in grant"}
+  - {name: RightsQueryService, kind: application, operations: [CheckRights, GetRightsGrant, FindRightsGrants, GetRightsConflicts, GetRightsCoverage]}
+
+aggregates:
+  - name: RightsGrant
+    identity: "urn:ucos:<tenant>:rights-grant:<ulid>"
+    invariants:
+      - "INV-RGT-1: direction in|out; out-grants must be covered by in-grants (subject, usage, territory, channel, window) and allow sublicensing."
+      - "INV-RGT-2: exclusive grants for the same (subject, usage, territory, channel) do not overlap in time."
+    fields:
+      - {name: direction, type: "in|out"}
+      - {name: counterparty, type: "PartyUrn (rights holder for in; licensee for out)"}
+      - {name: subjects, type: "Urn[] | selector"}
+      - {name: usageTypes, type: "string[] (sell, rent, stream, download, display, broadcast, merchandise, resell, distribute, data-processing)"}
+      - {name: territories, type: "{includes[], excludes[]} (DOM-TER/GEO codes)"}
+      - {name: channels, type: "{includes[], excludes[]}"}
+      - {name: window, type: Interval}
+      - {name: holdbacks, type: "[{usageType, territory?, until}]"}
+      - {name: exclusive, type: boolean}
+      - {name: sublicensable, type: boolean}
+      - {name: contractRef, type: "InstanceUrn?"}
+      - {name: settlementAgreementRef, type: "InstanceUrn?"}
+      - {name: status, type: "active|suspended|terminated|expired"}
+
+entities: []
+
+valueObjects:
+  - {name: RightsCheckResult, definition: "{permitted, grantRefs[], restrictions[{kind, detail}], reasons[], validUntil}"}
+  - {name: RightsCoverage, definition: "{subject, byTerritoryChannel: [{territory, channel, usageTypes, until}]}"}
+
+commands:
+  - {name: RecordRightsGrant, input: "RightsGrant (direction in)", emits: [RightsGrantRecorded], preconditions: ["INV-RGT-2", "evidence of contract"]}
+  - {name: AmendRightsGrant, input: "{id, changes, effectiveFrom}", emits: [RightsGrantAmended]}
+  - {name: TerminateRightsGrant, input: "{id, effectiveAt, reason}", emits: [RightsGrantTerminated], note: "Triggers withdrawal in DOM-DST and sellability updates"}
+  - {name: GrantSublicense, input: "RightsGrant (direction out)", emits: [SublicenseGranted], preconditions: ["INV-RGT-1"]}
+  - {name: RevokeSublicense, input: "{id, reason}", emits: [SublicenseRevoked]}
+
+queries:
+  - {name: CheckRights, input: "{subject, usageType, context}", output: RightsCheckResult}
+  - {name: GetRightsGrant, input: "{id}", output: RightsGrant}
+  - {name: FindRightsGrants, input: "{subject?, counterparty?, direction?, expiringBefore?}", output: "page"}
+  - {name: GetRightsConflicts, input: "{scope?}", output: "conflicts[]"}
+  - {name: GetRightsCoverage, input: "{subject}", output: RightsCoverage}
+
+apis:
+  - {style: REST, path: "/v1/rights/grants", methods: {POST: RecordRightsGrant, GET: FindRightsGrants}}
+  - {style: REST, path: "/v1/rights/grants/{id}", methods: {GET: GetRightsGrant, PATCH: AmendRightsGrant}}
+  - {style: REST, path: "/v1/rights/grants/{id}:terminate", methods: {POST: TerminateRightsGrant}}
+  - {style: REST, path: "/v1/rights/sublicenses", methods: {POST: GrantSublicense}}
+  - {style: REST, path: "/v1/rights/sublicenses/{id}:revoke", methods: {POST: RevokeSublicense}}
+  - {style: REST, path: "/v1/rights:check", methods: {POST: CheckRights}}
+  - {style: REST, path: "/v1/rights/conflicts", methods: {GET: GetRightsConflicts}}
+  - {style: REST, path: "/v1/rights/coverage/{subject}", methods: {GET: GetRightsCoverage}}
+
+events:
+  - {type: ucos.entitlement.rights-grant.recorded.v1, payload: "{id, direction, subjects, usageTypes, territories, window}", consumers: [availability (sellability), distribution]}
+  - {type: ucos.entitlement.rights-grant.amended.v1, payload: "{id, effectiveFrom}"}
+  - {type: ucos.entitlement.rights-grant.terminated.v1, payload: "{id, effectiveAt}", consumers: [distribution (withdrawal), catalog, availability]}
+  - {type: ucos.entitlement.sublicense.granted.v1, payload: "{id, licensee, subjects}"}
+  - {type: ucos.entitlement.sublicense.revoked.v1, payload: "{id}"}
+  - {type: ucos.entitlement.rights-usage.reported.v1, payload: "{grantRef, subject, usageType, quantity, revenue, period}", consumers: [settlement (royalties)]}
+
+stateMachines:
+  - name: RightsGrantLifecycle
+    initial: active
+    states: [active, suspended, terminated, expired]
+    terminal: [terminated, expired]
+    transitions:
+      - {from: active, to: suspended, command: suspend}
+      - {from: suspended, to: active, command: resume}
+      - {from: [active, suspended], to: terminated, command: TerminateRightsGrant}
+      - {from: active, to: expired, trigger: "window end (timer)"}
+
+rules:
+  - {id: RUL-RGT-1, statement: "Objects flagged rightsControlled (facet or attribute) are not-sellable unless CheckRights permits usage 'sell' in context — implemented as a sellability rule calling RightsChecker (DOM-AVL)."}
+  - {id: RUL-RGT-2, statement: "Royalty-bearing usage is reported per settlement period from fulfillment/consumption events matched to in-grants."}
+  - {id: RUL-RGT-3, statement: "Rights expiring within policy rights.expiry-warning trigger withdrawal planning (DOM-DST) and portfolio alerts."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:rights.expiry-warning", purpose: "Warning horizon before rights expiry"}
+
+decisions:
+  - {id: DEC-RGT-1, question: "May subject S be used for U in context C at T?", algorithm: "RightsChecker"}
+
+security:
+  permissions: [rights.read, rights.manage, rights.check, rights.sublicense]
+  dataClassification: "Confidential (licensing terms)."
+  threats: ["Selling without rights -> enforced via sellability rule; distribution feeds filtered (RUL-DST-1)"]
+
+governance:
+  changeControl: "Rights grants recorded with contract evidence; sublicences via approval."
+  evidence: "Contracts and amendments referenced as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per grant; check results cached version-keyed by grant events."
+  slo: {CheckRights_p99_ms: 10, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_entitlement (separate tables)
+  tables:
+    - {name: rights_grants, columns: "tenant_id, id, direction, counterparty, body jsonb, exclusive bool, window_from, window_to, status", pk: "(tenant_id, id)"}
+    - {name: rights_index, columns: "tenant_id, subject, usage_type, territory, channel, grant_id, window_from, window_to", pk: "(tenant_id, subject, usage_type, territory, channel, grant_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "rights_index hash(tenant_id) 32."
+  retention: "Grant term + 10 years (royalty audits)."
+
+extensionModel:
+  extensionPoints: ["Usage type registry", "Rights data imports (industry formats, e.g. DDEX for music)"]
+  forbidden: ["Territory/channel lists in code"]
+
+certificationCriteria:
+  - {id: CR-RGT-01, rule: "Exclusive overlap detection catches 100% of seeded conflicts.", level: L1}
+  - {id: CR-RGT-02, rule: "Sublicences exceeding rights-in are rejected (property test over random grants).", level: L1}
+  - {id: CR-RGT-03, rule: "Holdback windows block usage in golden scenarios.", level: L1}
+validationRules:
+  - {id: VR-RGT-01, rule: "Every usage type used is registered."}
+  - {id: VR-RGT-02, rule: "Every in-grant with royalties references a settlement agreement with role licensor."}

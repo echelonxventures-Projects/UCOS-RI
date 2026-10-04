@@ -1,0 +1,66 @@
+# Policies for extension-tier domains: DOM-DTW, SIM, PLN, OPT, SUS, CFT, MFG, PKGN, ACM.
+defaults: &cfg
+  kind: configuration
+  layer: platform
+  scope: {}
+
+policies:
+  - <<: *cfg
+    name: twin.ttl
+    outputSchema: {type: object, required: [default, max], properties: {default: {type: string, pattern: "^P"}, max: {type: string, pattern: "^P"}}}
+    body: {language: static, source: &twinTtl {default: P30D, max: P90D}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *twinTtl}]
+
+  - <<: *cfg
+    name: simulation.repetitions
+    outputSchema: {type: object, required: [repetitions, confidenceLevel], properties: {repetitions: {type: integer, minimum: 1}, confidenceLevel: {type: number, minimum: 0.5, maximum: 0.999}}}
+    body: {language: static, source: &simRep {repetitions: 10, confidenceLevel: 0.95}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *simRep}]
+
+  - <<: *cfg
+    name: planning.approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &plnAppr {measure: planRevenueMinor, tiers: [{upTo: 100000000, stages: [{approverRoles: [planning-lead], quorum: 1}]}, {upTo: unbounded, stages: [{approverRoles: [planning-lead], quorum: 1}, {approverRoles: [cfo-office], quorum: 1}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *plnAppr}]
+
+  - <<: *cfg
+    name: optimization.guardrails
+    outputSchema: {type: object, required: [byKind], properties: {byKind: {type: object, additionalProperties: {type: object, required: [maxChangePct, requireTwinValidation], properties: {maxChangePct: {type: number}, requireTwinValidation: {type: boolean}, personalizedPricing: {enum: [prohibited, allowed]}}}}}}
+    body: {language: static, source: &optGuard {byKind: {pricing: {maxChangePct: 10, requireTwinValidation: true, personalizedPricing: prohibited}, markdown: {maxChangePct: 50, requireTwinValidation: true}, promotion: {maxChangePct: 40, requireTwinValidation: true}, assortment: {maxChangePct: 20, requireTwinValidation: true}, sourcing: {maxChangePct: 100, requireTwinValidation: false}, territory: {maxChangePct: 15, requireTwinValidation: true}, bundle: {maxChangePct: 25, requireTwinValidation: true}}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *optGuard}]
+
+  - <<: *cfg
+    name: sustainability.disclosure
+    outputSchema: {type: object, required: [minDataQualityForPublication, claimsRequireVerification], properties: {minDataQualityForPublication: {type: integer, minimum: 1, maximum: 5}, claimsRequireVerification: {type: boolean}, allowedContexts: {type: array}}}
+    body: {language: static, source: &susDisc {minDataQualityForPublication: 3, claimsRequireVerification: true, allowedContexts: [product-detail, passport, b2b-feeds]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *susDisc}]
+
+  - <<: *cfg
+    name: risk.counterfeit.bands
+    outputSchema: {type: object, required: [bands], properties: {bands: {type: array, minItems: 4, items: {type: object, required: [band, minScore], properties: {band: {enum: [low, medium, high, critical]}, minScore: {type: integer}, action: {type: string}}}}}}
+    body: {language: static, source: &cftBands {bands: [{band: low, minScore: 0, action: allow}, {band: medium, minScore: 400, action: review}, {band: high, minScore: 700, action: suppress-listing}, {band: critical, minScore: 900, action: takedown-and-hold-settlement}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *cftBands}]
+
+  - <<: *cfg
+    name: manufacturing.completion-tolerance
+    outputSchema: {type: object, required: [overCompletionPct], properties: {overCompletionPct: {type: number, minimum: 0}}}
+    body: {language: static, source: &mfgTol {overCompletionPct: 2}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *mfgTol}]
+
+  - <<: *cfg
+    name: packaging.epr-scope
+    outputSchema: {type: object, required: [jurisdictions, materialCategories], properties: {jurisdictions: {type: array}, materialCategories: {type: array}}}
+    body: {language: static, source: &pkgnEpr {jurisdictions: [EU, GB, CA], materialCategories: [paper-cardboard, plastic, glass, metal-ferrous, metal-aluminium, wood, composite, other]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *pkgnEpr}]
+
+  - <<: *cfg
+    name: acm.negotiation-envelope
+    outputSchema: {type: object, required: [defaultFloorPct, defaultMaxDiscountPct, defaultMaxRounds], properties: {defaultFloorPct: {type: number}, defaultMaxDiscountPct: {type: number}, defaultMaxRounds: {type: integer, minimum: 1}}}
+    body: {language: static, source: &acmEnv {defaultFloorPct: 85, defaultMaxDiscountPct: 15, defaultMaxRounds: 5}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *acmEnv}]
+
+  - <<: *cfg
+    name: acm.settlement-safety
+    outputSchema: {type: object, required: [holdAboveMinor, coolingOff], properties: {holdAboveMinor: {type: integer, minimum: 0}, coolingOff: {type: object, additionalProperties: {type: string, pattern: "^P"}}}}
+    body: {language: static, source: &acmSafe {holdAboveMinor: 100000, coolingOff: {default: PT24H, EU: P14D}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *acmSafe}]

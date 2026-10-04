@@ -1,0 +1,256 @@
+# Authorization policies (CIC-009-001). Inputs: principal {tenant, party, organization, roles[], kind, acr},
+# resource {...}, action. Every policy has >= 1 allow and >= 1 deny vector (INV-POL-4); vectors are
+# executed by tools/pack_checks.py when cel-python is installed (tools/requirements.txt).
+defaults: &auth
+  kind: authorization
+  layer: platform
+  scope: {}
+  combining: deny-overrides
+  outputSchema: {$ref: authorization-decision}
+
+policies:
+  - <<: *auth
+    name: cob.create
+    body:
+      language: cel
+      source: |
+        principal.tenant == resource.tenant && 'catalog-manager' in principal.roles &&
+        (resource.owningParty == principal.organization || 'platform-admin' in principal.roles)
+          ? {'effect': 'allow'} : {'effect': 'deny'}
+    testVectors:
+      - {name: manager-own-org, input: {principal: {tenant: t1, organization: o1, roles: [catalog-manager]}, resource: {tenant: t1, owningParty: o1}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: manager-other-org, input: {principal: {tenant: t1, organization: o1, roles: [catalog-manager]}, resource: {tenant: t1, owningParty: o2}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: no-role, input: {principal: {tenant: t1, organization: o1, roles: [viewer]}, resource: {tenant: t1, owningParty: o1}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: context.dimension-authoring
+    body:
+      language: cel
+      source: |
+        'context-admin' in principal.roles && resource.namespace != 'ucos.std' &&
+        resource.namespace.startsWith(principal.tenantNamespace)
+          ? {'effect': 'allow'} : {'effect': 'deny'}
+    testVectors:
+      - {name: tenant-namespace, input: {principal: {roles: [context-admin], tenantNamespace: com.acme}, resource: {namespace: com.acme.retail}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: std-namespace-denied, input: {principal: {roles: [context-admin], tenantNamespace: com.acme}, resource: {namespace: ucos.std}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: eventing.subscribe
+    body:
+      language: cel
+      source: |
+        principal.tenant == resource.tenant && 'integration-admin' in principal.roles &&
+        resource.externalSubscribable &&
+        (resource.classification in ['public', 'internal'] || resource.purposeGrant != '')
+          ? {'effect': 'allow', 'obligations': [{'kind': 'redact', 'params': {'personalFields': true}}]}
+          : {'effect': 'deny'}
+    testVectors:
+      - {name: internal-event, input: {principal: {tenant: t1, roles: [integration-admin]}, resource: {tenant: t1, externalSubscribable: true, classification: internal, purposeGrant: ""}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: redact, params: {personalFields: true}}]}}
+      - {name: confidential-without-grant, input: {principal: {tenant: t1, roles: [integration-admin]}, resource: {tenant: t1, externalSubscribable: true, classification: confidential, purposeGrant: ""}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: not-subscribable, input: {principal: {tenant: t1, roles: [integration-admin]}, resource: {tenant: t1, externalSubscribable: false, classification: public, purposeGrant: ""}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: eventing.dlq.discard
+    body:
+      language: cel
+      source: |
+        'ops-engineer' in principal.roles &&
+        (!resource.financial || (size(resource.approvers) >= 1 && !(principal.party in resource.approvers)))
+          ? {'effect': 'allow', 'obligations': [{'kind': 'attach-evidence', 'params': {'evidenceKind': 'approval'}}]}
+          : {'effect': 'deny'}
+    testVectors:
+      - {name: non-financial, input: {principal: {party: p1, roles: [ops-engineer]}, resource: {financial: false, approvers: []}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: attach-evidence, params: {evidenceKind: approval}}]}}
+      - {name: financial-dual-control, input: {principal: {party: p1, roles: [ops-engineer]}, resource: {financial: true, approvers: [p2]}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: attach-evidence, params: {evidenceKind: approval}}]}}
+      - {name: financial-self-approved, input: {principal: {party: p1, roles: [ops-engineer]}, resource: {financial: true, approvers: [p1]}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: financial-no-approver, input: {principal: {party: p1, roles: [ops-engineer]}, resource: {financial: true, approvers: []}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: evidence.content-access
+    body:
+      language: cel
+      source: |
+        {'public': 0, 'internal': 1, 'confidential': 2, 'restricted': 3, 'personal': 2, 'sensitive-personal': 3}[resource.classification]
+          <= principal.clearanceRank && principal.tenant == resource.tenant
+          ? {'effect': 'allow', 'obligations': [{'kind': 'log', 'params': {'level': 'audit'}}]}
+          : {'effect': 'deny'}
+    testVectors:
+      - {name: cleared, input: {principal: {tenant: t1, clearanceRank: 2}, resource: {tenant: t1, classification: confidential}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: log, params: {level: audit}}]}}
+      - {name: insufficient-clearance, input: {principal: {tenant: t1, clearanceRank: 1}, resource: {tenant: t1, classification: sensitive-personal}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: evidence.legal-hold
+    body:
+      language: cel
+      source: |
+        'legal-counsel' in principal.roles && principal.acr in ['AAL2', 'AAL3']
+          ? {'effect': 'allow'} : {'effect': 'deny'}
+    testVectors:
+      - {name: counsel-mfa, input: {principal: {roles: [legal-counsel], acr: AAL2}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: counsel-no-mfa, input: {principal: {roles: [legal-counsel], acr: AAL1}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: identity.federation-admin
+    body:
+      language: cel
+      source: |
+        'identity-admin' in principal.roles && principal.acr in ['AAL2', 'AAL3'] && principal.tenant == resource.tenant
+          ? {'effect': 'allow', 'obligations': [{'kind': 'notify', 'params': {'audience': 'security-team'}}]}
+          : {'effect': 'deny'}
+    testVectors:
+      - {name: admin, input: {principal: {tenant: t1, roles: [identity-admin], acr: AAL3}, resource: {tenant: t1}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: notify, params: {audience: security-team}}]}}
+      - {name: other-tenant, input: {principal: {tenant: t2, roles: [identity-admin], acr: AAL3}, resource: {tenant: t1}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: lifecycle.model-authoring
+    body:
+      language: cel
+      source: |
+        'lifecycle-author' in principal.roles && resource.namespaceOwner == principal.organization
+          ? {'effect': 'allow'} : {'effect': 'deny'}
+    testVectors:
+      - {name: owner, input: {principal: {organization: o1, roles: [lifecycle-author]}, resource: {namespaceOwner: o1}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: foreign-namespace, input: {principal: {organization: o1, roles: [lifecycle-author]}, resource: {namespaceOwner: o2}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: ontology.namespace-authoring
+    body:
+      language: cel
+      source: |
+        ('ontology-author' in principal.roles && resource.namespaceOwner == principal.organization && resource.namespace != 'ucos.std')
+        || ('platform-architect' in principal.roles && resource.namespace == 'ucos.std')
+          ? {'effect': 'allow'} : {'effect': 'deny'}
+    testVectors:
+      - {name: tenant-author, input: {principal: {organization: o1, roles: [ontology-author]}, resource: {namespace: com.acme.telco, namespaceOwner: o1}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: tenant-author-std, input: {principal: {organization: o1, roles: [ontology-author]}, resource: {namespace: ucos.std, namespaceOwner: o1}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: platform-architect-std, input: {principal: {organization: ucos, roles: [platform-architect]}, resource: {namespace: ucos.std, namespaceOwner: ucos}}, context: {}, expectedOutput: {effect: allow}}
+
+  - <<: *auth
+    name: party.block
+    body:
+      language: cel
+      source: |
+        ('fraud-analyst' in principal.roles || 'compliance-officer' in principal.roles) && resource.reason != ''
+          ? {'effect': 'allow', 'obligations': [{'kind': 'attach-evidence', 'params': {'evidenceKind': 'document'}}]}
+          : {'effect': 'deny'}
+    testVectors:
+      - {name: analyst-with-reason, input: {principal: {roles: [fraud-analyst]}, resource: {reason: sanctions-hit}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: attach-evidence, params: {evidenceKind: document}}]}}
+      - {name: no-reason, input: {principal: {roles: [fraud-analyst]}, resource: {reason: ""}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: wrong-role, input: {principal: {roles: [sales-rep]}, resource: {reason: suspicious}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: party.merge
+    body:
+      language: cel
+      source: |
+        !('data-steward' in principal.roles) ? {'effect': 'deny'}
+        : size(resource.mergedIds) <= 10 ? {'effect': 'allow'}
+        : {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['data-governance-lead']}}]}
+    testVectors:
+      - {name: small-merge, input: {principal: {roles: [data-steward]}, resource: {mergedIds: [a, b]}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: bulk-merge, input: {principal: {roles: [data-steward]}, resource: {mergedIds: [a, b, c, d, e, f, g, h, i, j, k]}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [data-governance-lead]}}]}}
+      - {name: non-steward, input: {principal: {roles: [sales-rep]}, resource: {mergedIds: [a]}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: policy.authoring
+    body:
+      language: cel
+      source: |
+        (resource.layer in ['tenant', 'organization', 'delegated'] && 'policy-author' in principal.roles)
+        || (resource.layer == 'regulatory' && 'compliance-officer' in principal.roles)
+        || (resource.layer in ['platform', 'constitutional'] && 'platform-governance' in principal.roles)
+          ? {'effect': 'allow'} : {'effect': 'deny'}
+    testVectors:
+      - {name: tenant-layer, input: {principal: {roles: [policy-author]}, resource: {layer: tenant}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: tenant-author-regulatory, input: {principal: {roles: [policy-author]}, resource: {layer: regulatory}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: compliance-regulatory, input: {principal: {roles: [compliance-officer]}, resource: {layer: regulatory}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: author-constitutional, input: {principal: {roles: [policy-author]}, resource: {layer: constitutional}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: rel.create
+    body:
+      language: cel
+      source: |
+        resource.sourceWritable && resource.targetWritable &&
+        ((resource.sourceTenant == principal.tenant && resource.targetTenant == principal.tenant)
+         || (resource.crossTenant && resource.delegationActive))
+          ? {'effect': 'allow'} : {'effect': 'deny'}
+    testVectors:
+      - {name: same-tenant, input: {principal: {tenant: t1}, resource: {sourceTenant: t1, targetTenant: t1, sourceWritable: true, targetWritable: true, crossTenant: false, delegationActive: false}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: target-not-writable, input: {principal: {tenant: t1}, resource: {sourceTenant: t1, targetTenant: t1, sourceWritable: true, targetWritable: false, crossTenant: false, delegationActive: false}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: cross-tenant-no-delegation, input: {principal: {tenant: t1}, resource: {sourceTenant: t1, targetTenant: t2, sourceWritable: true, targetWritable: true, crossTenant: true, delegationActive: false}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: cross-tenant-delegated, input: {principal: {tenant: t1}, resource: {sourceTenant: t1, targetTenant: t2, sourceWritable: true, targetWritable: true, crossTenant: true, delegationActive: true}}, context: {}, expectedOutput: {effect: allow}}
+
+  - <<: *auth
+    name: catalog.eligibility
+    body:
+      language: cel
+      source: |
+        resource.audience == 'any' ? {'effect': 'allow'}
+        : resource.audience == 'business' && 'buyer' in principal.roles && principal.organization != '' ? {'effect': 'allow'}
+        : resource.audience == 'contract' && resource.contractParty == principal.organization ? {'effect': 'allow'}
+        : {'effect': 'deny', 'reason': 'R-CAT-NOT-ELIGIBLE'}
+    testVectors:
+      - {name: public-catalog, input: {principal: {roles: [], organization: ""}, resource: {audience: any, contractParty: ""}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: b2b-buyer, input: {principal: {roles: [buyer], organization: o1}, resource: {audience: business, contractParty: ""}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: b2b-consumer, input: {principal: {roles: [], organization: ""}, resource: {audience: business, contractParty: ""}}, context: {}, expectedOutput: {effect: deny, reason: R-CAT-NOT-ELIGIBLE}}
+      - {name: contract-other-org, input: {principal: {roles: [buyer], organization: o1}, resource: {audience: contract, contractParty: o2}}, context: {}, expectedOutput: {effect: deny, reason: R-CAT-NOT-ELIGIBLE}}
+
+  - <<: *auth
+    name: entitlement.manual-grant
+    body:
+      language: cel
+      source: |
+        !('entitlement-admin' in principal.roles) ? {'effect': 'deny'}
+        : resource.valueMinor <= 100000 ? {'effect': 'allow', 'obligations': [{'kind': 'attach-evidence', 'params': {'evidenceKind': 'approval'}}]}
+        : resource.valueMinor <= 1000000 ? {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['finance-manager']}}]}
+        : {'effect': 'deny'}
+    testVectors:
+      - {name: small, input: {principal: {roles: [entitlement-admin]}, resource: {valueMinor: 5000}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: attach-evidence, params: {evidenceKind: approval}}]}}
+      - {name: medium, input: {principal: {roles: [entitlement-admin]}, resource: {valueMinor: 500000}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [finance-manager]}}]}}
+      - {name: too-large, input: {principal: {roles: [entitlement-admin]}, resource: {valueMinor: 5000000}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: billing.credit-note
+    body:
+      language: cel
+      source: |
+        !('billing-agent' in principal.roles) || principal.party == resource.invoiceRaisedBy ? {'effect': 'deny'}
+        : resource.amountMinor <= 50000 ? {'effect': 'allow'}
+        : resource.amountMinor <= 500000 ? {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['billing-supervisor']}}]}
+        : {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['billing-supervisor', 'finance-controller']}}]}
+    testVectors:
+      - {name: small, input: {principal: {party: p1, roles: [billing-agent]}, resource: {amountMinor: 1000, invoiceRaisedBy: p9}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: medium, input: {principal: {party: p1, roles: [billing-agent]}, resource: {amountMinor: 100000, invoiceRaisedBy: p9}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [billing-supervisor]}}]}}
+      - {name: large, input: {principal: {party: p1, roles: [billing-agent]}, resource: {amountMinor: 900000, invoiceRaisedBy: p9}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [billing-supervisor, finance-controller]}}]}}
+      - {name: sod-violation, input: {principal: {party: p1, roles: [billing-agent]}, resource: {amountMinor: 1000, invoiceRaisedBy: p1}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: payment.refund-approval
+    body:
+      language: cel
+      source: |
+        action == 'approve' ? (('payment-supervisor' in principal.roles && principal.party != resource.requestedBy) ? {'effect': 'allow'} : {'effect': 'deny'})
+        : !('payment-ops' in principal.roles) ? {'effect': 'deny'}
+        : resource.amountMinor <= 20000 ? {'effect': 'allow'}
+        : {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['payment-supervisor']}}]}
+    testVectors:
+      - {name: small-request, input: {action: request, principal: {party: p1, roles: [payment-ops]}, resource: {amountMinor: 1500, requestedBy: p1}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: large-request, input: {action: request, principal: {party: p1, roles: [payment-ops]}, resource: {amountMinor: 75000, requestedBy: p1}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [payment-supervisor]}}]}}
+      - {name: self-approval, input: {action: approve, principal: {party: p1, roles: [payment-supervisor]}, resource: {amountMinor: 75000, requestedBy: p1}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: supervisor-approval, input: {action: approve, principal: {party: p2, roles: [payment-supervisor]}, resource: {amountMinor: 75000, requestedBy: p1}}, context: {}, expectedOutput: {effect: allow}}
+
+  - <<: *auth
+    name: quote.adjust
+    body:
+      language: cel
+      source: |
+        resource.discountPercent <= ('sales-director' in principal.roles ? 40
+                                    : 'sales-manager' in principal.roles ? 25
+                                    : 'sales-rep' in principal.roles ? 10 : -1)
+          ? {'effect': 'allow'}
+          : {'effect': 'deny', 'reason': 'R-QTE-DISCOUNT-LIMIT'}
+    testVectors:
+      - {name: rep-within, input: {principal: {roles: [sales-rep]}, resource: {discountPercent: 8}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: rep-over, input: {principal: {roles: [sales-rep]}, resource: {discountPercent: 15}}, context: {}, expectedOutput: {effect: deny, reason: R-QTE-DISCOUNT-LIMIT}}
+      - {name: manager-within, input: {principal: {roles: [sales-manager]}, resource: {discountPercent: 15}}, context: {}, expectedOutput: {effect: allow}}
+      - {name: no-sales-role, input: {principal: {roles: [viewer]}, resource: {discountPercent: 0}}, context: {}, expectedOutput: {effect: deny, reason: R-QTE-DISCOUNT-LIMIT}}

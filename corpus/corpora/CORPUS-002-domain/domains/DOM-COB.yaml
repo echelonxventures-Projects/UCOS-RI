@@ -1,0 +1,236 @@
+header:
+  id: DOM-COB
+  title: Commercial Object Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-000-002, CIC-002-001, CIC-011-001]
+  traces: [PRIN-002, PRIN-004, PRIN-006, PRIN-007, PRIN-008, DOM-ONT]
+  certification: [CR-COB-01, CR-COB-02, CR-COB-03, CR-COB-04, CR-COB-05]
+  validation: [VR-COB-01, VR-COB-02]
+
+
+# Composition (DOM-CMPS) — bundles, packages, configurable structures — is the Composition entity of
+# the CommercialObject aggregate; a separate spec would split one aggregate's ownership (PRIN-001).
+subsumes:
+  - domain: DOM-CMPS
+    coverage: "Composition and ComponentSlot entities, DefineComposition command, composition-defined event, CompositionValidator, INV-COB-6, RUL-COB-3, COMPOSED_OF reltype (ucos.std)"
+  - domain: DOM-BDL
+    coverage: "ucos.std type Bundle (facet Composite), Composition entity, configurable composition with DOM-OFR Configurator, priceComposition attribute"
+  - domain: DOM-PKG
+    coverage: "ucos.std type Package (fixed composition constraint), Composition entity, Shippable facet"
+  - domain: DOM-AST
+    coverage: "ucos.std type Asset (facet Serviceable, OWNS_ASSET reltype, lifecycle 'asset'); assets created by order-decomposition task templates calling CreateCommercialObject; service state via DOM-SDL events"
+  - domain: DOM-CAP
+    coverage: "ucos.std type Capability (capabilityKey natural key), PROVIDES_CAPABILITY reltype; granted via DOM-ENT entitlementTemplate"
+
+purpose: >
+  Hold the one and only record of every commercial thing — product, service, subscription, licence,
+  plan, bundle, asset, experience, capability, or any future model — as a CommercialObject instance
+  typed by an ontology TypeDefinition, with contextual attribute values, facets, and lifecycle state.
+
+scope:
+  includes:
+    - CommercialObject instances of any non-abstract TypeDefinition
+    - Contextual (scope-bound) attribute values
+    - Composition structure (bundles, packages, configurable products) via composition relationships
+    - Variants (instances related by variant-of relationship with axis attributes)
+    - Lifecycle execution per the type's LifecycleModel
+  excludes:
+    - Prices (DOM-PRC), availability (DOM-AVL), catalog placement (DOM-CAT), offers (DOM-OFR)
+    - Customer-owned instances post-sale (DOM-AST owns installed asset records but as COB subtype Asset)
+    - Relationship storage (DOM-REL) — COB issues relationship commands to REL
+
+responsibilities:
+  - Validate every instance against the EffectiveSchema of its pinned type version.
+  - Enforce lifecycle transitions with guards from the LifecycleModel and policies.
+  - Resolve contextual attribute values per CIC-011-001.
+  - Publish complete change history as events.
+
+principles: [PRIN-002, PRIN-003, PRIN-004, PRIN-006, PRIN-008, PRIN-016]
+
+boundaries:
+  upstream: [DOM-ONT, DOM-LFC, DOM-CTX, DOM-POL, DOM-IDN, DOM-PTY]
+  downstream: [DOM-CAT, DOM-OFR, DOM-PRC, DOM-AVL, DOM-ENT, DOM-ORD, DOM-SRC, DOM-KGR, DOM-MDM]
+
+ownership:
+  boundedContext: commercial-object
+  owningRole: Chief Product Architect
+  service: commercial-object-service
+  schema: ucos_cob
+
+capabilities:
+  - {id: COB-C1, name: Create object, description: "Instantiate any published concrete type."}
+  - {id: COB-C2, name: Contextualize attribute, description: "Set attribute values scoped to an ApplicabilityScope (market, channel, locale, segment, time window, …)."}
+  - {id: COB-C3, name: Compose, description: "Define composite structures with min/max/default component cardinalities and configuration rules."}
+  - {id: COB-C4, name: Variant management, description: "Generate and govern variants along axis attributes."}
+  - {id: COB-C5, name: Lifecycle, description: "Execute LifecycleModel transitions."}
+  - {id: COB-C6, name: Retype, description: "Migrate instance to a newer type version (MINOR automatic; MAJOR via migration script, CORPUS-026)."}
+  - {id: COB-C7, name: Resolve view, description: "Return the context-resolved projection of an object."}
+
+services:
+  - {name: CommercialObjectCommandService, kind: application, operations: [CreateCommercialObject, UpdateAttributes, SetContextualValue, RemoveContextualValue, TransitionLifecycle, DefineComposition, GenerateVariants, RetypeCommercialObject]}
+  - {name: AttributeValidator, kind: domain-service, contract: "validate(values, EffectiveSchema) -> violations[]; evaluates datatype, cardinality, constraint CEL"}
+  - {name: ContextualValueResolver, kind: domain-service, contract: "resolve(object, attributeCode, ContextVector) -> ResolvedValue with trace; implements CIC-011-001"}
+  - {name: CompositionValidator, kind: domain-service, contract: "validate(compositionTree) -> violations[]; detects cycles and cardinality infeasibility"}
+  - {name: CommercialObjectQueryService, kind: application, operations: [GetCommercialObject, ResolveCommercialObjectView, FindCommercialObjects]}
+
+aggregates:
+  - name: CommercialObject
+    kernel: true
+    identity: "urn:ucos:<tenant>:co:<ulid>"
+    invariants:
+      - "INV-COB-1: typeRef is pinned and refers to a published non-abstract TypeDefinition."
+      - "INV-COB-2: for every ApplicabilityScope s, the set of values for (attribute, s) has at most one entry per effective time instant (no overlapping validity for identical scope)."
+      - "INV-COB-3: base values (universal scope) satisfy all required attributes of the EffectiveSchema."
+      - "INV-COB-4: natural key (IdentityStrategy) unique within uniquenessScope."
+      - "INV-COB-5: lifecycleState is a state of the type's LifecycleModel."
+      - "INV-COB-6: composition graph is acyclic; component types satisfy the RelationshipConstraints of the composite type."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: tenantId, type: TenantId}
+      - {name: typeRef, type: MetadataUrn}
+      - {name: naturalKey, type: "map<string,string>"}
+      - {name: externalReferences, type: "ExternalReference[]"}
+      - {name: lifecycleState, type: string}
+      - {name: values, type: "AttributeValue[]"}
+      - {name: facetsConfig, type: "map<FacetUrn, json>"}
+      - {name: composition, type: "Composition?"}
+      - {name: owningParty, type: PartyUrn}
+      - {name: homeRegion, type: RegionCode}
+      - {name: revision, type: long}
+      - {name: provenance, type: ProvenanceRef}
+
+entities:
+  - name: AttributeValue
+    within: CommercialObject
+    fields: [attributeRef, value, "scope (ApplicabilityScope)", validFrom, validTo, priority, sourceRef]
+    identity: "(attributeRef, scopeDigest, validFrom)"
+  - name: Composition
+    within: CommercialObject
+    fields: ["compositionMode (fixed|configurable|dynamic)", "components (ComponentSlot[])", "configurationRules (RuleUrn[])"]
+  - name: ComponentSlot
+    within: Composition
+    fields: [slotCode, "allowedTypes (MetadataUrn[])", "allowedObjects (InstanceUrn[]|selectorExpression)", minQty, maxQty, defaultQty, optional, substitutable]
+
+valueObjects:
+  - {name: InstanceUrn, definition: "CIC-000-002"}
+  - {name: ApplicabilityScope, definition: "Kernel VO from DOM-CTX: set of {dimension, operator(eq|in|descendant-of|range), values}; empty set = universal"}
+  - {name: ContextVector, definition: "Kernel VO from DOM-CTX"}
+  - {name: Quantity, definition: "{value: decimal, unit: UCUM code}"}
+  - {name: Money, definition: "{amountMinor: integer, currency: ISO-4217 or registered currency code, scale: int}"}
+  - {name: LocalizedText, definition: "{default: string, key?: string, values: map<BCP47, string>}"}
+  - {name: ExternalReference, definition: "{scheme, issuer, value}; owned by DOM-REF"}
+  - {name: ResolvedValue, definition: "{value, matchedScope, specificity, fallbackPath[], sourceEntryId}"}
+
+commands:
+  - {name: CreateCommercialObject, input: "{typeRef, naturalKey, values[], facetsConfig, owningParty, idempotencyKey}", emits: [CommercialObjectCreated], preconditions: ["INV-COB-1,3,4", "PDP allow cob.create(type, owner)"]}
+  - {name: UpdateAttributes, input: "{id, expectedRevision, set[], unset[]}", emits: [CommercialObjectAttributesChanged], preconditions: ["lifecycle state permits edit per LifecycleModel.editableStates"]}
+  - {name: SetContextualValue, input: "{id, expectedRevision, attributeRef, scope, value, validFrom, validTo, priority}", emits: [ContextualValueSet], preconditions: ["attribute.contextualizable=true", "INV-COB-2"]}
+  - {name: RemoveContextualValue, input: "{id, expectedRevision, attributeRef, scopeDigest, validFrom}", emits: [ContextualValueRemoved]}
+  - {name: TransitionLifecycle, input: "{id, expectedRevision, transition, reason}", emits: [CommercialObjectLifecycleTransitioned], preconditions: ["transition guard (CEL) true", "PDP allow"]}
+  - {name: DefineComposition, input: "{id, expectedRevision, composition}", emits: [CompositionDefined]}
+  - {name: GenerateVariants, input: "{id, axes: [{attributeRef, values[]}], exclusions: CEL}", emits: ["CommercialObjectCreated (per variant)", VariantsGenerated]}
+  - {name: RetypeCommercialObject, input: "{id, targetTypeRef, migrationRef?}", emits: [CommercialObjectRetyped]}
+
+queries:
+  - {name: GetCommercialObject, input: "{id, revision?}", output: "CommercialObject (raw, all scoped values)", consistency: strong}
+  - {name: ResolveCommercialObjectView, input: "{id, context: ContextVector, attributes?: [code], explain?: bool}", output: "{id, typeRef, lifecycleState, resolved: map<code, ResolvedValue>}", consistency: "read-model, bounded staleness 1s"}
+  - {name: FindCommercialObjects, input: "{typeRef (includes subtypes), filter (CEL over resolved view), context, cursor, limit<=500}", output: "page of views"}
+  - {name: GetCommercialObjectHistory, input: "{id, from, to}", output: "event list"}
+
+apis:
+  - {style: REST, path: "/v1/commercial-objects", methods: {POST: CreateCommercialObject, GET: FindCommercialObjects}}
+  - {style: REST, path: "/v1/commercial-objects/{id}", methods: {GET: GetCommercialObject, PATCH: UpdateAttributes}, concurrency: "If-Match: \"<revision>\" required on PATCH"}
+  - {style: REST, path: "/v1/commercial-objects/{id}/contextual-values", methods: {POST: SetContextualValue, DELETE: RemoveContextualValue}}
+  - {style: REST, path: "/v1/commercial-objects/{id}:transition", methods: {POST: TransitionLifecycle}}
+  - {style: REST, path: "/v1/commercial-objects/{id}/composition", methods: {PUT: DefineComposition}}
+  - {style: REST, path: "/v1/commercial-objects/{id}/view", methods: {GET: ResolveCommercialObjectView}, context: "UCOS-Context header (CIC-011-001 §6)"}
+  - {style: gRPC, service: "ucos.cob.v1.CommercialObjectViewService", rpcs: [ResolveView, BatchResolveView]}
+
+events:
+  - {type: ucos.commercial-object.object.created.v1, payload: "{id, typeRef, naturalKey, values[], owningParty}"}
+  - {type: ucos.commercial-object.object.attributes-changed.v1, payload: "{id, revision, set[], unset[]}"}
+  - {type: ucos.commercial-object.object.contextual-value-set.v1, payload: "{id, revision, attributeRef, scope, value, validFrom, validTo}"}
+  - {type: ucos.commercial-object.object.contextual-value-removed.v1, payload: "{id, revision, attributeRef, scopeDigest}"}
+  - {type: ucos.commercial-object.object.lifecycle-transitioned.v1, payload: "{id, revision, from, to, transition, reason}"}
+  - {type: ucos.commercial-object.object.composition-defined.v1, payload: "{id, revision, composition}"}
+  - {type: ucos.commercial-object.object.retyped.v1, payload: "{id, fromTypeRef, toTypeRef}"}
+
+stateMachines:
+  - name: CommercialObjectLifecycle
+    definition: "Interpreted from TypeDefinition.lifecycleModelRef (DOM-LFC). ucos.std default model below."
+    initial: draft
+    states: [draft, in-review, approved, active, suspended, end-of-sale, end-of-life, archived]
+    terminal: [archived]
+    transitions:
+      - {from: draft, to: in-review, command: submit}
+      - {from: in-review, to: draft, command: reject}
+      - {from: in-review, to: approved, command: approve, guard: "certificationRequired => certified"}
+      - {from: approved, to: active, command: activate, guard: "now >= launchAt"}
+      - {from: active, to: suspended, command: suspend}
+      - {from: suspended, to: active, command: resume}
+      - {from: active, to: end-of-sale, command: endSale, effect: "DOM-CAT/DOM-OFR stop new sales; existing ENT unaffected"}
+      - {from: end-of-sale, to: end-of-life, command: endLife, guard: "no active entitlements or policy override"}
+      - {from: end-of-life, to: archived, command: archive}
+    editableStates: [draft, in-review, approved, active]
+
+rules:
+  - {id: RUL-COB-1, statement: "A value write whose scope and validity overlap an existing entry with identical scope is rejected (E-COB-SCOPE-OVERLAP) unless 'supersede=true', which closes the existing entry at validFrom."}
+  - {id: RUL-COB-2, statement: "Variant objects inherit non-axis values from the master by reference; overriding requires explicit value on the variant."}
+  - {id: RUL-COB-3, statement: "Bundle components in end-of-sale state block activation of new bundles containing them."}
+  - {id: RUL-COB-4, statement: "MAJOR type upgrade requires a registered migration in CORPUS-026; MINOR upgrade is applied lazily on next write."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:cob.create", purpose: "Who may create which types for which owning party"}
+  - {urn: "urn:ucos:ucos.std:policy:cob.transition", purpose: "Who may perform which lifecycle transition, with segregation-of-duties (author != approver)"}
+  - {urn: "urn:ucos:ucos.std:policy:cob.contextual-precedence", purpose: "Dimension precedence and tie-break configuration fed to CIC-011-001 for attribute resolution"}
+
+decisions:
+  - {id: DEC-COB-1, question: "Which value of attribute A applies in context C?", algorithm: "CIC-011-001 Context Resolution with fact kind = attribute-value"}
+  - {id: DEC-COB-2, question: "Is a lifecycle transition permitted?", inputs: [LifecycleModel guard, PDP cob.transition], output: "allow|deny"}
+
+security:
+  permissions: [cob.read, cob.create, cob.update, cob.transition, cob.approve, cob.retype]
+  dataClassification: "Per attribute sensitivity from ontology; field-level encryption for confidential+ attributes; values redacted in views when PDP denies field read."
+  tenancy: "Row-level security on tenant_id; cross-tenant sharing via marketplace delegation (DOM-MKT) only."
+
+governance:
+  changeControl: "Types may declare governed=true: then create/approve/activate require a ChangeSet; otherwise PDP authorization suffices."
+  evidence: "Approve transition records approver, schema digest, and value snapshot digest as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per aggregate; views eventually consistent (p99 1s)."
+  slo: {ResolveView_p99_ms: 25, BatchResolveView_100_p99_ms: 120, CreateCommercialObject_p99_ms: 150, availability: "99.95%"}
+  scale: "10^9 objects per region, 10^4 writes/s, 10^5 view reads/s per region."
+  caching: "View cache keyed (id, revision, contextDigest, attributeSet); invalidated by object events."
+
+persistenceModel:
+  store: PostgreSQL schema ucos_cob (write) + view store (PostgreSQL JSONB or wide-column) + graph projection (DOM-KGR)
+  tables:
+    - {name: commercial_objects, columns: "tenant_id uuid, id char(26), type_urn text, type_major int, lifecycle_state text, natural_key jsonb, base_values jsonb, facets_config jsonb, composition jsonb, owning_party text, home_region text, revision bigint, created_at timestamptz, updated_at timestamptz", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, type_urn, natural_key) where uniquenessScope=tenant", "(tenant_id, type_urn, lifecycle_state)", "gin(base_values jsonb_path_ops)"]}
+    - {name: contextual_values, columns: "tenant_id uuid, object_id char(26), attribute_code text, scope jsonb, scope_digest bytea, specificity int, priority int, valid_from timestamptz, valid_to timestamptz, value jsonb", pk: "(tenant_id, object_id, attribute_code, scope_digest, valid_from)", indexes: ["(tenant_id, object_id, attribute_code)", "gist(tstzrange(valid_from, valid_to))", "exclusion constraint: EXCLUDE USING gist (tenant_id WITH =, object_id WITH =, attribute_code WITH =, scope_digest WITH =, tstzrange(valid_from, valid_to) WITH &&)"]}
+    - {name: external_references, columns: "tenant_id, object_id, scheme, issuer, value", indexes: ["unique(tenant_id, scheme, issuer, value)"]}
+    - {name: event_store, columns: "standard (CIC-003-001 §4)"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash partition commercial_objects and contextual_values by tenant_id (64 partitions); event_store range-partitioned monthly."
+  retention: "Objects retained while referenced; archived objects moved to cold store after 7 years unless legal hold."
+
+extensionModel:
+  extensionPoints:
+    - "New types via DOM-ONT (no COB code change)"
+    - "Facet behavior via capability contracts implemented by other contexts or plugins"
+    - "Custom lifecycle models via DOM-LFC"
+    - "Custom validation via CEL constraints and plugin-registered CEL functions"
+  forbidden: ["Type-specific tables or columns", "Type-specific code branches (UCOS-L001)"]
+
+certificationCriteria:
+  - {id: CR-COB-01, rule: "Conformance suite instantiates every concrete ucos.std type and exercises every lifecycle transition.", level: L1}
+  - {id: CR-COB-02, rule: "Property test: resolving any attribute for random context vectors equals the reference implementation of CIC-011-001 on 10^5 generated cases.", level: L1}
+  - {id: CR-COB-03, rule: "Overlap test: concurrent SetContextualValue with overlapping validity never results in INV-COB-2 violation (Jepsen-style concurrency test).", level: L2}
+  - {id: CR-COB-04, rule: "Source scan finds zero type-name literals outside tests (UCOS-L001).", level: L1}
+  - {id: CR-COB-05, rule: "ResolveView p99 <= 25ms at 20,000 rps on 10^8-object dataset.", level: L2}
+validationRules:
+  - {id: VR-COB-01, rule: "Every event in 'events' has a JSON Schema in commercial-object-api/events/."}
+  - {id: VR-COB-02, rule: "Every command emits at least one event listed in 'events'."}

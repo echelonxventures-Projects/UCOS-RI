@@ -1,0 +1,207 @@
+header:
+  id: DOM-MON
+  title: Monitoring Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-022-001, CIC-025-001, CIC-002-001]
+  traces: [PRIN-015, PRIN-011, CIC-022-001, CIC-025-001]
+  certification: [CR-MON-01, CR-MON-02, CR-MON-03]
+  validation: [VR-MON-01, VR-MON-02]
+
+purpose: >
+  Turn signals into action: alert rules (generated from SLOs and module manifests), synthetic probes of
+  golden journeys per cell, alert routing to on-call rotations by owning team, incident records and
+  status communication — implementing CIC-022-001 §5, §7 and CIC-025-001 §1–§3.
+
+scope:
+  includes:
+    - Monitors (alert rules: burn-rate, threshold, absence, anomaly) with severity and runbook links
+    - Synthetic probes (golden journeys per cell, external endpoints, webhooks)
+    - On-call rotations and routing (by domain ownership from the registry)
+    - Incidents (severity, roles, timeline, comms, postmortem evidence)
+    - Status page (per region/cell, tenant-facing notices)
+  excludes:
+    - Telemetry pipelines (DOM-OBS), SLO definitions and error-budget policy (DOM-RLB)
+
+responsibilities:
+  - Every alert has an owner, severity, and runbook (CR-022-001-04).
+  - Incidents follow the CIC-025-001 process with timers.
+  - Customers are informed per status-page commitments.
+
+principles: [PRIN-011, PRIN-015]
+
+boundaries:
+  upstream: [DOM-OBS, DOM-RLB, DOM-RTM, DOM-ORC, DOM-SEC]
+  downstream: [DOM-RLB, DOM-ORK, DOM-CMPL, DOM-EVD]
+
+ownership:
+  boundedContext: runtime
+  owningRole: Chief Platform Architect
+  service: monitoring-service
+  schema: ucos_runtime
+
+capabilities:
+  - {id: MON-C1, name: Monitors, description: "Define and generate alert rules."}
+  - {id: MON-C2, name: Probes, description: "Synthetic journeys per cell."}
+  - {id: MON-C3, name: On-call, description: "Rotations and routing by ownership."}
+  - {id: MON-C4, name: Incidents, description: "Incident lifecycle, timelines, comms, postmortems."}
+  - {id: MON-C5, name: Status, description: "Status page and tenant notices."}
+
+services:
+  - {name: MonitorService, kind: application, operations: [DefineMonitor, GenerateMonitorsFromSlos, MuteMonitor]}
+  - {name: ProbeService, kind: application, operations: [DefineProbe, RunProbe]}
+  - {name: IncidentService, kind: application, operations: [DeclareIncident, UpdateIncident, ResolveIncident, AttachPostmortem, PublishStatus]}
+  - {name: OnCallService, kind: application, operations: [DefineRotation, RouteAlert]}
+  - {name: MonitoringQueryService, kind: application, operations: [GetIncident, FindIncidents, GetStatus, GetProbeResults]}
+
+aggregates:
+  - name: Monitor
+    identity: "urn:ucos:platform:monitor:<code>"
+    invariants: ["INV-MON-1: severity, owner team, and runbook link required; generated monitors trace to SLO or module manifest."]
+    fields:
+      - {name: kind, type: "burn-rate|threshold|absence|anomaly|probe-failure"}
+      - {name: query, type: "backend-neutral expression (PromQL-compatible reference)"}
+      - {name: severity, type: "sev1|sev2|sev3|sev4"}
+      - {name: ownerTeam, type: string}
+      - {name: runbookRef, type: string}
+      - {name: source, type: "slo|manifest|manual"}
+  - name: Probe
+    identity: "urn:ucos:platform:probe:<code>"
+    fields:
+      - {name: journey, type: "steps over SDK (browse -> price -> cart -> order with test tenant)"}
+      - {name: cells, type: "string[]"}
+      - {name: interval, type: duration}
+  - name: Incident
+    identity: "urn:ucos:platform:incident:<ulid>"
+    invariants: ["INV-MON-2: Sev1/2 have an Incident Commander within 5/15 minutes; postmortem Evidence within 5 business days of resolution."]
+    fields:
+      - {name: severity, type: string}
+      - {name: scope, type: "regions/cells/tenants/contexts"}
+      - {name: roles, type: "{ic, ops, comms, scribe}"}
+      - {name: timeline, type: "[{at, entry}]"}
+      - {name: status, type: string}
+      - {name: postmortemRef, type: "InstanceUrn?"}
+  - name: Rotation
+    identity: "urn:ucos:platform:rotation:<team>"
+    fields:
+      - {name: team, type: string}
+      - {name: domains, type: "DOM IDs (from registry owningRole)"}
+      - {name: schedule, type: "rotation rules"}
+
+entities: []
+
+valueObjects:
+  - {name: StatusNotice, definition: "{scope, impact, message (LocalizedText), updatedAt}"}
+
+commands:
+  - {name: DefineMonitor, input: "Monitor", emits: [MonitorDefined]}
+  - {name: GenerateMonitorsFromSlos, input: "{slos[]}", emits: [MonitorDefined]}
+  - {name: MuteMonitor, input: "{code, until, reason}", emits: [MonitorMuted]}
+  - {name: DefineProbe, input: "Probe", emits: [ProbeDefined]}
+  - {name: RunProbe, input: "{code, cell}", emits: [ProbeRan]}
+  - {name: DefineRotation, input: "Rotation", emits: [RotationDefined]}
+  - {name: RouteAlert, input: "{monitor, labels}", emits: [AlertRouted]}
+  - {name: DeclareIncident, input: "{severity, scope, summary}", emits: [IncidentDeclared]}
+  - {name: UpdateIncident, input: "{id, timelineEntry?, severity?, status?}", emits: [IncidentUpdated]}
+  - {name: ResolveIncident, input: "{id, resolution}", emits: [IncidentResolved]}
+  - {name: AttachPostmortem, input: "{id, evidenceRef}", emits: [PostmortemAttached]}
+  - {name: PublishStatus, input: "StatusNotice", emits: [StatusPublished]}
+
+queries:
+  - {name: GetIncident, input: "{id}", output: Incident}
+  - {name: FindIncidents, input: "{status?, severity?, from?}", output: "page"}
+  - {name: GetStatus, input: "{region?, tenant?}", output: "StatusNotice[]"}
+  - {name: GetProbeResults, input: "{code, cell?, window}", output: "results"}
+
+apis:
+  - {style: REST, path: "/ops/v1/monitoring/monitors", methods: {POST: DefineMonitor}}
+  - {style: REST, path: "/ops/v1/monitoring/monitors:generate", methods: {POST: GenerateMonitorsFromSlos}}
+  - {style: REST, path: "/ops/v1/monitoring/monitors/{code}:mute", methods: {POST: MuteMonitor}}
+  - {style: REST, path: "/ops/v1/monitoring/probes", methods: {POST: DefineProbe}}
+  - {style: REST, path: "/ops/v1/monitoring/probes/{code}:run", methods: {POST: RunProbe}}
+  - {style: REST, path: "/ops/v1/monitoring/probes/{code}/results", methods: {GET: GetProbeResults}}
+  - {style: REST, path: "/ops/v1/monitoring/rotations", methods: {POST: DefineRotation}}
+  - {style: REST, path: "/ops/v1/monitoring/alerts:route", methods: {POST: RouteAlert}}
+  - {style: REST, path: "/ops/v1/incidents", methods: {POST: DeclareIncident, GET: FindIncidents}}
+  - {style: REST, path: "/ops/v1/incidents/{id}", methods: {GET: GetIncident, PATCH: UpdateIncident}}
+  - {style: REST, path: "/ops/v1/incidents/{id}:resolve", methods: {POST: ResolveIncident}}
+  - {style: REST, path: "/ops/v1/incidents/{id}/postmortem", methods: {POST: AttachPostmortem}}
+  - {style: REST, path: "/ops/v1/status", methods: {POST: PublishStatus}}
+  - {style: REST, path: "/v1/status", methods: {GET: GetStatus}}
+
+events:
+  - {type: ucos.runtime.monitor.defined.v1, payload: "{code, severity, ownerTeam}"}
+  - {type: ucos.runtime.monitor.muted.v1, payload: "{code, until}"}
+  - {type: ucos.runtime.probe.defined.v1, payload: "{code}"}
+  - {type: ucos.runtime.probe.ran.v1, payload: "{code, cell, success, latencyMs}"}
+  - {type: ucos.runtime.rotation.defined.v1, payload: "{team}"}
+  - {type: ucos.runtime.alert.routed.v1, payload: "{monitor, team, severity}"}
+  - {type: ucos.runtime.incident.declared.v1, payload: "{id, severity, scope}", consumers: [deployment (freeze), status page, risk]}
+  - {type: ucos.runtime.incident.updated.v1, payload: "{id, status}"}
+  - {type: ucos.runtime.incident.resolved.v1, payload: "{id, resolvedAt}"}
+  - {type: ucos.runtime.incident.postmortem-attached.v1, payload: "{id, evidenceRef}", consumers: [operational risk (loss events)]}
+  - {type: ucos.runtime.status.published.v1, payload: "{scope, impact}"}
+
+stateMachines:
+  - name: IncidentLifecycle
+    initial: detected
+    states: [detected, triaged, mitigating, monitoring, resolved, postmortem-complete]
+    terminal: [postmortem-complete]
+    transitions:
+      - {from: detected, to: triaged, command: UpdateIncident}
+      - {from: triaged, to: mitigating, command: UpdateIncident}
+      - {from: mitigating, to: monitoring, command: UpdateIncident}
+      - {from: monitoring, to: mitigating, command: UpdateIncident}
+      - {from: [monitoring, mitigating], to: resolved, command: ResolveIncident}
+      - {from: resolved, to: postmortem-complete, command: AttachPostmortem}
+
+rules:
+  - {id: RUL-MON-1, statement: "Routing derives team from the domain registry owningRole for alerts labeled with ucos.context; unlabeled alerts route to platform on-call."}
+  - {id: RUL-MON-2, statement: "Active Sev1/Sev2 incidents in a context block deployments of that context (CIC-024-001 §2)."}
+  - {id: RUL-MON-3, statement: "Mutes expire automatically; muting Sev1 monitors requires incident commander."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:monitoring.paging", purpose: "Paging rules and response targets by severity"}
+
+decisions:
+  - {id: DEC-MON-1, question: "Who gets paged for alert A?", algorithm: "RUL-MON-1 + rotation schedule at time of alert"}
+
+security:
+  permissions: [monitoring.read, monitoring.manage, incidents.declare, incidents.manage, status.publish]
+  dataClassification: "Internal; tenant-facing status public per region."
+  threats: ["Alert fatigue -> generated burn-rate alerts, dedupe, mute expiry"]
+
+governance:
+  changeControl: "Generated monitors versioned with SLOs; manual monitors via PR review."
+  evidence: "Postmortems as Evidence."
+
+runtimeBehavior:
+  consistency: "Alert evaluation every 30s; probes per interval."
+  slo: {page_latency_p99_s: 60, availability: "99.99% (multi-region alerting)"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_runtime (separate tables) + alerting backend via adapter
+  tables:
+    - {name: monitors, columns: "code text pk, body jsonb", global: true}
+    - {name: probes, columns: "code text pk, body jsonb", global: true}
+    - {name: probe_results, columns: "code, cell, at, success, latency_ms", pk: "(code, cell, at)", global: true}
+    - {name: incidents, columns: "id text pk, severity, status, body jsonb", global: true}
+    - {name: rotations, columns: "team text pk, body jsonb", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "probe_results range(at) monthly."
+  retention: "Incidents indefinite; probe results 90 days."
+
+extensionModel:
+  extensionPoints: ["Paging/ITSM integrations", "Alerting backend adapters"]
+  forbidden: ["Alerts without runbooks"]
+
+certificationCriteria:
+  - {id: CR-MON-01, rule: "Passes CIC-022-001 CR-022-001-04 and CIC-025-001 CR-025-001-01.", level: L1}
+  - {id: CR-MON-02, rule: "Injected SLO burn produces a page to the owning rotation within 60s.", level: L2}
+  - {id: CR-MON-03, rule: "Golden journey probes run in every production cell every minute.", level: L2}
+validationRules:
+  - {id: VR-MON-01, rule: "Every owningRole in the registry maps to a rotation (VR-025-001-01)."}
+  - {id: VR-MON-02, rule: "Every monitor references an existing runbook."}

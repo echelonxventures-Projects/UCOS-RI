@@ -1,0 +1,241 @@
+header:
+  id: DOM-AUTH
+  title: Authority Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-009-001, CIC-014-001, CIC-015-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-010, PRIN-011, DOM-IDN, DOM-PTY]
+  certification: [CR-AUTH-01, CR-AUTH-02, CR-AUTH-03]
+  validation: [VR-AUTH-01, VR-AUTH-02]
+
+purpose: >
+  Own who may act for whom: role assignments, delegations of authority (including to AI agents),
+  signing authority, approval limits, and segregation-of-duties conflict sets — the facts the PDP
+  consumes when deciding authorization, approvals, and acceptance.
+
+scope:
+  includes:
+    - Role definitions (metadata) and role assignments to parties, scoped by ApplicabilityScope
+    - Delegations (principal -> delegate) with scope, limits, validity, and chain depth
+    - Signing authority and approval limits (amount/measure-based)
+    - SoD conflict sets (roles or actions that may not be held/performed by the same party)
+    - Mandates (signed authority for agents or representatives) as Evidence-backed records
+  excludes:
+    - Authentication and tokens (DOM-IDN)
+    - Policy evaluation (DOM-POL); AUTH supplies facts, POL decides
+    - Party data (DOM-PTY)
+
+responsibilities:
+  - Single source of truth for roles and delegated authority (PRIN-001).
+  - Prevent SoD conflicts at assignment time and expose conflicts for runtime checks.
+  - Provide fast authority facts to PDP (sub-millisecond embedded lookups).
+
+principles: [PRIN-005, PRIN-010, PRIN-011]
+
+boundaries:
+  upstream: [DOM-PTY, DOM-ORG, DOM-IDN, DOM-EVD, DOM-GOV]
+  downstream: [DOM-POL, DOM-IDN, DOM-CTR, DOM-QTE, DOM-GOV, DOM-AGT]
+
+ownership:
+  boundedContext: party
+  owningRole: Chief Governance Architect
+  service: authority-service
+  schema: ucos_party
+
+capabilities:
+  - {id: AUTH-C1, name: Roles, description: "Define roles (metadata) and assign them with scopes."}
+  - {id: AUTH-C2, name: Delegation, description: "Delegate subsets of authority with limits and expiry."}
+  - {id: AUTH-C3, name: Limits, description: "Approval and signing limits per role/party."}
+  - {id: AUTH-C4, name: SoD, description: "Define conflict sets; block conflicting assignments; supply runtime SoD facts."}
+  - {id: AUTH-C5, name: Mandates, description: "Record and verify mandates for agents and representatives."}
+  - {id: AUTH-C6, name: Access reviews, description: "Periodic certification of role assignments by managers."}
+
+services:
+  - {name: AuthorityCommandService, kind: application, operations: [DefineRole, AssignRole, RevokeRoleAssignment, GrantDelegation, RevokeDelegation, SetAuthorityLimit, DefineSodConflictSet, RecordMandate, RevokeMandate, StartAccessReview, CertifyAssignment]}
+  - {name: AuthorityFactsProvider, kind: domain-service, contract: "facts(principalParty, ctx) -> {roles[], limits{}, delegationsFrom[], mandates[], sodConflicts[]}; compiled into PDP bundle data per tenant (version-keyed)"}
+  - {name: AuthorityQueryService, kind: application, operations: [GetEffectiveAuthority, FindRoleAssignments, CheckSigningAuthority, GetMandate, GetAccessReview]}
+
+aggregates:
+  - name: RoleDefinition
+    identity: "urn:ucos:<namespace>:role:<code>"
+    invariants: ["INV-AUTH-1: role permissions reference registered permission strings; composite roles acyclic."]
+    fields:
+      - {name: code, type: string}
+      - {name: label, type: LocalizedText}
+      - {name: permissions, type: "string[]"}
+      - {name: includes, type: "RoleUrn[]"}
+      - {name: assignable, type: "{byRoles[], requiresApproval: bool, maxDuration?: duration}"}
+  - name: RoleAssignment
+    identity: "urn:ucos:<tenant>:role-assignment:<ulid>"
+    invariants:
+      - "INV-AUTH-2: assignment never creates an SoD conflict for the assignee within overlapping scope and validity."
+      - "INV-AUTH-3: assigner holds a role allowed to assign this role (assignable.byRoles)."
+    fields:
+      - {name: party, type: PartyUrn}
+      - {name: role, type: RoleUrn}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: assignedBy, type: PartyUrn}
+      - {name: lastCertifiedAt, type: "Instant?"}
+  - name: Delegation
+    identity: "urn:ucos:<tenant>:delegation:<ulid>"
+    invariants:
+      - "INV-AUTH-4: delegated permissions ⊆ delegator's effective permissions at grant time and are re-checked at use (delegation narrows only)."
+      - "INV-AUTH-5: chain depth <= policy authority.max-delegation-depth; no cycles."
+    fields:
+      - {name: delegator, type: PartyUrn}
+      - {name: delegate, type: "PartyUrn (person, agent, system)"}
+      - {name: permissions, type: "string[]"}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: limits, type: "{perTransaction?: Money, perPeriod?: {amount: Money, period: duration}}"}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: Instant}
+      - {name: parentDelegation, type: "InstanceUrn?"}
+  - name: AuthorityLimit
+    identity: "urn:ucos:<tenant>:authority-limit:<ulid>"
+    fields:
+      - {name: holder, type: "PartyUrn | RoleUrn"}
+      - {name: action, type: "approve-quote|approve-price|sign-contract|approve-refund|approve-credit-note|approve-write-off|purchase"}
+      - {name: measure, type: "amount|discountPercent|marginPercent"}
+      - {name: limit, type: "Money | integer"}
+      - {name: scope, type: ApplicabilityScope}
+  - name: SodConflictSet
+    identity: "urn:ucos:<namespace>:sod:<code>"
+    fields:
+      - {name: members, type: "[{role?|action?}]"}
+      - {name: mode, type: "assignment (cannot hold both) | execution (cannot perform both on same subject)"}
+  - name: Mandate
+    identity: "urn:ucos:<tenant>:mandate:<ulid>"
+    invariants: ["INV-AUTH-6: mandate evidence (signature) verifies and grantor holds authority for the mandate's scope at signing."]
+    fields:
+      - {name: grantor, type: PartyUrn}
+      - {name: holder, type: PartyUrn}
+      - {name: purpose, type: string}
+      - {name: scope, type: "permissions[] + ApplicabilityScope + counterparty CEL"}
+      - {name: limits, type: "{perTransaction, total}"}
+      - {name: validTo, type: Instant}
+      - {name: evidenceRef, type: InstanceUrn}
+      - {name: status, type: "active|revoked|expired|exhausted"}
+
+entities:
+  - {name: AccessReview, within: "standalone (campaign)", fields: [reviewId, scope, reviewers, "items: [{assignmentRef, decision: keep|revoke, decidedBy, decidedAt}]", dueAt, status]}
+
+valueObjects:
+  - {name: EffectiveAuthority, definition: "{party, roles[], permissions[], limits[], delegationsReceived[], mandates[], asOf}"}
+
+commands:
+  - {name: DefineRole, input: "RoleDefinition + changeSetRef", emits: [RoleDefined]}
+  - {name: AssignRole, input: "{party, role, scope, validFrom, validTo?}", emits: [RoleAssigned], preconditions: ["INV-AUTH-2,3", "approval if role.assignable.requiresApproval"]}
+  - {name: RevokeRoleAssignment, input: "{id, reason}", emits: [RoleAssignmentRevoked]}
+  - {name: GrantDelegation, input: "Delegation", emits: [DelegationGranted], preconditions: ["INV-AUTH-4,5"]}
+  - {name: RevokeDelegation, input: "{id, reason}", emits: [DelegationRevoked], note: "Cascades to child delegations"}
+  - {name: SetAuthorityLimit, input: "AuthorityLimit + changeSetRef", emits: [AuthorityLimitSet]}
+  - {name: DefineSodConflictSet, input: "SodConflictSet + changeSetRef", emits: [SodConflictSetDefined], note: "Reports existing violating assignments for remediation"}
+  - {name: RecordMandate, input: "{grantor, holder, purpose, scope, limits, validTo, evidenceRef}", emits: [MandateRecorded]}
+  - {name: RevokeMandate, input: "{id, reason}", emits: [MandateRevoked]}
+  - {name: StartAccessReview, input: "{scope, reviewers, dueAt}", emits: [AccessReviewStarted]}
+  - {name: CertifyAssignment, input: "{reviewId, assignmentRef, decision}", emits: [AssignmentCertified, RoleAssignmentRevoked]}
+
+queries:
+  - {name: GetEffectiveAuthority, input: "{party, context, asOf?}", output: EffectiveAuthority}
+  - {name: FindRoleAssignments, input: "{party?, role?, scope?, cursor, limit}", output: "page"}
+  - {name: CheckSigningAuthority, input: "{party, representedParty, action, amount, context}", output: "{authorized, basis: [assignmentRef|delegationRef|mandateRef], reasons[]}"}
+  - {name: GetMandate, input: "{id}", output: Mandate}
+  - {name: GetAccessReview, input: "{reviewId}", output: AccessReview}
+
+apis:
+  - {style: REST, path: "/v1/authority/roles", methods: {POST: DefineRole}}
+  - {style: REST, path: "/v1/authority/role-assignments", methods: {POST: AssignRole, GET: FindRoleAssignments}}
+  - {style: REST, path: "/v1/authority/role-assignments/{id}:revoke", methods: {POST: RevokeRoleAssignment}}
+  - {style: REST, path: "/v1/authority/delegations", methods: {POST: GrantDelegation}}
+  - {style: REST, path: "/v1/authority/delegations/{id}:revoke", methods: {POST: RevokeDelegation}}
+  - {style: REST, path: "/v1/authority/limits", methods: {POST: SetAuthorityLimit}}
+  - {style: REST, path: "/v1/authority/sod-conflict-sets", methods: {POST: DefineSodConflictSet}}
+  - {style: REST, path: "/v1/authority/mandates", methods: {POST: RecordMandate}}
+  - {style: REST, path: "/v1/authority/mandates/{id}", methods: {GET: GetMandate}}
+  - {style: REST, path: "/v1/authority/mandates/{id}:revoke", methods: {POST: RevokeMandate}}
+  - {style: REST, path: "/v1/authority/access-reviews", methods: {POST: StartAccessReview}}
+  - {style: REST, path: "/v1/authority/access-reviews/{reviewId}", methods: {GET: GetAccessReview}}
+  - {style: REST, path: "/v1/authority/access-reviews/{reviewId}/items:certify", methods: {POST: CertifyAssignment}}
+  - {style: REST, path: "/v1/authority/effective", methods: {GET: GetEffectiveAuthority}}
+  - {style: REST, path: "/v1/authority:check-signing", methods: {POST: CheckSigningAuthority}}
+
+events:
+  - {type: ucos.party.role.defined.v1, payload: "{urn, permissions}"}
+  - {type: ucos.party.role.assigned.v1, payload: "{id, party, role, scope, validFrom, validTo}", consumers: [policy bundle builder, identity]}
+  - {type: ucos.party.role.assignment-revoked.v1, payload: "{id, reason}"}
+  - {type: ucos.party.delegation.granted.v1, payload: "{id, delegator, delegate, permissions, validTo}"}
+  - {type: ucos.party.delegation.revoked.v1, payload: "{id, cascaded[]}"}
+  - {type: ucos.party.authority-limit.set.v1, payload: "{id, holder, action, measure, limit}"}
+  - {type: ucos.party.sod.conflict-set-defined.v1, payload: "{urn, existingViolations}"}
+  - {type: ucos.party.mandate.recorded.v1, payload: "{id, grantor, holder, purpose, validTo}"}
+  - {type: ucos.party.mandate.revoked.v1, payload: "{id}"}
+  - {type: ucos.party.access-review.started.v1, payload: "{reviewId, items}"}
+  - {type: ucos.party.access-review.assignment-certified.v1, payload: "{reviewId, assignmentRef, decision}"}
+
+stateMachines:
+  - name: MandateLifecycle
+    initial: active
+    states: [active, exhausted, expired, revoked]
+    terminal: [exhausted, expired, revoked]
+    transitions:
+      - {from: active, to: exhausted, trigger: "cumulative usage reaches total limit"}
+      - {from: active, to: expired, trigger: "validTo (timer)"}
+      - {from: active, to: revoked, command: RevokeMandate}
+
+rules:
+  - {id: RUL-AUTH-1, statement: "Effective permissions = union(role permissions within scope) ∪ delegated permissions (each re-validated against current delegator authority) — never broader than delegator at use time."}
+  - {id: RUL-AUTH-2, statement: "Execution-mode SoD is enforced by PDP using AUTH facts and the subject's action history (e.g. author != approver)."}
+  - {id: RUL-AUTH-3, statement: "Role assignments not certified within policy authority.review-interval are auto-suspended (temporarily excluded from facts) until certified."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:authority.max-delegation-depth", purpose: "Maximum delegation chain depth"}
+  - {urn: "urn:ucos:ucos.std:policy:authority.review-interval", purpose: "Access review cadence per role sensitivity"}
+
+decisions:
+  - {id: DEC-AUTH-1, question: "Does party P hold authority A for subject S at time T?", algorithm: "RUL-AUTH-1 over assignments, delegations, mandates valid at T within scope"}
+  - {id: DEC-AUTH-2, question: "Does this assignment violate SoD?", algorithm: "Intersect assignee's effective roles (overlapping scope/time) with assignment-mode conflict sets"}
+
+security:
+  permissions: [authority.read, authority.role.define, authority.role.assign, authority.delegate, authority.limit.set, authority.sod.define, authority.mandate.manage, authority.review.manage]
+  dataClassification: "Internal; assignments link persons -> personal metadata."
+  threats: ["Privilege creep -> access reviews + expiry", "Delegation laundering -> narrowing-only + re-validation at use", "Rogue agent mandates -> evidence-verified mandates with limits"]
+
+governance:
+  changeControl: "Role definitions, limits, and SoD sets via ChangeSet; assignments via PDP + approval when required."
+  evidence: "Mandates, review decisions, and privileged assignments captured as Evidence."
+  audit: "All authority changes are audited and mapped to ITGC controls."
+
+runtimeBehavior:
+  consistency: "Strong for writes; facts propagate into PDP bundles within 10s p99; revocations pushed immediately (bundle delta + revocation cache)."
+  slo: {GetEffectiveAuthority_p99_ms: 10, revocation_propagation_p99_s: 10, availability: "99.99%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_party (shared context; separate tables)
+  tables:
+    - {name: role_definitions, columns: "tenant_id, urn, body jsonb", pk: "(tenant_id, urn)"}
+    - {name: role_assignments, columns: "tenant_id, id, party, role, scope jsonb, valid_from, valid_to, last_certified_at", pk: "(tenant_id, id)", indexes: ["(tenant_id, party)", "(tenant_id, role)"]}
+    - {name: delegations, columns: "tenant_id, id, delegator, delegate, body jsonb, valid_from, valid_to, parent_id", pk: "(tenant_id, id)", indexes: ["(tenant_id, delegate, valid_to)"]}
+    - {name: authority_limits, columns: "tenant_id, id, holder, action, measure, limit_value jsonb, scope jsonb", pk: "(tenant_id, id)"}
+    - {name: sod_sets, columns: "tenant_id, urn, body jsonb", pk: "(tenant_id, urn)"}
+    - {name: mandates, columns: "tenant_id, id, grantor, holder, body jsonb, used jsonb, status", pk: "(tenant_id, id)"}
+    - {name: access_reviews, columns: "tenant_id, review_id, body jsonb, status", pk: "(tenant_id, review_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Assignments and delegations history retained 7 years (ITGC evidence)."
+
+extensionModel:
+  extensionPoints: ["Roles in tenant namespaces", "Limit measures", "External IGA (identity governance) connectors via DOM-DXC"]
+  forbidden: ["Role checks in code (use permissions via PDP)"]
+
+certificationCriteria:
+  - {id: CR-AUTH-01, rule: "SoD assignment-mode conflicts are rejected 100% in concurrent assignment tests.", level: L1}
+  - {id: CR-AUTH-02, rule: "Delegated authority never exceeds delegator's current authority (property test over random grant/revoke sequences).", level: L1}
+  - {id: CR-AUTH-03, rule: "Revocation of a role is reflected in PDP decisions within 10s p99.", level: L2}
+validationRules:
+  - {id: VR-AUTH-01, rule: "Every role referenced in ucos.std policies (CEL role names) is defined in the ucos.std role registry."}
+  - {id: VR-AUTH-02, rule: "Every permission in role definitions matches a permission declared in some DOM spec security.permissions."}

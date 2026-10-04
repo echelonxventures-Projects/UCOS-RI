@@ -1,0 +1,175 @@
+header:
+  id: DOM-DTW
+  title: Digital Twins Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Systems Engineer
+  corpus: CORPUS-002
+  dependencies: [CIC-019-001, CIC-028-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-008, PRIN-013, CIC-019-001]
+  certification: [CR-DTW-01, CR-DTW-02, CR-DTW-03]
+  validation: [VR-DTW-01, VR-DTW-02]
+
+plugin:
+  id: ucos.ext.digital-twin
+  isolation: I4
+  consumesPorts: [EventBusPort, ObjectStorePort, KeyManagementPort, TimeSeriesStorePort]
+  providesApis: ["/v1/digital-twins/*"]
+  requiredPacks: ["ucos.std@^1.0"]
+
+purpose: >
+  Implement CIC-019-001: asset twins fed by telemetry and commercial twins (isolated, time-shifted
+  replicas of a tenant's commercial configuration) that run on the real interpreters, so simulation,
+  planning, optimization, and service delivery act on faithful, privacy-safe models.
+
+scope:
+  includes:
+    - Asset twins (state vectors from telemetry via declarative state mappings on facet Twinnable)
+    - Commercial twins (snapshot at asOf, isolated twin tenant in simulation cell, simulators replacing external providers)
+    - Twin lifecycle (create, refresh, expire, crypto-shred)
+    - Process twins (event-log process mining views)
+  excludes:
+    - Scenario design and KPI comparison (DOM-SIM), production changes (DOM-GOV)
+
+responsibilities:
+  - Twins never reach production endpoints or external providers (CR-019-001-02).
+  - Deterministic replay for identical snapshot + seed.
+  - Personal data pseudonymized with twin-scoped keys destroyed at expiry.
+
+principles: [PRIN-001, PRIN-008, PRIN-013]
+
+boundaries:
+  upstream: [DOM-COB, DOM-EVT, DOM-DXC, DOM-RTM, DOM-SEC, DOM-META]
+  downstream: [DOM-SIM, DOM-PLN, DOM-OPT, DOM-SDL, DOM-ENT, DOM-RCM]
+
+ownership:
+  boundedContext: digital-twin
+  owningRole: Chief Systems Engineer
+  service: digital-twin-service
+  schema: ucos_digital_twin
+
+capabilities:
+  - {id: DTW-C1, name: Asset twins, description: "Telemetry-driven state for assets."}
+  - {id: DTW-C2, name: Commercial twins, description: "Isolated snapshot tenants for what-if."}
+  - {id: DTW-C3, name: Process twins, description: "Process mining over CloudEvents."}
+  - {id: DTW-C4, name: Lifecycle, description: "Create, refresh, expire, shred."}
+
+services:
+  - {name: TwinCommandService, kind: application, operations: [DefineStateMapping, CreateCommercialTwin, RefreshCommercialTwin, DeleteTwin, IngestTelemetry]}
+  - {name: StateMapper, kind: domain-service, contract: "map(telemetry window, mapping CEL) -> state vector, health; deterministic"}
+  - {name: TwinQueryService, kind: application, operations: [GetAssetTwin, GetCommercialTwin, GetProcessTwin]}
+
+aggregates:
+  - name: AssetTwin
+    identity: "urn:ucos:<tenant>:asset-twin:<assetUlid>"
+    invariants: ["INV-DTW-1: bound to an Asset whose type has facet Twinnable; state derived only from declared mappings."]
+    fields:
+      - {name: assetRef, type: InstanceUrn}
+      - {name: stateVector, type: json}
+      - {name: health, type: "ok|degraded|failed|unknown"}
+      - {name: lastSyncedAt, type: Instant}
+  - name: CommercialTwin
+    identity: "urn:ucos:<tenant>:commercial-twin:<ulid>"
+    invariants:
+      - "INV-DTW-2: twin tenant runs in a simulation cell with egress denied; all provider ports bound to certified simulators."
+      - "INV-DTW-3: pseudonymization key unique per twin; expiry <= policy twin.ttl."
+    fields:
+      - {name: sourceTenant, type: string}
+      - {name: twinTenant, type: string}
+      - {name: asOf, type: Instant}
+      - {name: scope, type: "contexts/types included"}
+      - {name: snapshotDigest, type: Sha256}
+      - {name: expiresAt, type: Instant}
+      - {name: status, type: string}
+
+entities:
+  - {name: StateMapping, within: "type-level metadata", fields: [typeRef, telemetryStreams, "stateFields (CEL over windows)", healthRule]}
+
+valueObjects:
+  - {name: ProcessMap, definition: "{processType, nodes (activities), edges (transitions with counts, p50/p95 durations), variants}"}
+
+commands:
+  - {name: DefineStateMapping, input: "StateMapping + changeSetRef", emits: [StateMappingDefined]}
+  - {name: IngestTelemetry, input: "{assetRef, readings[]}", emits: [AssetTwinStateChanged]}
+  - {name: CreateCommercialTwin, input: "{sourceTenant, asOf, scope, ttl}", emits: [CommercialTwinCreated], async: true}
+  - {name: RefreshCommercialTwin, input: "{id, asOf}", emits: [CommercialTwinRefreshed], async: true}
+  - {name: DeleteTwin, input: "{id}", emits: [TwinDeleted], note: "Crypto-shreds twin key and drops twin tenant"}
+
+queries:
+  - {name: GetAssetTwin, input: "{assetRef}", output: AssetTwin}
+  - {name: GetCommercialTwin, input: "{id}", output: CommercialTwin}
+  - {name: GetProcessTwin, input: "{processType, from, to}", output: ProcessMap}
+
+apis:
+  - {style: REST, path: "/v1/digital-twins/state-mappings", methods: {POST: DefineStateMapping}}
+  - {style: REST, path: "/v1/digital-twins/assets/{assetRef}/telemetry", methods: {POST: IngestTelemetry}}
+  - {style: REST, path: "/v1/digital-twins/assets/{assetRef}", methods: {GET: GetAssetTwin}}
+  - {style: REST, path: "/v1/digital-twins/commercial", methods: {POST: CreateCommercialTwin}}
+  - {style: REST, path: "/v1/digital-twins/commercial/{id}", methods: {GET: GetCommercialTwin, DELETE: DeleteTwin}}
+  - {style: REST, path: "/v1/digital-twins/commercial/{id}:refresh", methods: {POST: RefreshCommercialTwin}}
+  - {style: REST, path: "/v1/digital-twins/processes/{processType}", methods: {GET: GetProcessTwin}}
+
+events:
+  - {type: ucos.digital-twin.state-mapping.defined.v1, payload: "{typeRef}"}
+  - {type: ucos.digital-twin.asset.state-changed.v1, payload: "{assetRef, changedFields, health}", consumers: [service delivery, entitlement meters, recommendations], note: "Named in CIC-019-001 §3"}
+  - {type: ucos.digital-twin.commercial-twin.created.v1, payload: "{id, twinTenant, asOf, snapshotDigest}"}
+  - {type: ucos.digital-twin.commercial-twin.refreshed.v1, payload: "{id, asOf}"}
+  - {type: ucos.digital-twin.twin.deleted.v1, payload: "{id, shreddedAt}"}
+
+stateMachines:
+  - name: CommercialTwinLifecycle
+    initial: building
+    states: [building, ready, refreshing, expired, deleted]
+    terminal: [deleted]
+    transitions:
+      - {from: building, to: ready, trigger: "snapshot replay to asOf complete and fidelity sample passes"}
+      - {from: ready, to: refreshing, command: RefreshCommercialTwin}
+      - {from: refreshing, to: ready, trigger: "refresh complete"}
+      - {from: [ready, refreshing], to: expired, trigger: "expiresAt (timer)"}
+      - {from: [building, ready, expired], to: deleted, command: DeleteTwin}
+
+rules:
+  - {id: RUL-DTW-1, statement: "Twins use the same code and metadata interpreters as production; no simulation-only logic (CIC-019-001 §2)."}
+  - {id: RUL-DTW-2, statement: "Expired twins are deleted and keys shredded within 24h (CR-019-001-04)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:twin.ttl", purpose: "Maximum commercial twin lifetime (CIC-019-001 §5)"}
+
+decisions:
+  - {id: DEC-DTW-1, question: "What is asset A's current state and health?", algorithm: "StateMapper over latest telemetry windows"}
+
+security:
+  permissions: [digital-twin.read, digital-twin.manage, digital-twin.telemetry.ingest]
+  dataClassification: "Twin data pseudonymized; telemetry internal."
+  threats: ["Twin as exfiltration path -> egress-denied simulation cells, simulators only"]
+
+governance:
+  changeControl: "State mappings and simulator plugin activations via ChangeSet."
+  evidence: "Twin snapshot digests and deletion certificates captured."
+
+runtimeBehavior:
+  consistency: "Asset twins eventual (seconds); commercial twins snapshot-consistent at asOf."
+  slo: {CreateCommercialTwin_p95_min: 60, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_digital_twin + TimeSeriesStorePort for telemetry
+  tables:
+    - {name: asset_twins, columns: "tenant_id, asset_ref, state jsonb, health, last_synced_at", pk: "(tenant_id, asset_ref)"}
+    - {name: state_mappings, columns: "tenant_id, type_ref, body jsonb", pk: "(tenant_id, type_ref)"}
+    - {name: commercial_twins, columns: "tenant_id, id, twin_tenant, as_of, body jsonb, status, expires_at", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Telemetry by (asset, day) in time-series store."
+  retention: "Telemetry 13 months; twins per twin.ttl."
+
+extensionModel:
+  extensionPoints: ["Industry state-mapping packs", "Provider simulators (certified per port)"]
+  forbidden: ["Twin writes to production tenants"]
+
+certificationCriteria:
+  - {id: CR-DTW-01, rule: "Passes CIC-019-001 CR-019-001-01..04.", level: L2}
+  - {id: CR-DTW-02, rule: "State mappings deterministic over recorded telemetry windows.", level: L1}
+  - {id: CR-DTW-03, rule: "Plugin deploys as I4 bounded context with only declared ports (CIC-028-001).", level: L2}
+validationRules:
+  - {id: VR-DTW-01, rule: "Every Twinnable type has a state mapping in its pack."}
+  - {id: VR-DTW-02, rule: "Every provider port used by twins has a certified simulator (VR-019-001-01)."}

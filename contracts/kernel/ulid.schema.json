@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-ucos-id": "urn:ucos:ucos.kernel:schema:ulid@1.0.0",
+  "title": "Ulid",
+  "description": "ULID, Crockford base32, 26 characters.",
+  "type": "string",
+  "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+}

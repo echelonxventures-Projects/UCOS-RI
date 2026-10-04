@@ -1,0 +1,180 @@
+header:
+  id: DOM-LOC
+  title: Localization Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-002, CIC-011-001, CIC-012-001, CIC-002-001]
+  traces: [PRIN-014, PRIN-016, CIC-011-002]
+  certification: [CR-LOC-01, CR-LOC-02, CR-LOC-03]
+  validation: [VR-LOC-01, VR-LOC-02]
+
+purpose: >
+  Own translations and locale data for every human-readable string in UCOS: message catalogs
+  (error, reason, UI, notification keys), translation workflows (human and machine), locale
+  enablement per tenant, and the pinned CLDR/ICU data — serving CIC-011-002 resolution.
+
+scope:
+  includes:
+    - Message catalogs keyed by message key (ICU MessageFormat 2.0), per locale, versioned
+    - Translation jobs for LocalizedText values across aggregates (extraction, MT, review, publish)
+    - Tenant locale enablement (tier-1/tier-2 locales), fallback configuration
+    - CLDR version pinning and locale data service
+    - Pseudo-locales for testing (en-XA, ar-XB)
+  excludes:
+    - Storing LocalizedText values inside aggregates (owning domains own their values)
+    - Unit conversion and formatting code (UI SDK / SDKs use CLDR data served here)
+
+responsibilities:
+  - Every message key has a source string and approved translations for enabled tier-1 locales.
+  - Translation provenance (human/MT, reviewer) recorded.
+  - Consistent CLDR version across services per release.
+
+principles: [PRIN-014, PRIN-016]
+
+boundaries:
+  upstream: [DOM-CFG, DOM-GOV, DOM-AGT]
+  downstream: [DOM-CTX, DOM-COB, DOM-CAT, DOM-BIL, DOM-DOC, DOM-DEC]
+
+ownership:
+  boundedContext: context
+  owningRole: Chief Platform Architect
+  service: localization-service
+  schema: ucos_context
+
+capabilities:
+  - {id: LOC-C1, name: Catalogs, description: "Manage message catalogs and keys."}
+  - {id: LOC-C2, name: Translate, description: "Translation jobs with MT plugins and human review."}
+  - {id: LOC-C3, name: Locales, description: "Enable locales per tenant; fallback policies."}
+  - {id: LOC-C4, name: Locale data, description: "Serve pinned CLDR data and plural/format rules."}
+
+services:
+  - {name: LocalizationCommandService, kind: application, operations: [RegisterMessageKey, ProposeTranslation, ApproveTranslation, StartTranslationJob, EnableLocale, DisableLocale]}
+  - {name: TranslationExtractor, kind: application, contract: "Scans aggregates' LocalizedText fields (via events) for missing enabled-locale values; creates job items"}
+  - {name: LocalizationQueryService, kind: application, operations: [GetMessages, GetMessage, GetTranslationJob, GetLocaleData, ListEnabledLocales]}
+
+aggregates:
+  - name: MessageKey
+    identity: "urn:ucos:<namespace>:message:<key>"
+    invariants:
+      - "INV-LOC-1: key matches ^[a-z][a-z0-9]*(\\.[a-z0-9-]+)+$; source text parses as ICU MessageFormat 2.0; translations declare the same variables."
+    fields:
+      - {name: key, type: string}
+      - {name: sourceLocale, type: BCP47}
+      - {name: sourceText, type: string}
+      - {name: description, type: "string (context for translators)"}
+      - {name: translations, type: "map<BCP47, {text, status: proposed|approved, origin: human|mt, reviewer?}>"}
+  - name: TranslationJob
+    identity: "urn:ucos:<tenant>:translation-job:<ulid>"
+    fields:
+      - {name: targetLocales, type: "BCP47[]"}
+      - {name: items, type: "[{ref: messageKey | aggregateUrn#field, sourceText, translations}]"}
+      - {name: mode, type: "mt-only|mt-then-review|human"}
+      - {name: status, type: "open|translating|in-review|completed|cancelled"}
+  - name: LocaleEnablement
+    identity: "urn:ucos:<tenant>:locale:<bcp47>"
+    fields:
+      - {name: locale, type: BCP47}
+      - {name: tier, type: "1|2"}
+      - {name: status, type: "enabled|disabled"}
+
+entities: []
+
+valueObjects:
+  - {name: LocaleData, definition: "{cldrVersion, locale, plurals, numberFormats, currencyFormats, dateFormats, unitPatterns, direction}"}
+
+commands:
+  - {name: RegisterMessageKey, input: "MessageKey (source only)", emits: [MessageKeyRegistered]}
+  - {name: ProposeTranslation, input: "{key|ref, locale, text, origin}", emits: [TranslationProposed]}
+  - {name: ApproveTranslation, input: "{key|ref, locale}", emits: [TranslationApproved], preconditions: ["variables match", "approver != proposer for origin=human"]}
+  - {name: StartTranslationJob, input: "{targetLocales, scope (keys|aggregates selector), mode}", emits: [TranslationJobStarted, TranslationJobCompleted], async: true}
+  - {name: EnableLocale, input: "{locale, tier}", emits: [LocaleEnabled]}
+  - {name: DisableLocale, input: "{locale}", emits: [LocaleDisabled]}
+
+queries:
+  - {name: GetMessages, input: "{namespace?, locale, keys?}", output: "map<key, text> (approved only, with fallback chain applied)"}
+  - {name: GetMessage, input: "{key}", output: MessageKey}
+  - {name: GetTranslationJob, input: "{id}", output: TranslationJob}
+  - {name: GetLocaleData, input: "{locale}", output: LocaleData}
+  - {name: ListEnabledLocales, input: "{}", output: "LocaleEnablement[]"}
+
+apis:
+  - {style: REST, path: "/v1/localization/messages", methods: {POST: RegisterMessageKey, GET: GetMessages}, cache: "ETag per (namespace, locale, catalog version); CDN cacheable"}
+  - {style: REST, path: "/v1/localization/messages/{key}", methods: {GET: GetMessage}}
+  - {style: REST, path: "/v1/localization/messages/{key}/translations", methods: {POST: ProposeTranslation}}
+  - {style: REST, path: "/v1/localization/messages/{key}/translations/{locale}:approve", methods: {POST: ApproveTranslation}}
+  - {style: REST, path: "/v1/localization/translation-jobs", methods: {POST: StartTranslationJob}}
+  - {style: REST, path: "/v1/localization/translation-jobs/{id}", methods: {GET: GetTranslationJob}}
+  - {style: REST, path: "/v1/localization/locales", methods: {POST: EnableLocale, GET: ListEnabledLocales}}
+  - {style: REST, path: "/v1/localization/locales/{locale}:disable", methods: {POST: DisableLocale}}
+  - {style: REST, path: "/v1/localization/locale-data/{locale}", methods: {GET: GetLocaleData}}
+
+events:
+  - {type: ucos.context.message-key.registered.v1, payload: "{key, sourceLocale}"}
+  - {type: ucos.context.translation.proposed.v1, payload: "{ref, locale, origin}"}
+  - {type: ucos.context.translation.approved.v1, payload: "{ref, locale}", consumers: [owning domains (for aggregate field translations, applied via their commands)]}
+  - {type: ucos.context.translation-job.started.v1, payload: "{id, targetLocales, items}"}
+  - {type: ucos.context.translation-job.completed.v1, payload: "{id, approved, pending}"}
+  - {type: ucos.context.locale.enabled.v1, payload: "{locale, tier}"}
+  - {type: ucos.context.locale.disabled.v1, payload: "{locale}"}
+
+stateMachines:
+  - name: TranslationJobLifecycle
+    initial: open
+    states: [open, translating, in-review, completed, cancelled]
+    terminal: [completed, cancelled]
+    transitions:
+      - {from: open, to: translating, kind: automatic}
+      - {from: translating, to: in-review, trigger: "all items have proposals and mode != mt-only"}
+      - {from: translating, to: completed, trigger: "mode = mt-only and all proposals auto-approved per policy"}
+      - {from: in-review, to: completed, trigger: "all items approved"}
+      - {from: [open, translating, in-review], to: cancelled, command: cancel}
+
+rules:
+  - {id: RUL-LOC-1, statement: "Machine translations for legal, regulatory, or contract texts are never auto-approved (policy localization.mt-auto-approve excludes these message namespaces)."}
+  - {id: RUL-LOC-2, statement: "Translations of aggregate fields are written back by the owning domain's command upon translation.approved (LOC never writes other stores)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:localization.territory-fallbacks", purpose: "Territory-specific locale fallbacks (CIC-011-002 §2 step 3)"}
+  - {urn: "urn:ucos:ucos.std:policy:localization.mt-auto-approve", purpose: "Namespaces where MT output may auto-approve"}
+
+decisions:
+  - {id: DEC-LOC-1, question: "Which text is shown for key K in context C?", algorithm: "CIC-011-002 §3"}
+
+security:
+  permissions: [localization.read, localization.translate, localization.approve, localization.locale.manage]
+  dataClassification: "Public (messages); aggregate field texts inherit source classification (personal texts never sent to MT)."
+  threats: ["MT data leakage -> only fields with sensitivity <= internal sent to MT providers with approved terms"]
+
+governance:
+  changeControl: "Message catalogs ship with packs/releases; tenant overrides via tenant namespace keys; approvals SoD."
+  evidence: "Legal-text translation approvals captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Catalog versions immutable once published; clients cache by ETag."
+  slo: {GetMessages_p99_ms: 20, availability: "99.99% (CDN-backed)"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_context (separate tables)
+  tables:
+    - {name: message_keys, columns: "tenant_id, key, namespace, source_locale, source_text, description", pk: "(tenant_id, key)"}
+    - {name: translations, columns: "tenant_id, ref, locale, text, status, origin, reviewer, updated_at", pk: "(tenant_id, ref, locale)"}
+    - {name: translation_jobs, columns: "tenant_id, id, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: locale_enablement, columns: "tenant_id, locale, tier, status", pk: "(tenant_id, locale)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Indefinite for approved translations."
+
+extensionModel:
+  extensionPoints: ["MachineTranslationPort plugins", "TMS connectors (XLIFF 2.1 import/export)", "Additional pseudo-locales"]
+  forbidden: ["String literals for user-facing text in code (UCOS-L001 extended)"]
+
+certificationCriteria:
+  - {id: CR-LOC-01, rule: "Passes CIC-011-002 CR-011-002-01/02.", level: L1}
+  - {id: CR-LOC-02, rule: "Variable mismatch between source and translation is rejected 100% (ICU MF2 parser tests).", level: L1}
+  - {id: CR-LOC-03, rule: "XLIFF 2.1 round trip preserves keys, notes, and approved translations.", level: L1}
+validationRules:
+  - {id: VR-LOC-01, rule: "Every message key referenced by reason codes and error codes is registered."}
+  - {id: VR-LOC-02, rule: "Every enabled tier-1 locale has 100% approved coverage for platform namespaces at release."}

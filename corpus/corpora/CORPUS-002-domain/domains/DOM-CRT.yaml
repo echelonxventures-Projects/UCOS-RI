@@ -1,0 +1,168 @@
+header:
+  id: DOM-CRT
+  title: Certification Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-000-004, CIC-023-001, CIC-024-001, CIC-002-001]
+  traces: [PRIN-012, PRIN-011, CIC-000-004]
+  certification: [CR-CRT-01, CR-CRT-02, CR-CRT-03]
+  validation: [VR-CRT-01, VR-CRT-02]
+
+purpose: >
+  Issue, maintain, and revoke CertificationRecords (CIC-000-004) for corpus revisions, service modules,
+  packs, plugins, deployments, and models — joining CR-rule test results and evidence into level
+  decisions (L0–L3) that gate activation and promotion everywhere in UCOS.
+
+scope:
+  includes:
+    - Certification requests per subject (by digest)
+    - Rule result ingestion from pipelines (test reports with @Verifies annotations)
+    - Level computation, waivers (time-bound), issuance, expiry, suspension, revocation
+    - Certification registry queries used by deployment gates, plugin/pack listing, model activation
+  excludes:
+    - Running tests (CI pipelines), security findings (DOM-SEC), evidence storage (DOM-EVD)
+
+responsibilities:
+  - A level is granted only when all rules required for it pass with verifiable evidence.
+  - Revocation propagates to all gates within minutes.
+  - Waivers are bounded and visible.
+
+principles: [PRIN-011, PRIN-012]
+
+boundaries:
+  upstream: [DOM-EVD, DOM-SEC, DOM-GOV, DOM-TRC]
+  downstream: [DOM-EXT, DOM-META, DOM-RTM, DOM-GOV, DOM-TRST, DOM-AGT]
+
+ownership:
+  boundedContext: governance
+  owningRole: Chief Governance Architect
+  service: certification-service
+  schema: ucos_governance
+
+capabilities:
+  - {id: CRT-C1, name: Request, description: "Open certification for a subject digest and target level."}
+  - {id: CRT-C2, name: Evaluate, description: "Collect rule results and evidence; compute level."}
+  - {id: CRT-C3, name: Waive, description: "Time-bound waivers with governance approval."}
+  - {id: CRT-C4, name: Issue & revoke, description: "Issue records; suspend/revoke; expire."}
+  - {id: CRT-C5, name: Verify, description: "Answer gate queries for subject digest + required level."}
+
+services:
+  - {name: CertificationCommandService, kind: application, operations: [RequestCertification, SubmitRuleResults, RequestWaiver, IssueCertification, SuspendCertification, RevokeCertification]}
+  - {name: LevelEvaluator, kind: domain-service, contract: "evaluate(subject, ruleSet(level), results, waivers) -> {achievedLevel, missing[], failed[], waived[]}; rule set derived from corpus traces of the subject (ucos-module.yaml / plugin manifest / pack)"}
+  - {name: CertificationQueryService, kind: application, operations: [VerifyCertification, GetCertificationRecord, FindCertificationRecords]}
+
+aggregates:
+  - name: CertificationRecord
+    identity: "urn:ucos:<tenant|platform>:cert:<ulid>"
+    invariants:
+      - "INV-CRT-1: (subject digest, level) has at most one active record."
+      - "INV-CRT-2: every pass result references Evidence whose digest verifies (CR-000-004-02)."
+      - "INV-CRT-3: waivers cap level at L1 and expire <= 90 days."
+    fields:
+      - {name: schema, type: "CIC-000-004 §3 CertificationRecord"}
+  - name: CertificationRequest
+    identity: "urn:ucos:<tenant|platform>:cert-request:<ulid>"
+    fields:
+      - {name: subject, type: "{kind, ref, digest}"}
+      - {name: targetLevel, type: "L0|L1|L2|L3"}
+      - {name: requiredRules, type: "CR IDs[]"}
+      - {name: results, type: "[{ruleId, outcome, evidenceRefs}]"}
+      - {name: status, type: "open|evaluating|issued|denied"}
+
+entities:
+  - {name: Waiver, within: CertificationRequest, fields: [ruleId, rationale, approvedChangeSetRef, expiresAt]}
+
+valueObjects:
+  - {name: GateDecision, definition: "{subjectDigest, requiredLevel, satisfied, recordRef?, reasons[]}"}
+
+commands:
+  - {name: RequestCertification, input: "{subject, targetLevel}", emits: [CertificationRequested]}
+  - {name: SubmitRuleResults, input: "{requestId, results[]}", emits: [CertificationResultsSubmitted]}
+  - {name: RequestWaiver, input: "{requestId, ruleId, rationale, changeSetRef}", emits: [CertificationWaiverRecorded]}
+  - {name: IssueCertification, input: "{requestId}", emits: [CertificationIssued, CertificationDenied]}
+  - {name: SuspendCertification, input: "{recordId, reason}", emits: [CertificationSuspended]}
+  - {name: RevokeCertification, input: "{recordId, reason}", emits: [CertificationRevoked]}
+
+queries:
+  - {name: VerifyCertification, input: "{subjectDigest, requiredLevel}", output: GateDecision}
+  - {name: GetCertificationRecord, input: "{id}", output: CertificationRecord}
+  - {name: FindCertificationRecords, input: "{subjectKind?, ref?, state?, expiringBefore?}", output: "page"}
+
+apis:
+  - {style: REST, path: "/v1/certification/requests", methods: {POST: RequestCertification}}
+  - {style: REST, path: "/v1/certification/requests/{id}/results", methods: {POST: SubmitRuleResults}}
+  - {style: REST, path: "/v1/certification/requests/{id}/waivers", methods: {POST: RequestWaiver}}
+  - {style: REST, path: "/v1/certification/requests/{id}:issue", methods: {POST: IssueCertification}}
+  - {style: REST, path: "/v1/certification/records", methods: {GET: FindCertificationRecords}}
+  - {style: REST, path: "/v1/certification/records/{id}", methods: {GET: GetCertificationRecord}}
+  - {style: REST, path: "/v1/certification/records/{id}:suspend", methods: {POST: SuspendCertification}}
+  - {style: REST, path: "/v1/certification/records/{id}:revoke", methods: {POST: RevokeCertification}}
+  - {style: REST, path: "/v1/certification:verify", methods: {GET: VerifyCertification}}
+
+events:
+  - {type: ucos.governance.certification-request.created.v1, payload: "{id, subject, targetLevel}"}
+  - {type: ucos.governance.certification-request.results-submitted.v1, payload: "{id, passed, failed}"}
+  - {type: ucos.governance.certification-request.waiver-recorded.v1, payload: "{id, ruleId, expiresAt}"}
+  - {type: ucos.governance.certification-record.issued.v1, payload: "{id, subject, level, expiresAt}", consumers: [extensions, packs, deployment gates, models]}
+  - {type: ucos.governance.certification-record.denied.v1, payload: "{requestId, missing, failed}"}
+  - {type: ucos.governance.certification-record.suspended.v1, payload: "{id, reason}"}
+  - {type: ucos.governance.certification-record.revoked.v1, payload: "{id, subject, reason}", consumers: [plugin hosts and pack registry (deactivate <= 5 min, CR-000-004-03)]}
+  - {type: ucos.governance.certification-record.expired.v1, payload: "{id}"}
+
+stateMachines:
+  - name: CertificationRecordLifecycle
+    initial: issued
+    states: [issued, suspended, revoked, expired]
+    terminal: [revoked, expired]
+    transitions:
+      - {from: issued, to: suspended, command: SuspendCertification}
+      - {from: suspended, to: issued, command: reinstate}
+      - {from: [issued, suspended], to: revoked, command: RevokeCertification}
+      - {from: [issued, suspended], to: expired, trigger: "expiresAt (timer) or waiver expiry dropping below required level"}
+
+rules:
+  - {id: RUL-CRT-1, statement: "Required rules for a subject = CR rules of every artifact/domain in its traces, filtered to the target level (default L1)."}
+  - {id: RUL-CRT-2, statement: "A new subject digest always requires a new record; records never transfer between digests."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:certification.validity", purpose: "Validity periods per subject kind and level"}
+
+decisions:
+  - {id: DEC-CRT-1, question: "Does subject digest D satisfy level L?", algorithm: "VerifyCertification over active records"}
+
+security:
+  permissions: [certification.read, certification.request, certification.submit-results, certification.issue, certification.revoke]
+  dataClassification: "Internal; results may reference confidential reports."
+  threats: ["Forged results -> results only from pipeline identities; evidence digests verified"]
+
+governance:
+  changeControl: "Waivers require approved ChangeSet; issuance by certification authority role."
+  evidence: "Records reference all rule evidence."
+
+runtimeBehavior:
+  consistency: "Strong; gate queries cached with revocation push."
+  slo: {VerifyCertification_p99_ms: 20, revocation_propagation_p99_s: 300, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_governance (separate tables)
+  tables:
+    - {name: cert_requests, columns: "scope, id, subject_kind, subject_ref, digest, target_level, body jsonb, status", pk: "(scope, id)"}
+    - {name: cert_records, columns: "scope, id, digest, level, state, issued_at, expires_at, body jsonb", pk: "(scope, id)", indexes: ["(digest, level, state)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None."
+  retention: "Indefinite."
+
+extensionModel:
+  extensionPoints: ["Subject kinds", "External certification body attestations (via DOM-TRST)"]
+  forbidden: ["Manual level overrides without evidence"]
+
+certificationCriteria:
+  - {id: CR-CRT-01, rule: "Passes CIC-000-004 CR-000-004-01..03.", level: L1}
+  - {id: CR-CRT-02, rule: "LevelEvaluator denies when any required rule lacks a pass with verified evidence.", level: L1}
+  - {id: CR-CRT-03, rule: "Waiver expiry drops level and triggers gate failure (time-travel test).", level: L1}
+validationRules:
+  - {id: VR-CRT-01, rule: "Every CR rule declares a level or defaults to L1 (VR-000-004-01)."}
+  - {id: VR-CRT-02, rule: "Every subject kind maps to a trace source (module manifest, plugin manifest, pack manifest)."}

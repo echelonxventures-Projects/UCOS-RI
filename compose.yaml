@@ -1,0 +1,67 @@
+# ucos-lite composition (CIC-030-001 §2): one Compose project, one PostgreSQL with a schema per context,
+# CloudEvents HTTP EventBusPort adapter. Development credentials only — never used outside ucos-lite.
+name: ucos-lite
+
+x-dev-secrets: &dev-secrets
+  UCOS_OWNER_PASSWORD: ${UCOS_OWNER_PASSWORD:-owner-dev}
+  UCOS_ECHO_APP_PASSWORD: ${UCOS_ECHO_APP_PASSWORD:-echo-app-dev}
+  UCOS_ECHO_RELAY_PASSWORD: ${UCOS_ECHO_RELAY_PASSWORD:-echo-relay-dev}
+
+services:
+  db:
+    image: postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea  # postgres:16-alpine
+    environment:
+      <<: *dev-secrets
+      POSTGRES_DB: ucos
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${UCOS_DB_SUPERUSER_PASSWORD:-postgres-dev}
+    volumes:
+      - ./deploy/lite/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ucos"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  tools:
+    build: {context: ., dockerfile: tools/Containerfile}
+    image: ucos-tools:local
+    user: "${UCOS_UID:-0}:${UCOS_GID:-0}"
+    working_dir: /work
+    volumes: [".:/work"]
+    profiles: [tools]
+
+  migrate:
+    image: ucos-tools:local
+    depends_on: {db: {condition: service_healthy}}
+    working_dir: /work
+    volumes: [".:/work:ro"]
+    environment:
+      UCOS_MIGRATE_DB_URL: postgresql://ucos_owner:${UCOS_OWNER_PASSWORD:-owner-dev}@db:5432/ucos
+    command: ["python", "tools/migrate.py", "domains/echo"]
+
+  echo:
+    build: {context: domains/echo, dockerfile: Containerfile, target: runtime}
+    image: ucos-echo-service:local
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    environment:
+      UCOS_ECHO_DB_URL: postgresql://ucos_echo_app:${UCOS_ECHO_APP_PASSWORD:-echo-app-dev}@db:5432/ucos
+      UCOS_ECHO_RELAY_DB_URL: postgresql://ucos_echo_relay:${UCOS_ECHO_RELAY_PASSWORD:-echo-relay-dev}@db:5432/ucos
+      UCOS_EVENTBUS_HTTP_SINKS: http://echo:8081/events
+      UCOS_SECURITY_MODE: dev-header
+      UCOS_REGION: lite
+    ports: ["127.0.0.1:${UCOS_ECHO_PORT:-18080}:8080"]
+
+  conformance:
+    image: ucos-tools:local
+    profiles: [test]
+    depends_on: {echo: {condition: service_started}}
+    working_dir: /work
+    volumes: [".:/work:ro"]
+    environment:
+      UCOS_BASE_URL: http://echo:8080
+      UCOS_CONSUMER_URL: http://echo:8081/events
+      UCOS_DB_URL: postgresql://ucos_echo_app:${UCOS_ECHO_APP_PASSWORD:-echo-app-dev}@db:5432/ucos
+      UCOS_RELAY_DB_URL: postgresql://ucos_echo_relay:${UCOS_ECHO_RELAY_PASSWORD:-echo-relay-dev}@db:5432/ucos
+      PYTHONDONTWRITEBYTECODE: "1"
+    command: ["python", "-m", "pytest", "-p", "no:cacheprovider", "-q", "conformance"]

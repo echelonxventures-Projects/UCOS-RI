@@ -1,0 +1,180 @@
+header:
+  id: DOM-MFG
+  title: Manufacturing Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Systems Engineer
+  corpus: CORPUS-002
+  dependencies: [CIC-002-001, CIC-028-001, CIC-011-006]
+  traces: [PRIN-001, PRIN-008, PRIN-022]
+  certification: [CR-MFG-01, CR-MFG-02, CR-MFG-03]
+  validation: [VR-MFG-01, VR-MFG-02]
+
+plugin:
+  id: ucos.ext.manufacturing
+  isolation: I4
+  consumesPorts: [EventBusPort, ManufacturingExecutionPort]
+  providesApis: ["/v1/manufacturing/*"]
+  requiredPacks: ["ucos.std@^1.0"]
+
+purpose: >
+  Connect commerce to production: bills of materials and routings for made-to-stock, made-to-order,
+  and configure-to-order items; production orders created from demand or orders; capacity and
+  component availability feeding promises; production completions feeding inventory, cost, and
+  provenance — integrating MES/ERP execution through ManufacturingExecutionPort.
+
+scope:
+  includes:
+    - Manufacturing BOMs and routings (versioned, effective-dated) for commercial objects
+    - Configure-to-order: mapping offer configurations to BOM variants
+    - Production orders (from replenishment proposals, make-to-order lines, or plans)
+    - Completions, scrap, and consumption reporting
+    - Capable-to-promise inputs for DOM-AVL (component ATP + capacity)
+  excludes:
+    - Shop-floor execution (external MES via port), inventory ledger (DOM-INV), costing (DOM-CST)
+
+responsibilities:
+  - BOM versions effective at production time are recorded for traceability (DOM-PRV).
+  - Completions and consumptions produce inventory movements exactly once.
+
+principles: [PRIN-001, PRIN-008, PRIN-022]
+
+boundaries:
+  upstream: [DOM-COB, DOM-OFR, DOM-ORD, DOM-SUPN, DOM-INV, DOM-PLN]
+  downstream: [DOM-INV, DOM-CST, DOM-PRV, DOM-AVL, DOM-SUS]
+
+ownership:
+  boundedContext: supply
+  owningRole: Chief Systems Engineer
+  service: manufacturing-service
+  schema: ucos_supply
+
+capabilities:
+  - {id: MFG-C1, name: BOMs & routings, description: "Versioned manufacturing structures."}
+  - {id: MFG-C2, name: Configure-to-order, description: "Offer configurations to BOM variants."}
+  - {id: MFG-C3, name: Production orders, description: "Create, release, track production orders."}
+  - {id: MFG-C4, name: Reporting, description: "Completions, consumption, scrap."}
+  - {id: MFG-C5, name: Capable-to-promise, description: "Component + capacity availability for promises."}
+
+services:
+  - {name: ManufacturingCommandService, kind: application, operations: [DefineBom, DefineRouting, CreateProductionOrder, ReleaseProductionOrder, ReportCompletion, ReportScrap, CloseProductionOrder]}
+  - {name: CtpCalculator, kind: domain-service, contract: "ctp(object, qty, ctx) -> earliest completion date from component ATP (DOM-AVL/INV) and routing capacity calendars"}
+  - {name: ManufacturingQueryService, kind: application, operations: [GetBom, GetProductionOrder, CapableToPromise]}
+
+aggregates:
+  - name: ManufacturingBom
+    identity: "urn:ucos:<tenant>:mfg-bom:<objectUlid>@<version>"
+    invariants: ["INV-MFG-1: components reference Stockable objects; BOM graph acyclic; effective intervals per object do not overlap."]
+    fields:
+      - {name: objectRef, type: InstanceUrn}
+      - {name: components, type: "[{objectRef, quantityPer, scrapFactor, selector? (CTO option)}]"}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+  - name: ProductionOrder
+    identity: "urn:ucos:<tenant>:production-order:<ulid>"
+    invariants: ["INV-MFG-2: reported completed + scrapped <= released quantity + tolerance; each report idempotent by externalRef."]
+    fields:
+      - {name: objectRef, type: InstanceUrn}
+      - {name: quantity, type: Quantity}
+      - {name: bomVersion, type: string}
+      - {name: nodeRef, type: InstanceUrn}
+      - {name: source, type: "replenishment|order-line|plan"}
+      - {name: executionRef, type: "MES ref?"}
+      - {name: status, type: string}
+
+entities:
+  - {name: Routing, within: ManufacturingBom, fields: [operations (workCenter, setupTime, runTimePerUnit), calendarRef]}
+
+valueObjects:
+  - {name: CtpResult, definition: "{objectRef, qty, earliestCompletion, constrainingComponent?, constrainingWorkCenter?}"}
+
+commands:
+  - {name: DefineBom, input: "ManufacturingBom + changeSetRef", emits: [BomDefined]}
+  - {name: DefineRouting, input: "{bomRef, routing}", emits: [RoutingDefined]}
+  - {name: CreateProductionOrder, input: "{objectRef, quantity, nodeRef, source}", emits: [ProductionOrderCreated]}
+  - {name: ReleaseProductionOrder, input: "{id}", emits: [ProductionOrderReleased], note: "Reserves components in DOM-INV; sends to MES"}
+  - {name: ReportCompletion, input: "{id, quantity, lots/serials, externalRef}", emits: [ProductionCompleted], note: "Triggers receipt movement (DOM-INV) and provenance activity (DOM-PRV)"}
+  - {name: ReportScrap, input: "{id, quantity, reason, externalRef}", emits: [ProductionScrapReported]}
+  - {name: CloseProductionOrder, input: "{id}", emits: [ProductionOrderClosed]}
+
+queries:
+  - {name: GetBom, input: "{objectRef, asOf?}", output: ManufacturingBom}
+  - {name: GetProductionOrder, input: "{id}", output: ProductionOrder}
+  - {name: CapableToPromise, input: "{objectRef, qty, context}", output: CtpResult}
+
+apis:
+  - {style: REST, path: "/v1/manufacturing/boms", methods: {POST: DefineBom, GET: GetBom}}
+  - {style: REST, path: "/v1/manufacturing/boms/{ref}/routing", methods: {PUT: DefineRouting}}
+  - {style: REST, path: "/v1/manufacturing/production-orders", methods: {POST: CreateProductionOrder}}
+  - {style: REST, path: "/v1/manufacturing/production-orders/{id}", methods: {GET: GetProductionOrder}}
+  - {style: REST, path: "/v1/manufacturing/production-orders/{id}:release", methods: {POST: ReleaseProductionOrder}}
+  - {style: REST, path: "/v1/manufacturing/production-orders/{id}/completions", methods: {POST: ReportCompletion}}
+  - {style: REST, path: "/v1/manufacturing/production-orders/{id}/scrap", methods: {POST: ReportScrap}}
+  - {style: REST, path: "/v1/manufacturing/production-orders/{id}:close", methods: {POST: CloseProductionOrder}}
+  - {style: REST, path: "/v1/manufacturing:capable-to-promise", methods: {POST: CapableToPromise}}
+
+events:
+  - {type: ucos.supply.mfg-bom.defined.v1, payload: "{ref, objectRef, validFrom}"}
+  - {type: ucos.supply.mfg-routing.defined.v1, payload: "{bomRef}"}
+  - {type: ucos.supply.production-order.created.v1, payload: "{id, objectRef, quantity, source}"}
+  - {type: ucos.supply.production-order.released.v1, payload: "{id, executionRef}"}
+  - {type: ucos.supply.production-order.completed.v1, payload: "{id, quantity, lots, serials}", consumers: [inventory, cost, provenance, sustainability]}
+  - {type: ucos.supply.production-order.scrap-reported.v1, payload: "{id, quantity, reason}"}
+  - {type: ucos.supply.production-order.closed.v1, payload: "{id}"}
+
+stateMachines:
+  - name: ProductionOrderLifecycle
+    initial: created
+    states: [created, released, in-progress, completed, closed, cancelled]
+    terminal: [closed, cancelled]
+    transitions:
+      - {from: created, to: released, command: ReleaseProductionOrder}
+      - {from: released, to: in-progress, trigger: "first completion or MES start"}
+      - {from: in-progress, to: completed, trigger: "completed + scrap >= quantity"}
+      - {from: completed, to: closed, command: CloseProductionOrder}
+      - {from: [created, released], to: cancelled, command: cancel}
+
+rules:
+  - {id: RUL-MFG-1, statement: "Configure-to-order lines resolve BOM variants from offer configurations via selectors; unresolved options block release (E-MFG-CTO-UNRESOLVED)."}
+  - {id: RUL-MFG-2, statement: "BOM version effective at release is pinned on the production order and recorded in provenance."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:manufacturing.completion-tolerance", purpose: "Over-completion tolerance"}
+
+decisions:
+  - {id: DEC-MFG-1, question: "When can quantity Q of X be produced?", algorithm: "CtpCalculator"}
+
+security:
+  permissions: [manufacturing.read, manufacturing.bom.manage, manufacturing.order.manage, manufacturing.report]
+  dataClassification: "Confidential (BOMs, routings)."
+  threats: ["Fake completions -> MES adapters authenticated; idempotent reporting"]
+
+governance:
+  changeControl: "BOMs and routings via ChangeSet."
+  evidence: "Completions linked to provenance activities."
+
+runtimeBehavior:
+  consistency: "Strong per production order."
+  slo: {CapableToPromise_p99_ms: 200, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_supply (separate tables)
+  tables:
+    - {name: mfg_boms, columns: "tenant_id, ref, object_ref, body jsonb, valid_from, valid_to", pk: "(tenant_id, ref)"}
+    - {name: production_orders, columns: "tenant_id, id, object_ref, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Production records per product traceability retention."
+
+extensionModel:
+  extensionPoints: ["ManufacturingExecutionPort adapters (MES/ERP)", "CTO selector functions"]
+  forbidden: ["Direct inventory writes (use DOM-INV movements)"]
+
+certificationCriteria:
+  - {id: CR-MFG-01, rule: "Completion reports produce exactly one receipt movement each (duplicate delivery test).", level: L1}
+  - {id: CR-MFG-02, rule: "CTP golden scenarios (component shortage, capacity bound) match expected dates.", level: L1}
+  - {id: CR-MFG-03, rule: "Plugin deploys as I4 with only declared ports.", level: L2}
+validationRules:
+  - {id: VR-MFG-01, rule: "Every manufactured object has a BOM effective for active sales periods."}
+  - {id: VR-MFG-02, rule: "BOM graphs acyclic."}

@@ -1,0 +1,195 @@
+header:
+  id: DOM-SOV
+  title: Sovereignty Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-014-001, CIC-020-001, CIC-021-001, CIC-002-001]
+  traces: [PRIN-015, PRIN-022, PRIN-010, PRIN-011]
+  certification: [CR-SOV-01, CR-SOV-02, CR-SOV-03]
+  validation: [VR-SOV-01, VR-SOV-02]
+
+purpose: >
+  Give tenants and jurisdictions verifiable control over their data and operations: sovereignty
+  profiles defining where data lives and is processed, who may operate it (operator nationality /
+  clearance), which keys the tenant controls (BYOK/HYOK), which external processors are allowed, and
+  access transparency — enforced by placement, key management, egress, and operator access controls.
+
+scope:
+  includes:
+    - SovereigntyProfile per tenant (residency, processing locations, operator constraints, key control mode, allowed processors, exit guarantees)
+    - Key control modes: platform-managed, BYOK (tenant key in platform KMS), HYOK (tenant-hosted external KMS via KeyManagementPort)
+    - Operator access policies and access transparency logs (who from the platform accessed tenant data, why)
+    - Processor allow-lists (plugins, AI model providers, sub-processors) with location
+    - Sovereign cell designation (cells meeting profile constraints)
+    - Exit/portability guarantees (full export in open formats)
+  excludes:
+    - Purpose/legal basis (DOM-PRI), placement mechanics (DOM-RTM), key operations (DOM-SEC)
+
+responsibilities:
+  - Profiles are enforced, not advisory: violations are blocked at placement, egress, plugin activation, model calls, and operator access.
+  - Tenants can verify compliance (transparency logs, attestations).
+
+principles: [PRIN-010, PRIN-011, PRIN-015, PRIN-022]
+
+boundaries:
+  upstream: [DOM-ORG, DOM-PRI, DOM-SEC, DOM-RTM, DOM-EXT]
+  downstream: [DOM-RTM, DOM-SEC, DOM-EXT, DOM-AGT, DOM-AUD, DOM-CMPL]
+
+ownership:
+  boundedContext: governance
+  owningRole: Chief Governance Architect
+  service: sovereignty-service
+  schema: ucos_governance
+
+capabilities:
+  - {id: SOV-C1, name: Profiles, description: "Define and attach sovereignty profiles to tenants."}
+  - {id: SOV-C2, name: Key control, description: "Configure BYOK/HYOK with health checks and revocation."}
+  - {id: SOV-C3, name: Processor control, description: "Allow-list processors by location and certification."}
+  - {id: SOV-C4, name: Operator access, description: "Constrain and log platform operator access; customer approval flows."}
+  - {id: SOV-C5, name: Exit, description: "Full tenant export and verified deletion."}
+
+services:
+  - {name: SovereigntyCommandService, kind: application, operations: [DefineSovereigntyProfile, AttachProfile, ConfigureKeyControl, RevokeTenantKeyAccess, AllowProcessor, DisallowProcessor, RequestOperatorAccess, DecideOperatorAccess, StartTenantExport]}
+  - {name: SovereigntyEnforcer, kind: domain-service, contract: "check(action: place|egress|activate-plugin|model-call|operator-access, subject, tenant) -> allow|deny + reasons; embedded via PDP bundle data in RTM, EXT, AGT gateways, egress proxy, ops API"}
+  - {name: SovereigntyQueryService, kind: application, operations: [GetProfile, CheckSovereignty, GetAccessTransparencyLog, GetExportStatus]}
+
+aggregates:
+  - name: SovereigntyProfile
+    identity: "urn:ucos:<namespace|tenant>:sovereignty-profile:<code>"
+    invariants: ["INV-SOV-1: residency and processing locations are subsets of jurisdictions with available sovereign cells; operator constraints expressible as identity attributes."]
+    fields:
+      - {name: residency, type: "jurisdiction/region codes"}
+      - {name: processingLocations, type: "region codes"}
+      - {name: operatorConstraints, type: "{citizenship?, clearance?, locations?, customerApprovalRequired: bool}"}
+      - {name: keyControl, type: "platform|byok|hyok"}
+      - {name: processorPolicy, type: "allow-list only | allow-list + certified"}
+      - {name: exit, type: "{exportFormats[], deletionCertificate: bool, maxDays}"}
+  - name: KeyControlConfig
+    identity: "urn:ucos:<tenant>:key-control"
+    invariants: ["INV-SOV-2: HYOK endpoints pass health checks before activation; revocation of tenant key access renders tenant data unreadable within 5 minutes (fail closed)."]
+    fields:
+      - {name: mode, type: "platform|byok|hyok"}
+      - {name: kmsRef, type: "external KMS endpoint/key id"}
+      - {name: status, type: "active|revoked|degraded"}
+  - name: OperatorAccessRequest
+    identity: "urn:ucos:<tenant>:operator-access:<ulid>"
+    fields:
+      - {name: operator, type: PartyUrn}
+      - {name: reason, type: string}
+      - {name: ticket, type: string}
+      - {name: scope, type: "contexts/resources"}
+      - {name: duration, type: duration}
+      - {name: customerDecision, type: "approved|denied|not-required"}
+      - {name: status, type: "requested|approved|denied|active|ended|expired"}
+
+entities:
+  - {name: ProcessorEntry, within: "tenant processor allow-list", fields: [processorRef (plugin/model/provider), locations, certifications, purpose, addedAt]}
+
+valueObjects:
+  - {name: TransparencyEntry, definition: "{operator, at, scope, reason, requestRef, actions summary}"}
+
+commands:
+  - {name: DefineSovereigntyProfile, input: "SovereigntyProfile + changeSetRef", emits: [SovereigntyProfileDefined]}
+  - {name: AttachProfile, input: "{tenant, profileCode}", emits: [SovereigntyProfileAttached], note: "Triggers placement check and possible relocation plan (DOM-RTM)"}
+  - {name: ConfigureKeyControl, input: "KeyControlConfig", emits: [KeyControlConfigured]}
+  - {name: RevokeTenantKeyAccess, input: "{tenant}", emits: [TenantKeyAccessRevoked], note: "Tenant-initiated kill switch"}
+  - {name: AllowProcessor, input: "{tenant, processor}", emits: [ProcessorAllowed]}
+  - {name: DisallowProcessor, input: "{tenant, processorRef}", emits: [ProcessorDisallowed]}
+  - {name: RequestOperatorAccess, input: "OperatorAccessRequest", emits: [OperatorAccessRequested]}
+  - {name: DecideOperatorAccess, input: "{id, decision}", emits: [OperatorAccessDecided]}
+  - {name: StartTenantExport, input: "{tenant, formats}", emits: [TenantExportStarted, TenantExportCompleted], async: true}
+
+queries:
+  - {name: GetProfile, input: "{tenant}", output: SovereigntyProfile}
+  - {name: CheckSovereignty, input: "{action, subject, tenant}", output: "allow|deny + reasons"}
+  - {name: GetAccessTransparencyLog, input: "{tenant, from, to}", output: "TransparencyEntry[]"}
+  - {name: GetExportStatus, input: "{exportId}", output: "status, artifacts, digests"}
+
+apis:
+  - {style: REST, path: "/v1/sovereignty/profiles", methods: {POST: DefineSovereigntyProfile}}
+  - {style: REST, path: "/v1/sovereignty/tenants/{tenant}/profile", methods: {PUT: AttachProfile, GET: GetProfile}}
+  - {style: REST, path: "/v1/sovereignty/tenants/{tenant}/key-control", methods: {PUT: ConfigureKeyControl}}
+  - {style: REST, path: "/v1/sovereignty/tenants/{tenant}/key-control:revoke", methods: {POST: RevokeTenantKeyAccess}}
+  - {style: REST, path: "/v1/sovereignty/tenants/{tenant}/processors", methods: {POST: AllowProcessor}}
+  - {style: REST, path: "/v1/sovereignty/tenants/{tenant}/processors/{processorRef}", methods: {DELETE: DisallowProcessor}}
+  - {style: REST, path: "/v1/sovereignty/operator-access", methods: {POST: RequestOperatorAccess}}
+  - {style: REST, path: "/v1/sovereignty/operator-access/{id}:decide", methods: {POST: DecideOperatorAccess}}
+  - {style: REST, path: "/v1/sovereignty/tenants/{tenant}/transparency-log", methods: {GET: GetAccessTransparencyLog}}
+  - {style: REST, path: "/v1/sovereignty/tenants/{tenant}/exports", methods: {POST: StartTenantExport}}
+  - {style: REST, path: "/v1/sovereignty/exports/{exportId}", methods: {GET: GetExportStatus}}
+  - {style: REST, path: "/v1/sovereignty:check", methods: {POST: CheckSovereignty}}
+
+events:
+  - {type: ucos.governance.sovereignty-profile.defined.v1, payload: "{code}"}
+  - {type: ucos.governance.sovereignty-profile.attached.v1, payload: "{tenant, code}", consumers: [runtime placement, extensions, agents]}
+  - {type: ucos.governance.key-control.configured.v1, payload: "{tenant, mode}"}
+  - {type: ucos.governance.key-control.access-revoked.v1, payload: "{tenant, at}", consumers: [security (fail closed), all services]}
+  - {type: ucos.governance.processor.allowed.v1, payload: "{tenant, processorRef, locations}"}
+  - {type: ucos.governance.processor.disallowed.v1, payload: "{tenant, processorRef}", consumers: [extensions (deactivate), agents]}
+  - {type: ucos.governance.operator-access.requested.v1, payload: "{id, tenant, scope}"}
+  - {type: ucos.governance.operator-access.decided.v1, payload: "{id, decision}"}
+  - {type: ucos.governance.tenant-export.started.v1, payload: "{exportId, tenant}"}
+  - {type: ucos.governance.tenant-export.completed.v1, payload: "{exportId, artifacts, digests}"}
+
+stateMachines:
+  - name: OperatorAccessLifecycle
+    initial: requested
+    states: [requested, approved, denied, active, ended, expired]
+    terminal: [denied, ended, expired]
+    transitions:
+      - {from: requested, to: approved, command: DecideOperatorAccess, guard: "approved or customer approval not required by profile"}
+      - {from: requested, to: denied, command: DecideOperatorAccess, guard: "denied"}
+      - {from: approved, to: active, trigger: "operator session starts (break-glass/ops API)"}
+      - {from: active, to: ended, command: end}
+      - {from: [approved, active], to: expired, trigger: "duration elapsed"}
+
+rules:
+  - {id: RUL-SOV-1, statement: "Any data egress, plugin activation, or model call to a processor not on the tenant allow-list (or outside processingLocations) is denied by SovereigntyEnforcer."}
+  - {id: RUL-SOV-2, statement: "Operator access to tenant data requires an approved OperatorAccessRequest when profile.customerApprovalRequired; every access appears in the transparency log within 1 hour."}
+  - {id: RUL-SOV-3, statement: "Tenant export uses open formats (JSON Lines with schemas, Parquet, CloudEvents archive) and includes metadata packs, so the tenant can leave without loss (PRIN-022)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:sovereignty.default-profile", purpose: "Default profile per jurisdiction for new tenants"}
+
+decisions:
+  - {id: DEC-SOV-1, question: "Does action A on subject S respect tenant T's sovereignty profile?", algorithm: "SovereigntyEnforcer"}
+
+security:
+  permissions: [sovereignty.read, sovereignty.profile.manage, sovereignty.key-control.manage, sovereignty.processor.manage, sovereignty.operator-access.request, sovereignty.operator-access.decide, sovereignty.export]
+  dataClassification: "Confidential."
+  threats: ["Operator bypass -> enforcement in ops API and break-glass flows; transparency log sealed into Evidence", "HYOK outage -> fail closed by design; tenants informed of availability trade-off"]
+
+governance:
+  changeControl: "Profiles via ChangeSet; tenant-side decisions by tenant admins."
+  evidence: "Transparency logs and export digests sealed as Evidence."
+
+runtimeBehavior:
+  consistency: "Profiles distributed to enforcement points within 10s; key revocation effective <= 5 min."
+  slo: {CheckSovereignty_embedded_p99_ms: 1, availability: "99.99% (embedded)"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_governance (separate tables)
+  tables:
+    - {name: sovereignty_profiles, columns: "scope, code, body jsonb", pk: "(scope, code)"}
+    - {name: tenant_sovereignty, columns: "tenant_id, profile_code, key_control jsonb", pk: "(tenant_id)"}
+    - {name: processor_allowlist, columns: "tenant_id, processor_ref, body jsonb", pk: "(tenant_id, processor_ref)"}
+    - {name: operator_access_requests, columns: "tenant_id, id, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: tenant_exports, columns: "tenant_id, export_id, body jsonb, status", pk: "(tenant_id, export_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None required."
+  retention: "Transparency logs 7 years."
+
+extensionModel:
+  extensionPoints: ["KeyManagementPort adapters for external KMS/HSM", "Sovereign cloud attestation plugins"]
+  forbidden: ["Advisory-only sovereignty checks"]
+
+certificationCriteria:
+  - {id: CR-SOV-01, rule: "Egress, plugin activation, and model calls to disallowed processors are blocked (negative tests per enforcement point).", level: L1}
+  - {id: CR-SOV-02, rule: "HYOK revocation renders tenant data unreadable within 5 minutes and services fail closed (chaos test).", level: L2}
+  - {id: CR-SOV-03, rule: "Tenant export round-trips into an empty tenant with equal aggregate counts and digests.", level: L2}
+validationRules:
+  - {id: VR-SOV-01, rule: "Every tenant has an attached profile (default per jurisdiction)."}
+  - {id: VR-SOV-02, rule: "Every certified plugin and model provider declares processing locations."}

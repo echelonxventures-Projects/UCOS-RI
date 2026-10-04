@@ -1,0 +1,186 @@
+header:
+  id: DOM-SRC
+  title: Search and Discovery Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief AI Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-005, CIC-011-001, CIC-017-001, CIC-002-001]
+  traces: [PRIN-006, PRIN-014, PRIN-021, PRIN-010]
+  certification: [CR-SRC-01, CR-SRC-02, CR-SRC-03]
+  validation: [VR-SRC-01, VR-SRC-02]
+
+# Discovery (DOM-DSC) — browse, facets, guided selling, conversational discovery — runs on the same
+# index, ranking, and eligibility machinery owned here.
+subsumes:
+  - domain: DOM-DSC
+    coverage: "Browse/facet queries, GuidedFlow aggregate (guided selling), ConverseDiscovery (conversational discovery for assistants/agents), merchandising rules integration, CR-SRC-03"
+
+purpose: >
+  Help parties and agents find the right commercial things: a context-aware search index projected
+  from catalogs, objects, offers, prices, availability, and classifications; keyword, semantic, and
+  hybrid retrieval; facets and browse; guided-selling flows; conversational discovery; and ranking
+  governed by merchandising rules — always filtered by catalog eligibility and authorization.
+
+scope:
+  includes:
+    - Search index projection (per tenant group and locale) with catalog ACL keys and context-variant documents
+    - Query understanding (spelling, synonyms per locale, attribute extraction), hybrid lexical + vector retrieval
+    - Facets from ontology attributes flagged facet, taxonomy-driven browse
+    - Ranking: relevance + merchandising rules (catalog-ordering) + personalization signals (DOM-RCM) within policy
+    - Guided flows (questionnaires mapping answers to filters/offers) and conversational discovery API
+  excludes:
+    - Catalog membership (DOM-CAT), price/availability truth (DOM-PRC/DOM-AVL, re-checked at result time when requested)
+    - Knowledge articles retrieval (DOM-KNW)
+
+responsibilities:
+  - Never return items the principal may not see (catalog eligibility, PDP, tenant isolation).
+  - Index freshness within SLO; authoritative re-check for price/availability when displayed.
+  - Explainable ranking.
+
+principles: [PRIN-006, PRIN-010, PRIN-014, PRIN-021]
+
+boundaries:
+  upstream: [DOM-CAT, DOM-COB, DOM-OFR, DOM-PRC, DOM-AVL, DOM-TXO, DOM-ONT, DOM-MED, DOM-RCM, DOM-MKT, DOM-CMP]
+  downstream: [DOM-AGT, DOM-ANL, DOM-DST]
+
+ownership:
+  boundedContext: intelligence
+  owningRole: Chief AI Architect
+  service: search-service
+  schema: ucos_intelligence
+
+capabilities:
+  - {id: SRC-C1, name: Index, description: "Project searchable documents from source events."}
+  - {id: SRC-C2, name: Query, description: "Keyword/semantic/hybrid search with facets and filters."}
+  - {id: SRC-C3, name: Rank, description: "Relevance + merchandising + personalization with explanations."}
+  - {id: SRC-C4, name: Guided selling, description: "Questionnaire flows to filters/offers."}
+  - {id: SRC-C5, name: Conversational discovery, description: "Natural-language discovery for assistants and agents."}
+  - {id: SRC-C6, name: Synonyms & tuning, description: "Locale synonyms, boosts, redirects."}
+
+services:
+  - {name: SearchIndexer, kind: application, contract: "Consumes catalog membership, cob, offer, price-list published, availability status, classification, media ready events; builds documents per (object, context class); ACL keys = eligible catalogs + tenant"}
+  - {name: SearchQueryService, kind: application, operations: [Search, Browse, Suggest, ExplainRanking, ConverseDiscovery, RunGuidedFlow]}
+  - {name: SearchAdminService, kind: application, operations: [DefineSynonyms, DefineGuidedFlow, DefineSearchRedirect, ReindexTenant]}
+
+aggregates:
+  - name: SearchDocument
+    identity: "(tenant, objectRef, contextClass, locale)"
+    invariants: ["INV-SRC-1: carries aclKeys (catalog ids) and sourceVersions; never contains personal data or cost."]
+    fields:
+      - {name: objectRef, type: InstanceUrn}
+      - {name: contextClass, type: "market+channel+currency class"}
+      - {name: locale, type: BCP47}
+      - {name: fields, type: "searchable/facet attributes (resolved view)"}
+      - {name: embeddings, type: "vector refs"}
+      - {name: aclKeys, type: "string[]"}
+      - {name: displayPrice, type: "Money? (indicative)"}
+      - {name: availabilityStatus, type: "string?"}
+      - {name: sourceVersions, type: "map<source, version>"}
+  - name: GuidedFlow
+    identity: "urn:ucos:<tenant>:guided-flow:<code>"
+    fields:
+      - {name: steps, type: "[{question: LocalizedText, answers: [{label: LocalizedText, effect: filter CEL | offerRef | next step}]}]"}
+      - {name: scope, type: ApplicabilityScope}
+  - name: SynonymSet
+    identity: "urn:ucos:<tenant>:synonyms:<locale>"
+    fields:
+      - {name: entries, type: "[{terms[], kind: equivalent|one-way}]"}
+
+entities: []
+
+valueObjects:
+  - {name: SearchRequest, definition: "{query?, filters (CEL over document fields), facets[], sort, context, cursor, limit<=100, mode: lexical|semantic|hybrid, verifyPrices: bool}"}
+  - {name: SearchResult, definition: "{items: [{objectRef, score, highlights, displayPrice, availability, explanation?}], facets, nextCursor, indexFreshness}"}
+
+commands:
+  - {name: DefineSynonyms, input: "SynonymSet", emits: [SynonymsDefined]}
+  - {name: DefineGuidedFlow, input: "GuidedFlow + changeSetRef", emits: [GuidedFlowDefined]}
+  - {name: DefineSearchRedirect, input: "{query pattern, target}", emits: [SearchRedirectDefined]}
+  - {name: ReindexTenant, input: "{tenant, scope?}", emits: [ReindexStarted, ReindexCompleted], async: true}
+
+queries:
+  - {name: Search, input: SearchRequest, output: SearchResult, note: "verifyPrices=true re-prices page items via DOM-PRC and re-checks availability"}
+  - {name: Browse, input: "{nodeRef | termRef, filters, context, cursor}", output: SearchResult}
+  - {name: Suggest, input: "{prefix, context, limit<=10}", output: "suggestions"}
+  - {name: ExplainRanking, input: "{query, objectRef, context}", output: "score breakdown (relevance, boosts, rules, personalization)"}
+  - {name: ConverseDiscovery, input: "{conversation turns, context}", output: "{clarifyingQuestion? | results: SearchResult, appliedFilters}", note: "LLM-assisted query understanding (CIC-017-001) producing structured filters; results only from Search"}
+  - {name: RunGuidedFlow, input: "{flowCode, answers, context}", output: "{nextStep? | results}"}
+
+apis:
+  - {style: REST, path: "/v1/search:query", methods: {POST: Search}}
+  - {style: REST, path: "/v1/search:browse", methods: {POST: Browse}}
+  - {style: REST, path: "/v1/search:suggest", methods: {GET: Suggest}}
+  - {style: REST, path: "/v1/search:explain", methods: {POST: ExplainRanking}}
+  - {style: REST, path: "/v1/search:converse", methods: {POST: ConverseDiscovery}}
+  - {style: REST, path: "/v1/search/guided-flows/{flowCode}:run", methods: {POST: RunGuidedFlow}}
+  - {style: REST, path: "/v1/search/guided-flows", methods: {POST: DefineGuidedFlow}}
+  - {style: REST, path: "/v1/search/synonyms", methods: {PUT: DefineSynonyms}}
+  - {style: REST, path: "/v1/search/redirects", methods: {POST: DefineSearchRedirect}}
+  - {style: REST, path: "/ops/v1/search/reindex", methods: {POST: ReindexTenant}}
+
+events:
+  - {type: ucos.intelligence.search.synonyms-defined.v1, payload: "{locale, entries}"}
+  - {type: ucos.intelligence.search.guided-flow-defined.v1, payload: "{code}"}
+  - {type: ucos.intelligence.search.redirect-defined.v1, payload: "{pattern, target}"}
+  - {type: ucos.intelligence.search.reindex-started.v1, payload: "{tenant, scope}"}
+  - {type: ucos.intelligence.search.reindex-completed.v1, payload: "{tenant, documents}"}
+  - {type: ucos.intelligence.search.query-performed.v1, payload: "{queryHash, resultsCount, contextClass}", note: "Aggregate analytics signal; no personal data"}
+
+stateMachines:
+  - name: ReindexRun
+    initial: running
+    states: [running, swapping, completed, failed]
+    terminal: [completed, failed]
+    transitions:
+      - {from: running, to: swapping, trigger: "new index built and validated (doc counts vs membership)"}
+      - {from: swapping, to: completed, trigger: "alias switched"}
+      - {from: [running, swapping], to: failed, trigger: "error"}
+
+rules:
+  - {id: RUL-SRC-1, statement: "Every query is filtered by aclKeys = catalogs eligible for the principal in context (DOM-CAT DEC-CAT-1) and tenant; filters are applied in the engine, not post-hoc, to keep facet counts correct."}
+  - {id: RUL-SRC-2, statement: "Displayed prices from the index are indicative; checkout and quotes always use DOM-PRC (verifyPrices for search pages per policy)."}
+  - {id: RUL-SRC-3, statement: "Personalization signals adjust ranking only within policy search.personalization bounds and never for regulated contexts excluded by policy."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:search.personalization", purpose: "Allowed personalization weight and excluded contexts"}
+  - {urn: "urn:ucos:ucos.std:policy:search.freshness", purpose: "Freshness targets and verifyPrices defaults per channel"}
+
+decisions:
+  - {id: DEC-SRC-1, question: "Which items rank for query Q in context C for principal P?", algorithm: "Hybrid retrieval within ACL -> relevance score -> merchandising rules (catalog-ordering) -> bounded personalization"}
+
+security:
+  permissions: [search.query, search.admin, search.explain]
+  dataClassification: "Index public/partner-confidential per catalog; no personal data or costs."
+  threats: ["ACL leakage through facets/suggestions -> ACL applied at query time to all features", "Prompt injection in conversational discovery -> output is structured filters only (CIC-017-001 §6)"]
+
+governance:
+  changeControl: "Guided flows, redirects, and ranking policies via ChangeSet; synonyms via PDP."
+  evidence: "Ranking explanations sampled for audit when personalization applies."
+
+runtimeBehavior:
+  consistency: "Eventual (p99 5s from source events)."
+  slo: {Search_p99_ms: 150, Suggest_p99_ms: 50, availability: "99.95%"}
+
+persistenceModel:
+  store: "SearchIndexPort (OpenSearch reference) + PostgreSQL schema ucos_intelligence for definitions"
+  tables:
+    - {name: guided_flows, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: synonym_sets, columns: "tenant_id, locale, body jsonb", pk: "(tenant_id, locale)"}
+    - {name: redirects, columns: "tenant_id, pattern, target", pk: "(tenant_id, pattern)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Index per tenant group and locale, aliases per generation."
+  retention: "Projection only."
+
+extensionModel:
+  extensionPoints: ["EmbeddingPort plugins", "Query understanding plugins", "Analyzer packs per language"]
+  forbidden: ["Searching unprojected sources directly"]
+
+certificationCriteria:
+  - {id: CR-SRC-01, rule: "ACL fuzzing: no result, facet, or suggestion reveals items outside eligible catalogs.", level: L1}
+  - {id: CR-SRC-02, rule: "Relevance benchmark (NDCG@10) on reference query sets meets policy thresholds per locale.", level: L2}
+  - {id: CR-SRC-03, rule: "Conversational discovery returns only items from Search results (no hallucinated objects) in 100% of test conversations.", level: L1}
+validationRules:
+  - {id: VR-SRC-01, rule: "Every facet attribute is flagged facet in the ontology."}
+  - {id: VR-SRC-02, rule: "Every guided flow effect references existing attributes or offers."}

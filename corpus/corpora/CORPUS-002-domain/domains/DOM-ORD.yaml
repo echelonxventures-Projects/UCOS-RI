@@ -1,0 +1,239 @@
+header:
+  id: DOM-ORD
+  title: Order Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-004, CIC-011-006, CIC-007-001, CIC-006-001, CIC-010-001, CIC-002-001]
+  traces: [PRIN-002, PRIN-006, PRIN-008, PRIN-015]
+  certification: [CR-ORD-01, CR-ORD-02, CR-ORD-03, CR-ORD-04]
+  validation: [VR-ORD-01, VR-ORD-02]
+
+purpose: >
+  Capture a party's binding request to acquire, change, or cancel offers — one-time purchases,
+  subscriptions, service activations, in-life changes (upgrade/downgrade/add-on/move), returns —
+  and orchestrate its decomposition into fulfillment, entitlement, contract, and billing work
+  with full traceability and compensation.
+
+scope:
+  includes:
+    - Cart (pre-order basket) and Order aggregates
+    - Order lines with action (add|modify|remove|suspend|resume|renew|return) against offers or existing assets/entitlements
+    - Order validation (catalog membership, eligibility, configuration, availability, credit/fraud checks)
+    - Price lock and payment authorization coordination
+    - Order orchestration (decomposition into fulfillment plans; saga with compensation)
+    - Order amendments and cancellations
+  excludes:
+    - Quote negotiation (DOM-QTE); order may be created from accepted quote
+    - Execution of fulfillment steps (DOM-FUL, DOM-SDL, DOM-LOG)
+    - Payment processing (DOM-PAY), invoicing (DOM-BIL)
+
+responsibilities:
+  - The single record of what was ordered, at what agreed price, under which terms.
+  - Exactly-once handoff of order lines to downstream contexts.
+  - Consistent order status derived from downstream progress.
+
+principles: [PRIN-002, PRIN-003, PRIN-006, PRIN-008, PRIN-015]
+
+boundaries:
+  upstream: [DOM-OFR, DOM-CAT, DOM-PRC, DOM-AVL, DOM-QTE, DOM-PTY, DOM-FRD, DOM-PAY, DOM-CTX]
+  downstream: [DOM-FUL, DOM-SDL, DOM-ENT, DOM-CTR, DOM-BIL, DOM-INV, DOM-REV, DOM-ANL]
+
+ownership:
+  boundedContext: transaction
+  owningRole: Chief Product Architect
+  service: order-service
+  schema: ucos_transaction
+
+capabilities:
+  - {id: ORD-C1, name: Cart, description: "Mutable basket with continuous repricing and validation."}
+  - {id: ORD-C2, name: Place order, description: "Validate, lock price, reserve inventory, authorize payment, accept."}
+  - {id: ORD-C3, name: Orchestrate, description: "Decompose into fulfillment plan per line using decomposition rules; track progress."}
+  - {id: ORD-C4, name: In-life change, description: "Orders acting on existing assets/entitlements (modify, move, upgrade)."}
+  - {id: ORD-C5, name: Amend/cancel, description: "Point-of-no-return aware amendments and cancellations with compensation."}
+  - {id: ORD-C6, name: Returns, description: "Return authorizations with refund/exchange decisions."}
+
+services:
+  - {name: CartService, kind: application, operations: [CreateCart, AddCartLine, UpdateCartLine, RemoveCartLine, PriceCart, ValidateCart]}
+  - {name: OrderCommandService, kind: application, operations: [PlaceOrder, AmendOrder, CancelOrder, CancelOrderLine, RequestReturn, RecordFulfillmentProgress]}
+  - {name: OrderValidator, kind: domain-service, contract: "validate(cart|order, ctx) -> violations[]; steps: membership (IsMember), configuration (Configurator), eligibility, availability, quantity limits rules, fraud/credit risk decision (DOM-FRD/FRK)"}
+  - {name: Decomposer, kind: domain-service, contract: "decompose(orderLine) -> FulfillmentPlan (DAG of tasks with owning context, dependencies, point-of-no-return flags); rules factKind order-decomposition keyed by offer/type/facet/action"}
+  - {name: OrderSaga, kind: process-manager, contract: "Drives PlaceOrder steps and plan execution with compensation (CIC-002-001 §5.4)"}
+  - {name: OrderQueryService, kind: application, operations: [GetCart, GetOrder, FindOrders, GetOrderTimeline, GetFulfillmentPlan]}
+
+aggregates:
+  - name: Cart
+    identity: "urn:ucos:<tenant>:cart:<ulid>"
+    invariants: ["INV-ORD-1: cart is owned by one party (or anonymous session) and one context vector snapshot; expires per policy order.cart-ttl."]
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: owner, type: "PartyUrn | sessionRef"}
+      - {name: context, type: ContextVector}
+      - {name: lines, type: "CartLine[]"}
+      - {name: lastPricing, type: "PriceResult summary + pricingSnapshotId"}
+      - {name: expiresAt, type: Instant}
+      - {name: revision, type: long}
+  - name: Order
+    identity: "urn:ucos:<tenant>:order:<ulid>"
+    invariants:
+      - "INV-ORD-2: once accepted, line prices equal the locked PriceResult (pricingSnapshotId) unless an amendment re-prices with approval."
+      - "INV-ORD-3: every accepted line has exactly one FulfillmentPlan; plan tasks are emitted exactly once (outbox + task ids)."
+      - "INV-ORD-4: cancellation of a line past its point-of-no-return is rejected or converted to a return per policy."
+      - "INV-ORD-5: order status is derived: never set directly except by lifecycle transitions computed from line statuses."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: number, type: string}
+      - {name: customer, type: PartyUrn}
+      - {name: payer, type: "PartyUrn?"}
+      - {name: context, type: ContextVector}
+      - {name: lines, type: "OrderLine[]"}
+      - {name: pricing, type: "{pricingSnapshotId, totals, currency}"}
+      - {name: payment, type: "{authorizationRef?, method, status}"}
+      - {name: sourceRef, type: "cartRef | quoteRef | channelRef"}
+      - {name: contractRef, type: "InstanceUrn?"}
+      - {name: lifecycleState, type: string}
+      - {name: decisions, type: "DecisionRecord refs (fraud, credit, eligibility)"}
+      - {name: revision, type: long}
+
+entities:
+  - {name: CartLine, within: Cart, fields: [lineId, offerRef, configuration, quantity, "action", "targetRef?"]}
+  - {name: OrderLine, within: Order, fields: [lineId, "action (add|modify|remove|suspend|resume|renew|return)", offerRef@version, configuration, quantity, "targetRef? (asset/entitlement/subscription)", priceComponents, "fulfillmentPlanRef", status, "pointOfNoReturnReached", "requestedDate?", "shipTo/serviceAddress?"]}
+  - {name: FulfillmentPlan, within: Order, fields: [planId, lineId, "tasks: [{taskId, context, command, payload, dependsOn[], pointOfNoReturn, compensation, status}]"]}
+
+valueObjects:
+  - {name: OrderNumber, definition: "Human-readable per tenant sequence with check digit (policy order.numbering), distinct from ULID"}
+  - {name: LineStatus, definition: "pending|in-progress|completed|failed|cancelled|returned"}
+
+commands:
+  - {name: CreateCart, input: "{owner, context}", emits: [CartCreated]}
+  - {name: AddCartLine, input: "{cartId, offerRef, configuration, quantity, action?, targetRef?}", emits: [CartLineAdded]}
+  - {name: UpdateCartLine, input: "{cartId, lineId, patch}", emits: [CartLineUpdated]}
+  - {name: RemoveCartLine, input: "{cartId, lineId}", emits: [CartLineRemoved]}
+  - {name: PlaceOrder, input: "{cartId | quoteRef, payer?, paymentMethodRef?, idempotencyKey}", emits: [OrderSubmitted, OrderAccepted, OrderRejected], note: "Saga steps: validate -> price lock -> reserve inventory (DOM-INV) -> risk decision -> payment authorization (DOM-PAY) -> accept -> decompose -> emit plan tasks. Compensation: release reservations, void authorization."}
+  - {name: AmendOrder, input: "{orderId, expectedRevision, lineChanges[], reason}", emits: [OrderAmended], preconditions: ["affected lines before point-of-no-return", "re-price + approval if price increases > policy threshold"]}
+  - {name: CancelOrder, input: "{orderId, reason}", emits: [OrderCancellationRequested, OrderCancelled]}
+  - {name: CancelOrderLine, input: "{orderId, lineId, reason}", emits: [OrderLineCancelled]}
+  - {name: RequestReturn, input: "{orderId, lineId, quantity, reasonCode}", emits: [ReturnRequested], note: "Return authorization decided by policy order.returns; creates reverse fulfillment plan"}
+  - {name: RecordFulfillmentProgress, input: "{orderId, planId, taskId, status, details}", emits: [FulfillmentTaskProgressed, OrderLineStatusChanged, OrderCompleted], note: "Driven by downstream events, not by clients"}
+
+queries:
+  - {name: PriceCart, input: "{cartId}", output: PriceResult, note: "Delegates to DOM-PRC with cart context; caches pricingSnapshotId on cart"}
+  - {name: ValidateCart, input: "{cartId}", output: "violations[]"}
+  - {name: GetCart, input: "{id}", output: Cart}
+  - {name: GetOrder, input: "{id}", output: Order}
+  - {name: FindOrders, input: "{customer?, state?, from?, to?, cursor, limit}", output: "page"}
+  - {name: GetOrderTimeline, input: "{id}", output: "events + task progress ordered"}
+  - {name: GetFulfillmentPlan, input: "{orderId, lineId}", output: FulfillmentPlan}
+
+apis:
+  - {style: REST, path: "/v1/transaction/carts", methods: {POST: CreateCart}}
+  - {style: REST, path: "/v1/transaction/carts/{id}", methods: {GET: GetCart}}
+  - {style: REST, path: "/v1/transaction/carts/{id}/lines", methods: {POST: AddCartLine}}
+  - {style: REST, path: "/v1/transaction/carts/{id}/lines/{lineId}", methods: {PATCH: UpdateCartLine, DELETE: RemoveCartLine}}
+  - {style: REST, path: "/v1/transaction/carts/{id}:price", methods: {POST: PriceCart}}
+  - {style: REST, path: "/v1/transaction/carts/{id}:validate", methods: {POST: ValidateCart}}
+  - {style: REST, path: "/v1/transaction/orders", methods: {POST: PlaceOrder, GET: FindOrders}, note: "PlaceOrder returns 202 + Operation when async payment/risk steps exceed 2s"}
+  - {style: REST, path: "/v1/transaction/orders/{id}", methods: {GET: GetOrder, PATCH: AmendOrder}}
+  - {style: REST, path: "/v1/transaction/orders/{id}:cancel", methods: {POST: CancelOrder}}
+  - {style: REST, path: "/v1/transaction/orders/{id}/lines/{lineId}:cancel", methods: {POST: CancelOrderLine}}
+  - {style: REST, path: "/v1/transaction/orders/{id}/lines/{lineId}/returns", methods: {POST: RequestReturn}}
+  - {style: REST, path: "/v1/transaction/orders/{id}/timeline", methods: {GET: GetOrderTimeline}}
+  - {style: REST, path: "/v1/transaction/orders/{id}/lines/{lineId}/plan", methods: {GET: GetFulfillmentPlan}}
+
+events:
+  - {type: ucos.transaction.cart.created.v1, payload: "{id, owner, contextDigest}"}
+  - {type: ucos.transaction.cart.line-added.v1, payload: "{id, lineId, offerRef, quantity}"}
+  - {type: ucos.transaction.cart.line-updated.v1, payload: "{id, lineId}"}
+  - {type: ucos.transaction.cart.line-removed.v1, payload: "{id, lineId}"}
+  - {type: ucos.transaction.order.submitted.v1, payload: "{id, number, customer, sourceRef}"}
+  - {type: ucos.transaction.order.accepted.v1, payload: "{id, number, customer, payer, lines (offerRef@version, action, qty, price components), pricingSnapshotId, totals, contractRef, ucoscontext}", consumers: [fulfillment, entitlement, contract, billing, revenue, analytics]}
+  - {type: ucos.transaction.order.rejected.v1, payload: "{id, reasons[], decisionRefs[]}"}
+  - {type: ucos.transaction.order.amended.v1, payload: "{id, revision, lineChanges, repricing?}"}
+  - {type: ucos.transaction.order.cancellation-requested.v1, payload: "{id, reason}"}
+  - {type: ucos.transaction.order.cancelled.v1, payload: "{id, compensationSummary}"}
+  - {type: ucos.transaction.order.line-cancelled.v1, payload: "{id, lineId}"}
+  - {type: ucos.transaction.order.return-requested.v1, payload: "{id, lineId, quantity, reasonCode, rmaNumber}"}
+  - {type: ucos.transaction.order.fulfillment-task-issued.v1, payload: "{id, planId, taskId, context, command, payload}", note: "Command message published to ucos.cmd.<context>"}
+  - {type: ucos.transaction.order.fulfillment-task-progressed.v1, payload: "{id, planId, taskId, status}"}
+  - {type: ucos.transaction.order.line-status-changed.v1, payload: "{id, lineId, from, to}"}
+  - {type: ucos.transaction.order.completed.v1, payload: "{id, completedAt}"}
+
+stateMachines:
+  - name: OrderLifecycle
+    definition: "Interpreted ucos.std:lifecycle:order; status derived from lines (INV-ORD-5)"
+    initial: submitted
+    states: [submitted, validating, awaiting-payment, accepted, in-progress, partially-completed, completed, rejected, cancelling, cancelled, failed]
+    terminal: [completed, rejected, cancelled]
+    transitions:
+      - {from: submitted, to: validating, kind: automatic}
+      - {from: validating, to: rejected, trigger: "validation/risk violation"}
+      - {from: validating, to: awaiting-payment, trigger: "payment step required and asynchronous (3DS, bank redirect)"}
+      - {from: [validating, awaiting-payment], to: accepted, trigger: "all PlaceOrder saga steps succeeded"}
+      - {from: awaiting-payment, to: rejected, trigger: "authorization failed or timed out (timer)"}
+      - {from: accepted, to: in-progress, trigger: "first task issued"}
+      - {from: in-progress, to: partially-completed, trigger: "some lines completed, others pending"}
+      - {from: [in-progress, partially-completed], to: completed, trigger: "all lines terminal and >= 1 completed"}
+      - {from: [accepted, in-progress, partially-completed], to: cancelling, command: CancelOrder, guard: "no line past point-of-no-return or policy converts to return"}
+      - {from: cancelling, to: cancelled, trigger: "all compensations completed"}
+      - {from: [in-progress, partially-completed], to: failed, trigger: "task failed and no retry/fallback; requires ops intervention (fallout queue)"}
+      - {from: failed, to: in-progress, command: retry}
+
+rules:
+  - {id: RUL-ORD-1, statement: "Decomposition is metadata: rules of factKind order-decomposition map (offer/type/facet, action, context) to task templates; no product-specific code."}
+  - {id: RUL-ORD-2, statement: "Price lock validity: an accepted order never re-prices automatically; quote-sourced orders use the quote's pricingSnapshotId if the quote is valid."}
+  - {id: RUL-ORD-3, statement: "Tasks are idempotent commands identified by (orderId, taskId); downstream contexts dedupe."}
+  - {id: RUL-ORD-4, statement: "Fallout handling: failed tasks enter a fallout queue (DOM-ORC) with retry policy and manual resolution; SLA timers escalate."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:order.cart-ttl", purpose: "Cart expiry"}
+  - {urn: "urn:ucos:ucos.std:policy:order.validation-steps", purpose: "Which validation steps apply per context (e.g. credit check for B2B)"}
+  - {urn: "urn:ucos:ucos.std:policy:order.returns", purpose: "Return eligibility windows, refund vs exchange"}
+  - {urn: "urn:ucos:ucos.std:policy:order.amendment-approval", purpose: "Approval for amendments that increase price"}
+  - {urn: "urn:ucos:ucos.std:policy:order-decomposition.resolution", purpose: "ResolutionConfig for decomposition rules"}
+  - {urn: "urn:ucos:ucos.std:policy:order.numbering", purpose: "Order number format per tenant"}
+
+decisions:
+  - {id: DEC-ORD-1, question: "Can this order be accepted?", inputs: ["validation results", "risk decision", "payment authorization"], output: "accept|reject with reasons; DecisionRecord for adverse outcomes"}
+  - {id: DEC-ORD-2, question: "How is this line fulfilled?", algorithm: "Decomposer via order-decomposition rules (CIC-008-001)"}
+  - {id: DEC-ORD-3, question: "Can this line be cancelled?", inputs: ["point-of-no-return flags", "order.returns policy"], output: "cancel|convert-to-return|deny"}
+
+security:
+  permissions: [order.read, order.place, order.place.on-behalf, order.amend, order.cancel, order.return, order.admin]
+  dataClassification: "Confidential; contains personal data (addresses) encrypted; payment data never stored (tokens only)."
+  threats: ["Price tampering -> server-side pricing only; client totals ignored", "Order replay -> Idempotency-Key required; PlaceOrder dedupe", "Account takeover ordering -> risk decision + step-up for high-risk"]
+
+governance:
+  changeControl: "Decomposition rules and validation policies governed via ChangeSet."
+  evidence: "Risk and eligibility DecisionRecords linked; amendments with approvals evidenced."
+
+runtimeBehavior:
+  consistency: "Strong per order; saga eventual across contexts; outbox for all task issuance."
+  slo: {PlaceOrder_sync_p99_ms: 1500, PriceCart_p99_ms: 120, availability: "99.99%"}
+  scale: "5,000 orders/s per region peak; 10^10 orders lifetime."
+  failureModes: ["Pricing down: carts show last price with stale flag; PlaceOrder blocked", "Payment provider down: orders held in awaiting-payment until timer; policy may accept with deferred payment for trusted B2B", "Downstream context down: tasks queue in outbox/broker; order remains in-progress"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_transaction (orders event-sourced; carts state-stored with TTL)
+  tables:
+    - {name: carts, columns: "tenant_id uuid, id char(26), owner text, context jsonb, lines jsonb, last_pricing jsonb, expires_at timestamptz, revision bigint", pk: "(tenant_id, id)", indexes: ["(expires_at)"]}
+    - {name: orders, columns: "tenant_id uuid, id char(26), number text, customer text, state text, totals jsonb, pricing_snapshot_id text, created_at timestamptz, revision bigint", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, number)", "(tenant_id, customer, created_at desc)", "(tenant_id, state, created_at)"]}
+    - {name: order_lines, columns: "tenant_id, order_id, line_id, action, offer_ref, configuration jsonb, quantity numeric, price jsonb, status text, ponr bool", pk: "(tenant_id, order_id, line_id)"}
+    - {name: fulfillment_tasks, columns: "tenant_id, order_id, plan_id, task_id, context, command, payload jsonb, depends_on text[], ponr bool, status text, attempts int", pk: "(tenant_id, order_id, task_id)", indexes: ["(tenant_id, status) WHERE status IN ('pending','failed')"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "orders/order_lines hash(tenant_id) 64; event_store monthly; carts hash(tenant_id) 16."
+  retention: "Orders: financial retention (policy data.retention, min 10 years); carts deleted at expiry + 7 days."
+
+extensionModel:
+  extensionPoints: ["Line actions registry (new in-life change types)", "Decomposition task templates per context", "Validation step plugins (credit bureaus, export control screening)", "Order TypeDefinitions for industry-specific order attributes"]
+  forbidden: ["Product-specific orchestration code"]
+
+certificationCriteria:
+  - {id: CR-ORD-01, rule: "Saga failure injection at every PlaceOrder step leaves no orphan reservation or payment authorization (compensations verified).", level: L1}
+  - {id: CR-ORD-02, rule: "Exactly-once task issuance: crash between commit and publish never results in missing or duplicated tasks as observed by downstream (dedupe by taskId).", level: L1}
+  - {id: CR-ORD-03, rule: "Accepted order totals equal Price replay of pricingSnapshotId for 10^4 orders.", level: L1}
+  - {id: CR-ORD-04, rule: "Load: 5,000 PlaceOrder/s with p99 <= 1.5s (sync path, stub payment).", level: L2}
+validationRules:
+  - {id: VR-ORD-01, rule: "Every ucos.std type with facet Fulfillable/Deliverable/Entitling has decomposition rules for action add."}
+  - {id: VR-ORD-02, rule: "Every task template references a command declared in the target context's DOM spec."}

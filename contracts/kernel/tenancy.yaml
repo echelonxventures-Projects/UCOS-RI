@@ -1,0 +1,11 @@
+# Tenant identity in the ucos-lite profile (S0). Language-neutral so every implementation and the
+# conformance suites derive identical tenant ids. Later slices replace the static directory with DOM-RTM.
+id: S0-TENANCY
+version: 1.0.0
+traces: [CIC-003-001, CIC-005-001]
+tenantHeader: UCOS-Tenant
+slugPattern: "^[a-z][a-z0-9-]{1,62}$"
+staticDirectory:
+  algorithm: uuidv5            # RFC 9562 §5.5: tenant_id = UUIDv5(namespace, utf8(slug))
+  namespace: 6b2f1c52-0e5a-4d61-9a43-75636f73746e
+rlsSetting: ucos.tenant_id     # SET LOCAL per transaction; policies compare tenant_id to it

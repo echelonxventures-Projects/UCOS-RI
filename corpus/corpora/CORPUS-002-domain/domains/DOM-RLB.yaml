@@ -1,0 +1,197 @@
+header:
+  id: DOM-RLB
+  title: Reliability Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Systems Engineer
+  corpus: CORPUS-002
+  dependencies: [CIC-022-001, CIC-020-001, CIC-024-001, CIC-025-001, CIC-002-001]
+  traces: [PRIN-015, PRIN-012, CIC-022-001, CIC-020-001]
+  certification: [CR-RLB-01, CR-RLB-02, CR-RLB-03]
+  validation: [VR-RLB-01, VR-RLB-02]
+
+purpose: >
+  Make reliability explicit and enforced: SLO definitions (OpenSLO) derived from domain specs, error
+  budgets and their release consequences, chaos experiments and DR exercises with evidence, capacity
+  reviews, and reliability scorecards per context and cell.
+
+scope:
+  includes:
+    - SLO registry (from each DOM spec runtimeBehavior.slo) with SLIs, windows, targets
+    - Error budget accounting and budget policy enforcement (deployment gates)
+    - Chaos experiment catalog and runs (fault injection, cell kill, dependency outages)
+    - DR exercises per tier (CIC-020-001 §6) with RPO/RTO evidence
+    - Capacity reviews (CIC-025-001 §6) and peak readiness
+  excludes:
+    - Alert routing (DOM-MON), telemetry collection (DOM-OBS)
+
+responsibilities:
+  - Every spec SLO is codified and measured.
+  - Budget exhaustion freezes risky change automatically.
+  - Resilience claims backed by recurring evidence.
+
+principles: [PRIN-012, PRIN-015]
+
+boundaries:
+  upstream: [DOM-OBS, DOM-MON, DOM-RTM, DOM-FCS, DOM-TRC]
+  downstream: [DOM-MON, DOM-CRT, DOM-EVO, DOM-ORK, DOM-CMPL]
+
+ownership:
+  boundedContext: runtime
+  owningRole: Chief Systems Engineer
+  service: reliability-service
+  schema: ucos_runtime
+
+capabilities:
+  - {id: RLB-C1, name: SLOs, description: "Codify and measure SLOs."}
+  - {id: RLB-C2, name: Error budgets, description: "Account budgets; enforce budget policy."}
+  - {id: RLB-C3, name: Chaos, description: "Run controlled fault experiments."}
+  - {id: RLB-C4, name: DR exercises, description: "Execute and evidence DR per tier."}
+  - {id: RLB-C5, name: Capacity, description: "Capacity reviews and peak readiness."}
+
+services:
+  - {name: SloService, kind: application, operations: [SyncSlosFromCorpus, DefineSlo, GetErrorBudget]}
+  - {name: ChaosService, kind: application, operations: [DefineExperiment, RunExperiment, AbortExperiment]}
+  - {name: DrService, kind: application, operations: [ScheduleDrExercise, RecordDrExerciseResult]}
+  - {name: CapacityService, kind: application, operations: [RecordCapacityReview, ApprovePeakPlan]}
+  - {name: ReliabilityQueryService, kind: application, operations: [GetSlo, GetScorecard, CheckReleaseGate]}
+
+aggregates:
+  - name: Slo
+    identity: "urn:ucos:platform:slo:<context>/<name>"
+    invariants: ["INV-RLB-1: each DOM spec runtimeBehavior.slo entry has exactly one Slo; SLI query registered in signal catalog."]
+    fields:
+      - {name: context, type: string}
+      - {name: sli, type: "{kind: latency|availability|freshness|correctness, query}"}
+      - {name: target, type: "decimal (e.g. 0.999) or threshold"}
+      - {name: window, type: "P28D"}
+      - {name: sourceTrace, type: "DOM ID + key"}
+  - name: ChaosExperiment
+    identity: "urn:ucos:platform:chaos:<code>"
+    invariants: ["INV-RLB-2: blast radius declared (cell/context/tenant set), abort conditions defined; production runs only in canary cell or approved windows."]
+    fields:
+      - {name: fault, type: "pod-kill|network-latency|dependency-outage|cell-kill|clock-skew|disk-full|broker-partition"}
+      - {name: target, type: "cell/context"}
+      - {name: hypothesis, type: string}
+      - {name: abortConditions, type: "SLI thresholds"}
+      - {name: schedule, type: cron}
+  - name: DrExercise
+    identity: "urn:ucos:platform:dr-exercise:<ulid>"
+    fields:
+      - {name: tier, type: "T0|T1|T2"}
+      - {name: scope, type: "contexts/cells"}
+      - {name: measuredRpo, type: duration}
+      - {name: measuredRto, type: duration}
+      - {name: passed, type: boolean}
+      - {name: evidenceRef, type: InstanceUrn}
+
+entities:
+  - {name: ExperimentRun, within: ChaosExperiment, fields: [runId, startedAt, endedAt, outcome (hypothesis-held|violated|aborted), findings]}
+
+valueObjects:
+  - {name: ErrorBudget, definition: "{slo, window, allowedBadEvents, consumed, remainingPct, burnRate1h, burnRate6h}"}
+  - {name: GateDecision, definition: "{context, allowed, reason (budget-exhausted|active-incident|freeze)}"}
+
+commands:
+  - {name: SyncSlosFromCorpus, input: "{corpusRelease}", emits: [SlosSynced], note: "Creates/updates Slo per DOM spec SLO entry (VR-022-001-01)"}
+  - {name: DefineSlo, input: "Slo", emits: [SloDefined]}
+  - {name: DefineExperiment, input: "ChaosExperiment + changeSetRef", emits: [ChaosExperimentDefined]}
+  - {name: RunExperiment, input: "{code}", emits: [ChaosExperimentRan]}
+  - {name: AbortExperiment, input: "{code, runId, reason}", emits: [ChaosExperimentAborted]}
+  - {name: ScheduleDrExercise, input: "{tier, scope, at}", emits: [DrExerciseScheduled]}
+  - {name: RecordDrExerciseResult, input: "{id, measuredRpo, measuredRto, evidenceRef}", emits: [DrExerciseCompleted]}
+  - {name: RecordCapacityReview, input: "{cell, period, findings, actions}", emits: [CapacityReviewRecorded]}
+  - {name: ApprovePeakPlan, input: "{event, plan, approvalRef}", emits: [PeakPlanApproved]}
+
+queries:
+  - {name: GetSlo, input: "{context, name}", output: Slo}
+  - {name: GetErrorBudget, input: "{slo}", output: ErrorBudget}
+  - {name: GetScorecard, input: "{context?, cell?, window}", output: "{slos met, budget status, incidents, chaos results, dr results}"}
+  - {name: CheckReleaseGate, input: "{context}", output: GateDecision}
+
+apis:
+  - {style: REST, path: "/ops/v1/reliability/slos:sync", methods: {POST: SyncSlosFromCorpus}}
+  - {style: REST, path: "/ops/v1/reliability/slos", methods: {POST: DefineSlo}}
+  - {style: REST, path: "/ops/v1/reliability/slos/{context}/{name}", methods: {GET: GetSlo}}
+  - {style: REST, path: "/ops/v1/reliability/slos/{context}/{name}/budget", methods: {GET: GetErrorBudget}}
+  - {style: REST, path: "/ops/v1/reliability/chaos", methods: {POST: DefineExperiment}}
+  - {style: REST, path: "/ops/v1/reliability/chaos/{code}:run", methods: {POST: RunExperiment}}
+  - {style: REST, path: "/ops/v1/reliability/chaos/{code}/runs/{runId}:abort", methods: {POST: AbortExperiment}}
+  - {style: REST, path: "/ops/v1/reliability/dr-exercises", methods: {POST: ScheduleDrExercise}}
+  - {style: REST, path: "/ops/v1/reliability/dr-exercises/{id}/results", methods: {POST: RecordDrExerciseResult}}
+  - {style: REST, path: "/ops/v1/reliability/capacity-reviews", methods: {POST: RecordCapacityReview}}
+  - {style: REST, path: "/ops/v1/reliability/peak-plans", methods: {POST: ApprovePeakPlan}}
+  - {style: REST, path: "/ops/v1/reliability/scorecards", methods: {GET: GetScorecard}}
+  - {style: REST, path: "/ops/v1/reliability/release-gate/{context}", methods: {GET: CheckReleaseGate}}
+
+events:
+  - {type: ucos.runtime.slo.synced.v1, payload: "{corpusRelease, created, updated}"}
+  - {type: ucos.runtime.slo.defined.v1, payload: "{context, name}"}
+  - {type: ucos.runtime.error-budget.exhausted.v1, payload: "{slo, context}", consumers: [deployment gates]}
+  - {type: ucos.runtime.error-budget.recovered.v1, payload: "{slo, context}"}
+  - {type: ucos.runtime.chaos.experiment-defined.v1, payload: "{code, fault}"}
+  - {type: ucos.runtime.chaos.experiment-ran.v1, payload: "{code, runId, outcome}"}
+  - {type: ucos.runtime.chaos.experiment-aborted.v1, payload: "{code, runId, reason}"}
+  - {type: ucos.runtime.dr-exercise.scheduled.v1, payload: "{id, tier, at}"}
+  - {type: ucos.runtime.dr-exercise.completed.v1, payload: "{id, tier, passed, measuredRpo, measuredRto}", consumers: [compliance, certification (CR-020-001-04)]}
+  - {type: ucos.runtime.capacity-review.recorded.v1, payload: "{cell, period}"}
+  - {type: ucos.runtime.peak-plan.approved.v1, payload: "{event}"}
+
+stateMachines:
+  - name: ErrorBudgetState
+    initial: healthy
+    states: [healthy, at-risk, exhausted]
+    terminal: []
+    transitions:
+      - {from: healthy, to: at-risk, trigger: "remaining < 25%"}
+      - {from: at-risk, to: exhausted, trigger: "remaining <= 0 -> freeze feature releases for context"}
+      - {from: [at-risk, exhausted], to: healthy, trigger: "remaining >= 25% over rolling window"}
+
+rules:
+  - {id: RUL-RLB-1, statement: "CheckReleaseGate denies feature releases for a context with exhausted budget or active Sev1/2 incident; fixes flagged as such are allowed."}
+  - {id: RUL-RLB-2, statement: "Chaos runs abort automatically when abort conditions trip; findings become reliability backlog items with owners."}
+  - {id: RUL-RLB-3, statement: "DR exercises per tier at least quarterly; failure blocks L2/L3 certification renewals for affected modules."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:reliability.budget-policy", purpose: "Freeze rules and exemptions when budgets exhaust"}
+
+decisions:
+  - {id: DEC-RLB-1, question: "May context C release a feature now?", algorithm: "CheckReleaseGate per RUL-RLB-1"}
+
+security:
+  permissions: [reliability.read, reliability.slo.manage, reliability.chaos.run, reliability.dr.manage]
+  dataClassification: "Internal."
+  threats: ["Chaos in wrong scope -> declared blast radius + canary-only production policy"]
+
+governance:
+  changeControl: "Chaos experiments and budget policy via ChangeSet."
+  evidence: "DR and chaos results as Evidence."
+
+runtimeBehavior:
+  consistency: "Budgets computed every 5 min."
+  slo: {CheckReleaseGate_p99_ms: 100, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_runtime (separate tables)
+  tables:
+    - {name: slos, columns: "context, name, body jsonb", pk: "(context, name)", global: true}
+    - {name: error_budgets, columns: "context, name, window_end, consumed, remaining_pct, state", pk: "(context, name, window_end)", global: true}
+    - {name: chaos_experiments, columns: "code text pk, body jsonb", global: true}
+    - {name: chaos_runs, columns: "code, run_id, body jsonb", pk: "(code, run_id)", global: true}
+    - {name: dr_exercises, columns: "id text pk, body jsonb", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None."
+  retention: "3 years (evidence for certification)."
+
+extensionModel:
+  extensionPoints: ["Chaos engine adapters (Chaos Mesh, Litmus)", "SLO backends"]
+  forbidden: ["Unmeasured SLO claims"]
+
+certificationCriteria:
+  - {id: CR-RLB-01, rule: "Every DOM spec SLO maps to a measured Slo after SyncSlosFromCorpus (100% coverage).", level: L1}
+  - {id: CR-RLB-02, rule: "Exhausted budget blocks feature release in pipeline tests.", level: L1}
+  - {id: CR-RLB-03, rule: "Passes CIC-020-001 CR-020-001-04 (quarterly DR evidence).", level: L2}
+validationRules:
+  - {id: VR-RLB-01, rule: "Every bounded context has a DR tier (VR-020-001-01) and SLOs."}
+  - {id: VR-RLB-02, rule: "Every chaos experiment declares blast radius and abort conditions."}

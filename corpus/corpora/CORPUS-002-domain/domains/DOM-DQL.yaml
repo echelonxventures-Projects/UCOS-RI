@@ -1,0 +1,169 @@
+header:
+  id: DOM-DQL
+  title: Data Quality Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-008-001, CIC-003-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-004, PRIN-011]
+  certification: [CR-DQL-01, CR-DQL-02, CR-DQL-03]
+  validation: [VR-DQL-01, VR-DQL-02]
+
+purpose: >
+  Measure and improve the quality of commercial data — completeness, validity, consistency,
+  uniqueness, timeliness, accuracy — with declarative quality rules over aggregates and datasets,
+  scores per object/type/domain/tenant, quality gates (e.g. publish requires completeness), issue
+  queues, and resolution of data defects raised by resolvers (e.g. E-PRC-AMBIGUOUS).
+
+scope:
+  includes:
+    - Quality rules (fact kind quality-rule; CEL over resolved views or dataset queries) with dimensions and severity
+    - Continuous evaluation on events and scheduled dataset scans
+    - Quality scores and trends; quality gates consulted by lifecycle guards and publication
+    - Data issues (from rules, resolvers' ambiguity/no-price defects, consumers) with owners and SLAs
+  excludes:
+    - Schema validity (DOM-ONT enforces at write), master data matching (DOM-MDM)
+
+responsibilities:
+  - Visible, actionable quality for every governed type.
+  - Gates prevent low-quality publication where policy requires.
+  - Defects from runtime resolution are captured and routed.
+
+principles: [PRIN-001, PRIN-004, PRIN-011]
+
+boundaries:
+  upstream: [DOM-COB, DOM-PRC, DOM-CAT, DOM-PTY, DOM-LIN, DOM-CTX, DOM-RUL]
+  downstream: [DOM-COB, DOM-MDM, DOM-GOV, DOM-ANL, DOM-SRC]
+
+ownership:
+  boundedContext: data
+  owningRole: Chief Data Architect
+  service: data-quality-service
+  schema: ucos_data
+
+capabilities:
+  - {id: DQL-C1, name: Rules, description: "Define quality rules per type/dataset."}
+  - {id: DQL-C2, name: Evaluate, description: "Event-driven and scheduled evaluation."}
+  - {id: DQL-C3, name: Score, description: "Scores by object, type, domain, tenant, dimension."}
+  - {id: DQL-C4, name: Gates, description: "Expose gate decisions for lifecycle guards and publication."}
+  - {id: DQL-C5, name: Issues, description: "Issue lifecycle with owners and SLAs."}
+
+services:
+  - {name: DataQualityCommandService, kind: application, operations: [DefineQualityRule, RunQualityScan, RaiseDataIssue, AssignDataIssue, ResolveDataIssue]}
+  - {name: QualityEvaluator, kind: domain-service, contract: "evaluate(subject view | dataset, rules) -> findings per dimension; rules via CIC-008-001 (fact kind quality-rule); pure"}
+  - {name: DataQualityQueryService, kind: application, operations: [GetQualityScore, CheckQualityGate, FindDataIssues]}
+
+aggregates:
+  - name: QualityRule
+    identity: "urn:ucos:<namespace>:quality-rule:<name>@<semver>"
+    fields:
+      - {name: subject, type: "typeRef | datasetUrn"}
+      - {name: dimension, type: "completeness|validity|consistency|uniqueness|timeliness|accuracy"}
+      - {name: condition, type: "CEL (true = pass)"}
+      - {name: severity, type: "info|warning|error|blocker"}
+      - {name: scope, type: ApplicabilityScope}
+  - name: DataIssue
+    identity: "urn:ucos:<tenant>:data-issue:<ulid>"
+    invariants: ["INV-DQL-1: one open issue per (subject, ruleRef|defectCode); reoccurrence increments count."]
+    fields:
+      - {name: subject, type: Urn}
+      - {name: source, type: "rule|resolver-defect|consumer-report"}
+      - {name: ruleRef, type: "string?"}
+      - {name: defectCode, type: "string? (e.g. E-PRC-AMBIGUOUS, E-CTX-AMBIGUOUS, E-PRC-NO-PRICE)"}
+      - {name: severity, type: string}
+      - {name: owner, type: "PartyUrn?"}
+      - {name: occurrences, type: int}
+      - {name: status, type: "open|assigned|resolved|accepted"}
+
+entities:
+  - {name: QualityFinding, within: "evaluation results", fields: [subject, ruleRef, passed, evaluatedAt, detail]}
+
+valueObjects:
+  - {name: QualityScore, definition: "{subject|aggregateLevel, overall 0..100, byDimension, asOf}"}
+  - {name: GateDecision, definition: "{subject, gate, passed, blockingFindings[]}"}
+
+commands:
+  - {name: DefineQualityRule, input: "QualityRule + changeSetRef", emits: [QualityRuleDefined]}
+  - {name: RunQualityScan, input: "{scope, rules?}", emits: [QualityScanCompleted], async: true}
+  - {name: RaiseDataIssue, input: "{subject, source, ruleRef?, defectCode?, severity, detail}", emits: [DataIssueRaised]}
+  - {name: AssignDataIssue, input: "{id, owner}", emits: [DataIssueAssigned]}
+  - {name: ResolveDataIssue, input: "{id, resolution}", emits: [DataIssueResolved]}
+
+queries:
+  - {name: GetQualityScore, input: "{subject | {type, tenant} }", output: QualityScore}
+  - {name: CheckQualityGate, input: "{subject, gate}", output: GateDecision, note: "Called by lifecycle guards (e.g. COB approve) via CEL function ucos.dq.gate(subject, gate)"}
+  - {name: FindDataIssues, input: "{status?, severity?, owner?, defectCode?, cursor}", output: "page"}
+
+apis:
+  - {style: REST, path: "/v1/data-quality/rules", methods: {POST: DefineQualityRule}}
+  - {style: REST, path: "/v1/data-quality/scans", methods: {POST: RunQualityScan}}
+  - {style: REST, path: "/v1/data-quality/scores", methods: {GET: GetQualityScore}}
+  - {style: REST, path: "/v1/data-quality:gate", methods: {POST: CheckQualityGate}}
+  - {style: REST, path: "/v1/data-quality/issues", methods: {POST: RaiseDataIssue, GET: FindDataIssues}}
+  - {style: REST, path: "/v1/data-quality/issues/{id}:assign", methods: {POST: AssignDataIssue}}
+  - {style: REST, path: "/v1/data-quality/issues/{id}:resolve", methods: {POST: ResolveDataIssue}}
+
+events:
+  - {type: ucos.data.quality-rule.defined.v1, payload: "{urn, subject, dimension}"}
+  - {type: ucos.data.quality-scan.completed.v1, payload: "{scope, evaluated, failed}"}
+  - {type: ucos.data.data-issue.raised.v1, payload: "{id, subject, defectCode, severity}", consumers: [owners' work queues]}
+  - {type: ucos.data.data-issue.assigned.v1, payload: "{id, owner}"}
+  - {type: ucos.data.data-issue.resolved.v1, payload: "{id, resolution}"}
+
+stateMachines:
+  - name: DataIssueLifecycle
+    initial: open
+    states: [open, assigned, resolved, accepted]
+    terminal: [resolved, accepted]
+    transitions:
+      - {from: open, to: assigned, command: AssignDataIssue}
+      - {from: [open, assigned], to: resolved, command: ResolveDataIssue, guard: "resolution = fixed"}
+      - {from: [open, assigned], to: accepted, command: ResolveDataIssue, guard: "resolution = accepted-risk (non-blocker only)"}
+
+rules:
+  - {id: RUL-DQL-1, statement: "Resolvers raise DataIssues for conflict-strategy 'error' outcomes (CIC-011-001 §3.4) automatically, deduplicated by (subject, defectCode)."}
+  - {id: RUL-DQL-2, statement: "Blocker findings fail gates; gates are declared per type in policy data-quality.gates."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:data-quality.gates", purpose: "Gates per type and lifecycle transition (e.g. Product approve requires completeness >= 95)"}
+
+decisions:
+  - {id: DEC-DQL-1, question: "May subject S pass gate G?", algorithm: "Evaluate rules in gate; no blocker findings and score >= threshold"}
+
+security:
+  permissions: [data-quality.read, data-quality.rules.manage, data-quality.scan, data-quality.issue.manage]
+  dataClassification: "Findings reference subjects; detail excludes personal values."
+  threats: ["Gate bypass -> gates evaluated server-side in lifecycle guards"]
+
+governance:
+  changeControl: "Quality rules and gates via ChangeSet."
+  evidence: "Gate decisions recorded on approvals."
+
+runtimeBehavior:
+  consistency: "Event-driven evaluation p95 30s; scores eventual."
+  slo: {CheckQualityGate_p99_ms: 50, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_data (separate tables)
+  tables:
+    - {name: quality_rules, columns: "tenant_id, urn, body jsonb", pk: "(tenant_id, urn)"}
+    - {name: quality_findings, columns: "tenant_id, subject, rule_urn, passed, evaluated_at, detail jsonb", pk: "(tenant_id, subject, rule_urn)"}
+    - {name: quality_scores, columns: "tenant_id, subject_level, subject, overall, by_dimension jsonb, as_of", pk: "(tenant_id, subject_level, subject)"}
+    - {name: data_issues, columns: "tenant_id, id, subject, defect_code, rule_urn, severity, owner, occurrences, status", pk: "(tenant_id, id)", indexes: ["(tenant_id, status, severity)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "quality_findings hash(tenant_id) 32."
+  retention: "Findings current state only; issue history 2 years."
+
+extensionModel:
+  extensionPoints: ["Quality rule packs per industry", "Accuracy checks via verification plugins"]
+  forbidden: ["Silent auto-correction of data"]
+
+certificationCriteria:
+  - {id: CR-DQL-01, rule: "Gate failures block lifecycle transitions configured in data-quality.gates.", level: L1}
+  - {id: CR-DQL-02, rule: "Resolver ambiguity defects produce exactly one deduplicated issue.", level: L1}
+  - {id: CR-DQL-03, rule: "Scores equal recomputation from findings.", level: L1}
+validationRules:
+  - {id: VR-DQL-01, rule: "Every gate references existing rules."}
+  - {id: VR-DQL-02, rule: "Every ucos.std concrete type has completeness rules for required facets."}

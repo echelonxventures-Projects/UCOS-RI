@@ -1,0 +1,173 @@
+header:
+  id: DOM-CFT
+  title: Counterfeit Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Security Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-016-001, CIC-028-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-010, CIC-016-001, DOM-PRV]
+  certification: [CR-CFT-01, CR-CFT-02, CR-CFT-03]
+  validation: [VR-CFT-01, VR-CFT-02]
+
+plugin:
+  id: ucos.ext.counterfeit
+  isolation: I4
+  consumesPorts: [EventBusPort, SearchIndexPort]
+  providesApis: ["/v1/counterfeit/*"]
+  requiredPacks: ["ucos.std@^1.0"]
+
+purpose: >
+  Keep counterfeit and unauthorized goods out of commerce: authorized-seller registries per brand,
+  serial/lot authentication against provenance, listing screening for marketplaces, brand-owner
+  reporting and takedown workflows — producing RiskAssessments (riskType counterfeit) consumed by
+  listing moderation, sellability, and returns.
+
+scope:
+  includes:
+    - Brand protection programs (brand owner, protected objects, authorized sellers/distributors)
+    - Listing screening (seller authorization, price anomaly, image/text similarity via plugins)
+    - Item authentication (serial/lot verification against DOM-PRV and manufacturer registries)
+    - Takedown and appeal workflows (via DOM-WFL) with evidence
+    - Returns authentication (swap fraud detection for serialized items)
+  excludes:
+    - Listing lifecycle (DOM-MKT), provenance records (DOM-PRV), fraud (DOM-FRD)
+
+responsibilities:
+  - Only authorized sellers list protected brands where programs require it.
+  - Takedowns are evidence-backed and appealable.
+
+principles: [PRIN-005, PRIN-010]
+
+boundaries:
+  upstream: [DOM-MKT, DOM-PRV, DOM-TRST, DOM-INV, DOM-INT, DOM-SRC]
+  downstream: [DOM-MKT, DOM-AVL, DOM-FUL, DOM-DEC, DOM-ORK]
+
+ownership:
+  boundedContext: risk
+  owningRole: Chief Security Architect
+  service: counterfeit-service
+  schema: ucos_risk
+
+capabilities:
+  - {id: CFT-C1, name: Programs, description: "Brand protection programs and authorized sellers."}
+  - {id: CFT-C2, name: Screen, description: "Screen listings and sellers."}
+  - {id: CFT-C3, name: Authenticate, description: "Verify serials/lots and returned items."}
+  - {id: CFT-C4, name: Takedown, description: "Report, take down, appeal."}
+
+services:
+  - {name: CounterfeitCommandService, kind: application, operations: [CreateBrandProgram, AuthorizeSeller, RevokeSellerAuthorization, ReportInfringement, DecideTakedown]}
+  - {name: CounterfeitQueryService, kind: application, operations: [ScreenListing, AuthenticateItem, GetBrandProgram]}
+
+aggregates:
+  - name: BrandProgram
+    identity: "urn:ucos:<tenant>:brand-program:<ulid>"
+    invariants: ["INV-CFT-1: brand owner identity verified (DOM-TRST); protected objects referenced by URN or selector."]
+    fields:
+      - {name: brandOwner, type: PartyUrn}
+      - {name: protectedObjects, type: "Urn[] | selector"}
+      - {name: authorizedSellers, type: "[{seller, territories, validTo}]"}
+      - {name: enforcement, type: "block-unauthorized|review-unauthorized|monitor"}
+  - name: InfringementCase
+    identity: "urn:ucos:<tenant>:infringement:<ulid>"
+    fields:
+      - {name: listingRef, type: InstanceUrn}
+      - {name: reporter, type: PartyUrn}
+      - {name: evidenceRefs, type: "InstanceUrn[]"}
+      - {name: decision, type: "takedown|dismiss|escalate?"}
+      - {name: appeal, type: "{appellant, status}?"}
+      - {name: status, type: "reported|under-review|actioned|dismissed|appealed|closed"}
+
+entities: []
+
+valueObjects:
+  - {name: AuthenticationResult, definition: "{itemRef, serial, verdict: genuine|unknown|suspect|counterfeit, provenanceRef?, reasons[]}"}
+
+commands:
+  - {name: CreateBrandProgram, input: "BrandProgram", emits: [BrandProgramCreated]}
+  - {name: AuthorizeSeller, input: "{programId, seller, territories, validTo}", emits: [SellerAuthorizedForBrand]}
+  - {name: RevokeSellerAuthorization, input: "{programId, seller}", emits: [SellerBrandAuthorizationRevoked]}
+  - {name: ReportInfringement, input: "{listingRef, evidenceRefs}", emits: [InfringementReported]}
+  - {name: DecideTakedown, input: "{caseId, decision, reasonCode}", emits: [TakedownDecided]}
+
+queries:
+  - {name: ScreenListing, input: "{listing}", output: "RiskAssessment (riskType counterfeit)"}
+  - {name: AuthenticateItem, input: "{objectRef, serial?, lot?}", output: AuthenticationResult}
+  - {name: GetBrandProgram, input: "{id}", output: BrandProgram}
+
+apis:
+  - {style: REST, path: "/v1/counterfeit/programs", methods: {POST: CreateBrandProgram}}
+  - {style: REST, path: "/v1/counterfeit/programs/{id}", methods: {GET: GetBrandProgram}}
+  - {style: REST, path: "/v1/counterfeit/programs/{id}/authorized-sellers", methods: {POST: AuthorizeSeller}}
+  - {style: REST, path: "/v1/counterfeit/programs/{id}/authorized-sellers/{seller}", methods: {DELETE: RevokeSellerAuthorization}}
+  - {style: REST, path: "/v1/counterfeit/infringements", methods: {POST: ReportInfringement}}
+  - {style: REST, path: "/v1/counterfeit/infringements/{caseId}:decide", methods: {POST: DecideTakedown}}
+  - {style: REST, path: "/v1/counterfeit:screen-listing", methods: {POST: ScreenListing}}
+  - {style: REST, path: "/v1/counterfeit:authenticate", methods: {POST: AuthenticateItem}}
+
+events:
+  - {type: ucos.risk.brand-program.created.v1, payload: "{id, brandOwner}"}
+  - {type: ucos.risk.brand-program.seller-authorized.v1, payload: "{programId, seller}"}
+  - {type: ucos.risk.brand-program.seller-revoked.v1, payload: "{programId, seller}", consumers: [marketplace (re-screen listings)]}
+  - {type: ucos.risk.infringement.reported.v1, payload: "{caseId, listingRef}"}
+  - {type: ucos.risk.infringement.takedown-decided.v1, payload: "{caseId, decision}", consumers: [marketplace (end/pause listing)]}
+  - {type: ucos.risk.counterfeit.assessed.v1, payload: "{decisionRef, listingRef, band}"}
+
+stateMachines:
+  - name: InfringementLifecycle
+    initial: reported
+    states: [reported, under-review, actioned, dismissed, appealed, closed]
+    terminal: [closed]
+    transitions:
+      - {from: reported, to: under-review, kind: automatic}
+      - {from: under-review, to: actioned, command: DecideTakedown, guard: "takedown"}
+      - {from: under-review, to: dismissed, command: DecideTakedown, guard: "dismiss"}
+      - {from: actioned, to: appealed, command: appeal}
+      - {from: appealed, to: closed, trigger: "appeal resolved (DOM-DEC override path)"}
+      - {from: [actioned, dismissed], to: closed, trigger: "appeal window elapsed"}
+
+rules:
+  - {id: RUL-CFT-1, statement: "Programs with enforcement block-unauthorized make unauthorized sellers' listings of protected objects fail moderation (DOM-MKT)."}
+  - {id: RUL-CFT-2, statement: "Returned serialized items with serial mismatch are flagged suspect and routed to inspection before refund."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:risk.counterfeit.bands", purpose: "Counterfeit score bands and actions"}
+
+decisions:
+  - {id: DEC-CFT-1, question: "Is listing L likely counterfeit or unauthorized?", algorithm: "Seller authorization + provenance + similarity/price anomaly models -> band (risk.counterfeit.bands)"}
+
+security:
+  permissions: [counterfeit.read, counterfeit.program.manage, counterfeit.report, counterfeit.decide]
+  dataClassification: "Confidential."
+  threats: ["Abusive takedown reports by competitors -> verified brand owners + evidence + appeals"]
+
+governance:
+  changeControl: "Program enforcement levels via ChangeSet."
+  evidence: "Infringement evidence and decisions captured."
+
+runtimeBehavior:
+  consistency: "Screening inline with moderation; authorization changes trigger re-screens."
+  slo: {ScreenListing_p99_ms: 200, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_risk (separate tables)
+  tables:
+    - {name: brand_programs, columns: "tenant_id, id, brand_owner, body jsonb", pk: "(tenant_id, id)"}
+    - {name: authorized_sellers, columns: "tenant_id, program_id, seller, territories text[], valid_to", pk: "(tenant_id, program_id, seller)"}
+    - {name: infringement_cases, columns: "tenant_id, id, listing_ref, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None required."
+  retention: "Cases 5 years."
+
+extensionModel:
+  extensionPoints: ["Image/text similarity plugins", "Manufacturer serial registries"]
+  forbidden: ["Takedowns without evidence"]
+
+certificationCriteria:
+  - {id: CR-CFT-01, rule: "Unauthorized seller listings of protected objects are blocked under block-unauthorized (scenario test).", level: L1}
+  - {id: CR-CFT-02, rule: "Serial mismatch on returns flags suspect 100% on seeded cases.", level: L1}
+  - {id: CR-CFT-03, rule: "Plugin deploys as I4 with only declared ports.", level: L2}
+validationRules:
+  - {id: VR-CFT-01, rule: "Every program brand owner is a verified party."}
+  - {id: VR-CFT-02, rule: "Counterfeit bands policy exists (VR-016-001-01)."}

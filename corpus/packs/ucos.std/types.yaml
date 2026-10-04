@@ -1,0 +1,189 @@
+# ucos.std TypeDefinitions (DOM-ONT). Every commercial model below is DATA interpreted by the kernel
+# (PRIN-002, PRIN-019). Facet bindings: required facets must be configured on every instance;
+# optional facets may be enabled per instance (facetsConfig) or required by subtypes.
+types:
+  # ---------------- Commercial object hierarchy --------------------------------
+  - name: CommercialObject
+    abstract: true
+    kernel: true
+    label: {default: Commercial Object}
+    supertypes: []
+    facets: [{ref: Identifiable, required: true}]
+    lifecycle: commercial-object
+    identityStrategy: {naturalKeyAttributes: [sku], uniquenessScope: tenant}
+    allowedRelationships:
+      - {relType: VARIANT_OF, role: source, max: 1}
+      - {relType: REQUIRES, role: source}
+      - {relType: EXCLUDES, role: source}
+      - {relType: REPLACES, role: source}
+      - {relType: COMPATIBLE_WITH, role: source}
+      - {relType: ACCESSORY_OF, role: source}
+      - {relType: PROVIDES_CAPABILITY, role: source}
+
+  - name: Product
+    label: {default: Product}
+    supertypes: [CommercialObject]
+    facets: [{ref: Classifiable, required: true}, {ref: Priceable, required: true}, {ref: Fulfillable, required: true}, {ref: Stockable}, {ref: Shippable}, {ref: Transferable}, {ref: AgeRestricted}]
+    lifecycle: commercial-object
+
+  - name: Service
+    label: {default: Service}
+    supertypes: [CommercialObject]
+    facets: [{ref: Classifiable, required: true}, {ref: Priceable, required: true}, {ref: Fulfillable, required: true}, {ref: Deliverable, required: true}, {ref: Schedulable}, {ref: CapacityBound}]
+    lifecycle: commercial-object
+
+  - name: Subscription
+    label: {default: Subscription}
+    supertypes: [CommercialObject]
+    facets: [{ref: Classifiable, required: true}, {ref: Priceable, required: true}, {ref: Fulfillable, required: true}, {ref: Recurring, required: true}, {ref: Renewable, required: true}, {ref: Entitling, required: true}, {ref: Metered}, {ref: Tiered}]
+    lifecycle: commercial-object
+
+  - name: Membership
+    label: {default: Membership}
+    supertypes: [CommercialObject]
+    facets: [{ref: Classifiable, required: true}, {ref: Entitling, required: true}, {ref: Tiered, required: true}, {ref: Priceable}, {ref: Recurring}, {ref: Renewable}, {ref: Fulfillable}]
+    lifecycle: commercial-object
+
+  - name: License
+    label: {default: License}
+    supertypes: [CommercialObject]
+    facets: [{ref: Classifiable, required: true}, {ref: Priceable, required: true}, {ref: Fulfillable, required: true}, {ref: Entitling, required: true}, {ref: Metered}, {ref: Transferable}, {ref: Renewable}]
+    lifecycle: commercial-object
+
+  - name: Experience
+    label: {default: Experience}
+    supertypes: [CommercialObject]
+    facets: [{ref: Classifiable, required: true}, {ref: Priceable, required: true}, {ref: Fulfillable, required: true}, {ref: Schedulable, required: true}, {ref: CapacityBound, required: true}, {ref: AgeRestricted}]
+    attributes: [{ref: startsAt}, {ref: endsAt}, {ref: venueLocation}]
+    lifecycle: commercial-object
+
+  - name: Bundle
+    label: {default: Bundle}
+    supertypes: [CommercialObject]
+    facets: [{ref: Classifiable, required: true}, {ref: Priceable, required: true}, {ref: Fulfillable, required: true}, {ref: Composite, required: true}]
+    allowedRelationships: [{relType: COMPOSED_OF, role: source, min: 1}]
+    lifecycle: commercial-object
+
+  - name: Package
+    label: {default: Package}
+    description: {default: "Fixed composite sold as one unit with its own identity (e.g. travel package, starter kit)"}
+    supertypes: [Bundle]
+    facets: [{ref: Shippable}]
+    constraints: [{kind: cel, expression: "object.compositionMode == 'fixed'", messageKey: type.package.fixed}]
+    lifecycle: commercial-object
+
+  - name: Capability
+    label: {default: Capability}
+    description: {default: "A grantable ability (feature, access right, service level) referenced by entitlements"}
+    supertypes: [CommercialObject]
+    attributes: [{ref: capabilityKey, required: true}]
+    identityStrategy: {naturalKeyAttributes: [capabilityKey], uniquenessScope: tenant}
+    lifecycle: commercial-object
+
+  - name: Asset
+    label: {default: Asset}
+    description: {default: "An instance owned or used by a party after acquisition (installed base)"}
+    supertypes: [CommercialObject]
+    facets: [{ref: Serviceable, required: true}, {ref: Transferable}]
+    identityStrategy: {naturalKeyAttributes: [sku, serialNumber], uniquenessScope: tenant}
+    allowedRelationships: [{relType: OWNS_ASSET, role: target, min: 1, max: 1}, {relType: COMPOSED_OF, role: source}]
+    lifecycle: asset
+
+  # ---------------- Party hierarchy ---------------------------------------------
+  - name: Party
+    abstract: true
+    kernel: true
+    label: {default: Party}
+    supertypes: []
+    attributes: [{ref: displayName, required: true}]
+    lifecycle: party
+    allowedRelationships: [{relType: MEMBER_OF, role: source}, {relType: OWNS_ASSET, role: source}]
+
+  - name: Person
+    label: {default: Person}
+    supertypes: [Party]
+    attributes: [{ref: givenName}, {ref: familyName}, {ref: dateOfBirth}, {ref: nationalIdentifier}]
+    allowedRelationships: [{relType: EMPLOYED_BY, role: source}]
+    lifecycle: party
+
+  - name: Organization
+    label: {default: Organization}
+    supertypes: [Party]
+    attributes: [{ref: legalName, required: true}, {ref: registrationNumber}, {ref: taxIdentifier}, {ref: legalForm}, {ref: incorporationCountry}]
+    allowedRelationships: [{relType: PART_OF, role: source, max: 1}]
+    lifecycle: party
+
+  - name: OrganizationalUnit
+    label: {default: Organizational Unit}
+    supertypes: [Party]
+    allowedRelationships: [{relType: PART_OF, role: source, min: 1, max: 1}]
+    lifecycle: party
+
+  - name: Household
+    label: {default: Household}
+    supertypes: [Party]
+    lifecycle: party
+
+  - name: Group
+    label: {default: Group}
+    description: {default: "Any ad-hoc collection of parties (buying group, cohort, consortium)"}
+    supertypes: [Party]
+    lifecycle: party
+
+  - name: Agent
+    label: {default: Agent}
+    description: {default: "An AI or software agent acting as an economic actor on behalf of an accountable party"}
+    supertypes: [Party]
+    attributes: [{ref: agentModelRef}, {ref: accountableParty, required: true}]
+    lifecycle: party
+
+  - name: System
+    label: {default: System}
+    supertypes: [Party]
+    attributes: [{ref: systemEndpoint}]
+    lifecycle: party
+
+  # ---------------- Contract hierarchy ------------------------------------------
+  - name: Contract
+    abstract: true
+    label: {default: Contract}
+    supertypes: []
+    attributes: [{ref: governingLaw, required: true}, {ref: contractValue}]
+    allowedRelationships: [{relType: CALL_OFF_OF, role: source, max: 1}]
+    lifecycle: contract
+
+  - name: MasterAgreement
+    label: {default: Master Agreement}
+    supertypes: [Contract]
+    lifecycle: contract
+
+  - name: FrameworkAgreement
+    label: {default: Framework Agreement}
+    supertypes: [Contract]
+    lifecycle: contract
+
+  - name: SubscriptionAgreement
+    label: {default: Subscription Agreement}
+    supertypes: [Contract]
+    facets: [{ref: Renewable, required: true}]
+    lifecycle: contract
+
+  - name: LicenseAgreement
+    label: {default: License Agreement}
+    supertypes: [Contract]
+    facets: [{ref: Transferable, required: true}]
+    lifecycle: contract
+
+  - name: ServiceLevelAgreement
+    label: {default: Service Level Agreement}
+    supertypes: [Contract]
+    attributes: [{ref: slaMetrics, required: true}]
+    lifecycle: contract
+
+  # ---------------- Supply network ----------------------------------------------
+  - name: FulfillmentNode
+    label: {default: Fulfillment Node}
+    supertypes: []
+    attributes: [{ref: name, required: true}, {ref: nodeKind, required: true}, {ref: nodeLocation}, {ref: timezone, required: true}]
+    allowedRelationships: [{relType: NODE_PARENT, role: source, max: 1}]
+    lifecycle: resource

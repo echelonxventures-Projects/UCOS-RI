@@ -1,0 +1,33 @@
+# ucos.std ContextDimensions (DOM-CTX, CIC-011-001 §1.1). Markets, channels, territories, segments
+# exist only as values of these dimensions (PRIN-020, PRIN-021). weight: specificity weight;
+# precedence: default tie-break order (lower first, unique).
+dimensions:
+  - {code: tenant,           valueType: instance-ref,      valueSource: {kind: registry, ref: tenant-directory},              weight: 1,   precedence: 1,  required: true,  sensitivity: internal, derivedFrom: principal}
+  - {code: jurisdiction,     valueType: hierarchical-enum, valueSource: {kind: taxonomy, ref: ucos.std.jurisdictions},        hierarchy: BROADER, weight: 380, precedence: 2,  required: false, sensitivity: public}
+  - {code: contract,         valueType: instance-ref,      valueSource: {kind: instance, ref: Contract},                       weight: 850, precedence: 3,  required: false, sensitivity: confidential}
+  - {code: party,            valueType: instance-ref,      valueSource: {kind: party, ref: Party},                             weight: 900, precedence: 4,  required: false, sensitivity: personal, derivedFrom: principal}
+  - {code: organization,     valueType: hierarchical-enum, valueSource: {kind: party, ref: Organization},                      hierarchy: PART_OF, weight: 700, precedence: 5,  required: false, sensitivity: internal, derivedFrom: principal}
+  - {code: party-segment,    valueType: hierarchical-enum, valueSource: {kind: taxonomy, ref: ucos.std.party-segments},        hierarchy: BROADER, weight: 500, precedence: 6,  required: false, sensitivity: personal}
+  - {code: price-list-tier,  valueType: enum,              valueSource: {kind: taxonomy, ref: ucos.std.price-list-tiers},      weight: 400, precedence: 7,  required: false, sensitivity: internal}
+  - {code: campaign,         valueType: instance-ref,      valueSource: {kind: instance, ref: Campaign},                       weight: 450, precedence: 8,  required: false, sensitivity: internal}
+  - {code: offer,            valueType: instance-ref,      valueSource: {kind: instance, ref: Offer},                          weight: 420, precedence: 9,  required: false, sensitivity: internal}
+  - {code: market,           valueType: hierarchical-enum, valueSource: {kind: taxonomy, ref: ucos.std.markets},               hierarchy: BROADER, weight: 250, precedence: 10, required: false, sensitivity: public, default: global}
+  - {code: territory,        valueType: hierarchical-enum, valueSource: {kind: geo, ref: iso-3166},                            hierarchy: BROADER, weight: 300, precedence: 11, required: false, sensitivity: public}
+  - {code: geo,              valueType: hierarchical-enum, valueSource: {kind: geo, ref: ucos.std.geo-areas},                  hierarchy: BROADER, weight: 280, precedence: 12, required: false, sensitivity: public}
+  - {code: sales-org,        valueType: hierarchical-enum, valueSource: {kind: party, ref: OrganizationalUnit},                hierarchy: PART_OF, weight: 200, precedence: 13, required: false, sensitivity: internal}
+  - {code: channel,          valueType: hierarchical-enum, valueSource: {kind: taxonomy, ref: ucos.std.channels},              hierarchy: BROADER, weight: 180, precedence: 14, required: false, sensitivity: public}
+  - {code: touchpoint,       valueType: hierarchical-enum, valueSource: {kind: taxonomy, ref: ucos.std.touchpoints},           hierarchy: BROADER, weight: 160, precedence: 15, required: false, sensitivity: public}
+  - {code: fulfillment-node, valueType: hierarchical-enum, valueSource: {kind: instance, ref: FulfillmentNode},                hierarchy: NODE_PARENT, weight: 150, precedence: 16, required: false, sensitivity: internal}
+  - {code: currency,         valueType: enum,              valueSource: {kind: registry, ref: currencies},                     weight: 120, precedence: 17, required: false, sensitivity: public}
+  - {code: locale,           valueType: hierarchical-enum, valueSource: {kind: plugin, ref: cldr-locales},                     hierarchy: BROADER, weight: 100, precedence: 18, required: false, sensitivity: public, default: und}
+  - {code: role,             valueType: enum,              valueSource: {kind: taxonomy, ref: ucos.std.party-roles},           weight: 90,  precedence: 19, required: false, sensitivity: internal, derivedFrom: principal}
+  - {code: device,           valueType: enum,              valueSource: {kind: taxonomy, ref: ucos.std.device-classes},        weight: 60,  precedence: 20, required: false, sensitivity: internal}
+  - {code: time,             valueType: range,             valueSource: {kind: inline, ref: instant},                          weight: 50,  precedence: 21, required: true,  sensitivity: public, derivedFrom: request-asOf}
+
+# Seed context-derivation rules (fact kind context-derivation, CIC-011-001 §2 step 3)
+derivations:
+  - {id: derive-territory-from-geo, inputs: [geo], output: territory, authoritative: false, expression: "ucos.geo.country(ctx.geo)"}
+  - {id: derive-jurisdiction-from-territory, inputs: [territory], output: jurisdiction, authoritative: true, expression: "ucos.tax.jurisdictionOf(ctx.territory, ctx.geo)"}
+  - {id: derive-currency-from-territory, inputs: [territory], output: currency, authoritative: false, expression: "ucos.registry.defaultCurrency(ctx.territory)"}
+  - {id: derive-market-from-territory, inputs: [territory], output: market, authoritative: false, expression: "ucos.taxonomy.mappedTerm('ucos.std.markets', ctx.territory)"}
+  - {id: derive-locale-from-territory, inputs: [territory], output: locale, authoritative: false, expression: "ucos.cldr.likelyLocale(ctx.territory)"}

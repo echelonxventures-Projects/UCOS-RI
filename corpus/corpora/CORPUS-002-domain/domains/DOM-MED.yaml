@@ -1,0 +1,166 @@
+header:
+  id: DOM-MED
+  title: Media Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-014-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-006, PRIN-014]
+  certification: [CR-MED-01, CR-MED-02, CR-MED-03]
+  validation: [VR-MED-01, VR-MED-02]
+
+purpose: >
+  Manage digital assets that describe and sell commercial things — images, video, 3D/AR models,
+  spec sheets, manuals, audio — with renditions, metadata, usage rights, context-specific variants
+  (per market, channel, locale), and fast delivery through a CDN, referenced by binary-ref attributes.
+
+scope:
+  includes:
+    - MediaAsset aggregate (original + renditions, technical metadata, descriptive metadata, alt text as LocalizedText)
+    - Upload (resumable), virus/malware scanning, rendition pipelines (resize, format conversion, transcoding)
+    - Usage rights (license, expiry, territories, channels) via DOM-RGT checks for third-party assets
+    - Delivery via signed or public CDN URLs; per-context variant resolution
+  excludes:
+    - Documents (DOM-DOC), attribute binding of media to objects (DOM-COB 'media' attribute values)
+
+responsibilities:
+  - Safe, scanned, rights-cleared assets only in published contexts.
+  - Accessible metadata (alt text) required for public images.
+  - Fast delivery with correct renditions per device.
+
+principles: [PRIN-001, PRIN-006, PRIN-014]
+
+boundaries:
+  upstream: [DOM-RGT, DOM-LOC, DOM-SEC]
+  downstream: [DOM-COB, DOM-CAT, DOM-DOC, DOM-DST, DOM-SRC]
+
+ownership:
+  boundedContext: content
+  owningRole: Chief Platform Architect
+  service: media-service
+  schema: ucos_content
+
+capabilities:
+  - {id: MED-C1, name: Ingest, description: "Upload, scan, extract metadata."}
+  - {id: MED-C2, name: Renditions, description: "Generate renditions and transcodes."}
+  - {id: MED-C3, name: Rights, description: "Track usage rights; block expired/unlicensed use."}
+  - {id: MED-C4, name: Deliver, description: "CDN URLs and context variant resolution."}
+
+services:
+  - {name: MediaCommandService, kind: application, operations: [InitiateUpload, CompleteUpload, UpdateMediaMetadata, GenerateRenditions, SetUsageRights, RetireMediaAsset]}
+  - {name: RenditionPipeline, kind: application, contract: "Rendition profiles (metadata) -> jobs (image: AVIF/WebP/JPEG sizes; video: HLS/DASH ladders; 3D: glTF/USDZ); outputs digest-addressed"}
+  - {name: MediaQueryService, kind: application, operations: [GetMediaAsset, ResolveMediaVariant, GetDeliveryUrl]}
+
+aggregates:
+  - name: MediaAsset
+    identity: "urn:ucos:<tenant>:media:<ulid>"
+    invariants:
+      - "INV-MED-1: status ready only after malware scan clean and required renditions generated."
+      - "INV-MED-2: public images require altText in default locale."
+      - "INV-MED-3: third-party assets require usage rights covering every context they are published in."
+    fields:
+      - {name: kind, type: "image|video|audio|model-3d|document-binary"}
+      - {name: original, type: "{contentRef, mediaType, size, digest}"}
+      - {name: renditions, type: "[{profile, contentRef, mediaType, width?, height?, bitrate?, digest}]"}
+      - {name: altText, type: LocalizedText}
+      - {name: caption, type: LocalizedText}
+      - {name: variants, type: "[{scope: ApplicabilityScope, replacementAssetRef}]"}
+      - {name: rights, type: "{owner: tenant|third-party, licenseRef?, territories?, channels?, expiresAt?}"}
+      - {name: status, type: "uploading|scanning|processing|ready|quarantined|retired"}
+
+entities: []
+
+valueObjects:
+  - {name: DeliveryUrl, definition: "{url, expiresAt?, cacheKey}"}
+
+commands:
+  - {name: InitiateUpload, input: "{kind, mediaType, size, digest}", emits: [MediaUploadInitiated], note: "Returns resumable upload URL (tus)"}
+  - {name: CompleteUpload, input: "{id}", emits: [MediaUploaded]}
+  - {name: UpdateMediaMetadata, input: "{id, altText?, caption?, variants?}", emits: [MediaMetadataUpdated]}
+  - {name: GenerateRenditions, input: "{id, profiles?}", emits: [MediaRenditionsGenerated], async: true}
+  - {name: SetUsageRights, input: "{id, rights}", emits: [MediaRightsSet]}
+  - {name: RetireMediaAsset, input: "{id}", emits: [MediaAssetRetired], note: "CDN purge by surrogate key"}
+
+queries:
+  - {name: GetMediaAsset, input: "{id}", output: MediaAsset}
+  - {name: ResolveMediaVariant, input: "{id, context}", output: "asset id applicable in context (CIC-011-001 over variants)"}
+  - {name: GetDeliveryUrl, input: "{id, profile, context}", output: DeliveryUrl}
+
+apis:
+  - {style: REST, path: "/v1/media/assets", methods: {POST: InitiateUpload}}
+  - {style: REST, path: "/v1/media/assets/{id}", methods: {GET: GetMediaAsset, PATCH: UpdateMediaMetadata}}
+  - {style: REST, path: "/v1/media/assets/{id}:complete-upload", methods: {POST: CompleteUpload}}
+  - {style: REST, path: "/v1/media/assets/{id}/renditions", methods: {POST: GenerateRenditions}}
+  - {style: REST, path: "/v1/media/assets/{id}/rights", methods: {PUT: SetUsageRights}}
+  - {style: REST, path: "/v1/media/assets/{id}:retire", methods: {POST: RetireMediaAsset}}
+  - {style: REST, path: "/v1/media/assets/{id}/variant", methods: {GET: ResolveMediaVariant}}
+  - {style: REST, path: "/v1/media/assets/{id}/url", methods: {GET: GetDeliveryUrl}}
+
+events:
+  - {type: ucos.content.media.upload-initiated.v1, payload: "{id, kind}"}
+  - {type: ucos.content.media.uploaded.v1, payload: "{id, digest}"}
+  - {type: ucos.content.media.metadata-updated.v1, payload: "{id}"}
+  - {type: ucos.content.media.renditions-generated.v1, payload: "{id, profiles}"}
+  - {type: ucos.content.media.rights-set.v1, payload: "{id, expiresAt}"}
+  - {type: ucos.content.media.ready.v1, payload: "{id}", consumers: [catalog, search, distribution feeds]}
+  - {type: ucos.content.media.quarantined.v1, payload: "{id, reason}"}
+  - {type: ucos.content.media.retired.v1, payload: "{id}"}
+
+stateMachines:
+  - name: MediaAssetLifecycle
+    initial: uploading
+    states: [uploading, scanning, processing, ready, quarantined, retired]
+    terminal: [retired]
+    transitions:
+      - {from: uploading, to: scanning, command: CompleteUpload}
+      - {from: scanning, to: processing, trigger: "scan clean"}
+      - {from: scanning, to: quarantined, trigger: "malware detected"}
+      - {from: processing, to: ready, trigger: "required renditions generated and INV-MED-2/3 satisfied"}
+      - {from: ready, to: quarantined, trigger: "rights expired or abuse report"}
+      - {from: quarantined, to: ready, command: SetUsageRights}
+      - {from: [ready, quarantined], to: retired, command: RetireMediaAsset}
+
+rules:
+  - {id: RUL-MED-1, statement: "Rights expiry moves assets to quarantined and purges CDN; objects referencing them fall back to the next variant or placeholder."}
+  - {id: RUL-MED-2, statement: "EXIF/location metadata is stripped from public renditions (privacy)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:media.rendition-profiles", purpose: "Required renditions per kind and channel"}
+
+decisions:
+  - {id: DEC-MED-1, question: "Which asset variant shows in context C?", algorithm: "CIC-011-001 over variants (fact kind media-variant), fallback to original"}
+
+security:
+  permissions: [media.read, media.upload, media.manage, media.rights.manage]
+  dataClassification: "Public once ready (unless private assets for B2B contexts: signed URLs)."
+  threats: ["Malware uploads -> scanning before processing", "Hotlink abuse -> signed URLs for private assets, CDN rate limits"]
+
+governance:
+  changeControl: "Rendition profiles via ChangeSet."
+  evidence: "License documents linked to rights."
+
+runtimeBehavior:
+  consistency: "Eventual processing; CDN purge within 60s on retire/quarantine."
+  slo: {GetDeliveryUrl_p99_ms: 10, image_rendition_p95_s: 10, availability: "99.99% (CDN)"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_content (separate tables) + object storage + CDN
+  tables:
+    - {name: media_assets, columns: "tenant_id, id, kind, body jsonb, status, rights_expires_at", pk: "(tenant_id, id)", indexes: ["(tenant_id, status)", "(rights_expires_at)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 32."
+  retention: "Retired originals deleted after 90 days unless referenced by legal documents."
+
+extensionModel:
+  extensionPoints: ["Rendition processors (plugins)", "DAM connectors via DOM-DXC", "AI alt-text suggestion (human-approved)"]
+  forbidden: ["Serving unscanned assets"]
+
+certificationCriteria:
+  - {id: CR-MED-01, rule: "Malware test files are quarantined 100%.", level: L1}
+  - {id: CR-MED-02, rule: "Rights expiry quarantines and purges within 60s (time-travel test).", level: L1}
+  - {id: CR-MED-03, rule: "Public renditions contain no EXIF GPS data.", level: L1}
+validationRules:
+  - {id: VR-MED-01, rule: "Every rendition profile referenced exists."}
+  - {id: VR-MED-02, rule: "Every public image in reference fixtures has alt text."}

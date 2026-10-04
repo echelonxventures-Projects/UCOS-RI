@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-ucos-id": "urn:ucos:ucos.kernel:schema:money@1.0.0",
+  "title": "Money",
+  "description": "Money(amountMinor, currency, scale) per CIC-001-001 \u00a75.3.",
+  "type": "object",
+  "required": [
+    "amountMinor",
+    "currency",
+    "scale"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "amountMinor": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)$",
+      "description": "Integer amount in minor units, as a string (arbitrary precision)."
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$|^X-[A-Z0-9-]+$"
+    },
+    "scale": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18
+    }
+  }
+}

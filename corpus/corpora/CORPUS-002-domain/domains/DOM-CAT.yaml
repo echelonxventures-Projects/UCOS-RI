@@ -1,0 +1,203 @@
+header:
+  id: DOM-CAT
+  title: Catalog Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-005, CIC-011-001, CIC-007-001, CIC-002-001]
+  traces: [PRIN-006, PRIN-017, PRIN-018, PRIN-020, PRIN-021, CIC-011-005]
+  certification: [CR-CAT-01, CR-CAT-02, CR-CAT-03]
+  validation: [VR-CAT-01, VR-CAT-02]
+
+purpose: >
+  Define which commercial objects are presented, to whom, where, and how they are navigated —
+  as context-scoped catalogs composed from explicit lists, selectors, and other catalogs, with any
+  number of navigation hierarchies — without storing prices, stock, or product data.
+
+scope:
+  includes:
+    - Catalog definitions (sources, scope, eligibility, inclusion/exclusion rules)
+    - Navigation hierarchies (nodes with selectors and scopes) as HIER subgraphs
+    - Membership materialization (CIC-011-005 §3)
+    - Merchandising ordering rules (fact kind catalog-ordering)
+    - Catalog publication lifecycle and preview
+  excludes:
+    - Commercial object data (DOM-COB), prices (DOM-PRC), availability (DOM-AVL)
+    - Offers and promotions (DOM-OFR, DOM-CMP)
+    - Full-text search and facets (DOM-SRC consumes catalog membership)
+
+responsibilities:
+  - Correct, context-resolved catalog membership with bounded lag.
+  - Composability without cycles.
+  - Never expose objects outside visible lifecycle categories.
+
+principles: [PRIN-006, PRIN-017, PRIN-018, PRIN-020, PRIN-021, PRIN-016]
+
+boundaries:
+  upstream: [DOM-COB, DOM-CLS, DOM-TXO, DOM-REL, DOM-CTX, DOM-POL, DOM-RUL, DOM-PRC, DOM-AVL]
+  downstream: [DOM-SRC, DOM-OFR, DOM-ORD, DOM-QTE, DOM-MKT, DOM-RCM]
+
+ownership:
+  boundedContext: catalog
+  owningRole: Chief Product Architect
+  service: catalog-service
+  schema: ucos_catalog
+
+capabilities:
+  - {id: CAT-C1, name: Define catalog, description: "Sources, scope, eligibility policy, inclusion/exclusion rules."}
+  - {id: CAT-C2, name: Navigation, description: "Multiple navigation hierarchies per catalog; nodes with selectors."}
+  - {id: CAT-C3, name: Materialize membership, description: "Incremental membership maintenance from events."}
+  - {id: CAT-C4, name: Resolve, description: "Context-resolved catalog pages with optional price/availability enrichment."}
+  - {id: CAT-C5, name: Preview, description: "Resolve a draft catalog in a hypothetical context and time (asOf)."}
+
+services:
+  - {name: CatalogCommandService, kind: application, operations: [CreateCatalog, ReviseCatalog, SubmitCatalog, PublishCatalog, RetireCatalog, CreateNavigationNode, MoveNavigationNode, RemoveNavigationNode]}
+  - {name: MembershipMaterializer, kind: application, contract: "Consumes cob/classification/rel events; maintains catalog_membership; generation swap on definition change"}
+  - {name: SelectorCompiler, kind: domain-service, contract: "compile(CEL selector) -> program + dependency set (attributes, taxonomies, relTypes)"}
+  - {name: CatalogQueryService, kind: application, operations: [ResolveCatalog, GetCatalog, FindCatalogs, GetNavigation, PreviewCatalog, IsMember]}
+
+aggregates:
+  - name: Catalog
+    identity: "urn:ucos:<tenant>:catalog:<ulid>"
+    invariants:
+      - "INV-CAT-1: catalog-source composition graph is acyclic."
+      - "INV-CAT-2: every selector compiles and references existing attributes/taxonomies/relTypes."
+      - "INV-CAT-3: published catalogs are immutable per version; edits create a new version published by generation swap."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: code, type: string}
+      - {name: label, type: LocalizedText}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: priority, type: int}
+      - {name: sources, type: "CatalogSource[]"}
+      - {name: inclusionRules, type: "RuleUrn[]"}
+      - {name: exclusionRules, type: "RuleUrn[]"}
+      - {name: eligibilityPolicyRef, type: "MetadataUrn?"}
+      - {name: navigationRoots, type: "NavigationNodeRef[]"}
+      - {name: lifecycleState, type: string}
+      - {name: version, type: int}
+      - {name: generation, type: long}
+      - {name: revision, type: long}
+
+entities:
+  - {name: CatalogSource, within: Catalog, fields: ["kind (explicit|selector|catalog)", ref, includeDescendants, "explicitObjects[]"]}
+  - {name: NavigationNode, within: Catalog, fields: [nodeId, label, "parent (via HIER relationship)", ordinal, "selector?", "scope?", "media?", "seo {slug: LocalizedText}"]}
+  - {name: MembershipEntry, within: "projection", fields: [catalogId, objectId, validFrom, validTo, "source (explicit|selector|catalog:<id>)", generation]}
+
+valueObjects:
+  - {name: Selector, definition: "CEL boolean over {object: resolved view (universal context), classifications: Term[], relations: map<relType, urn[]>}"}
+  - {name: CatalogPage, definition: "{items: [{objectRef, view, price?, availability?, nodeRefs[]}], facets?, nextCursor}"}
+
+commands:
+  - {name: CreateCatalog, input: "{code, label, scope, sources[], eligibilityPolicyRef?, validFrom, validTo?, priority, changeSetRef?}", emits: [CatalogCreated]}
+  - {name: ReviseCatalog, input: "{id, expectedRevision, patch}", emits: [CatalogRevised]}
+  - {name: SubmitCatalog, input: "{id}", emits: [CatalogSubmitted], preconditions: ["INV-CAT-1,2"]}
+  - {name: PublishCatalog, input: "{id, approvalRef, effectiveAt?}", emits: [CatalogPublished], note: "Triggers materialization of new generation; swap when complete"}
+  - {name: RetireCatalog, input: "{id, reason}", emits: [CatalogRetired]}
+  - {name: CreateNavigationNode, input: "{catalogId, parentNodeId?, label, ordinal, selector?, scope?}", emits: [NavigationNodeCreated]}
+  - {name: MoveNavigationNode, input: "{catalogId, nodeId, newParentNodeId, ordinal}", emits: [NavigationNodeMoved]}
+  - {name: RemoveNavigationNode, input: "{catalogId, nodeId}", emits: [NavigationNodeRemoved]}
+
+queries:
+  - {name: ResolveCatalog, input: "{catalogRef?, nodeId?, context, include: [price, availability, facets], filter?, sort?, cursor, limit<=100}", output: CatalogPage, algorithm: "CIC-011-005 §2"}
+  - {name: GetCatalog, input: "{id, version?}", output: Catalog}
+  - {name: FindCatalogs, input: "{scope filter?, state?, cursor, limit}", output: "page"}
+  - {name: GetNavigation, input: "{catalogRef, context, depth<=4}", output: "navigation tree (localized)"}
+  - {name: PreviewCatalog, input: "{draftId, context, asOf}", output: CatalogPage}
+  - {name: IsMember, input: "{objectRef, context}", output: "{member: bool, catalogs[]}", note: "Used by order validation"}
+
+apis:
+  - {style: REST, path: "/v1/catalog/catalogs", methods: {POST: CreateCatalog, GET: FindCatalogs}}
+  - {style: REST, path: "/v1/catalog/catalogs/{id}", methods: {GET: GetCatalog, PATCH: ReviseCatalog}}
+  - {style: REST, path: "/v1/catalog/catalogs/{id}:submit", methods: {POST: SubmitCatalog}}
+  - {style: REST, path: "/v1/catalog/catalogs/{id}:publish", methods: {POST: PublishCatalog}}
+  - {style: REST, path: "/v1/catalog/catalogs/{id}:retire", methods: {POST: RetireCatalog}}
+  - {style: REST, path: "/v1/catalog/catalogs/{id}:preview", methods: {POST: PreviewCatalog}}
+  - {style: REST, path: "/v1/catalog/catalogs/{id}/nodes", methods: {POST: CreateNavigationNode}}
+  - {style: REST, path: "/v1/catalog/catalogs/{id}/nodes/{nodeId}:move", methods: {POST: MoveNavigationNode}}
+  - {style: REST, path: "/v1/catalog/catalogs/{id}/nodes/{nodeId}", methods: {DELETE: RemoveNavigationNode}}
+  - {style: REST, path: "/v1/catalog:resolve", methods: {GET: ResolveCatalog}, cache: "Public contexts cacheable at T3 with surrogate keys catalog:<id>, object:<id>"}
+  - {style: REST, path: "/v1/catalog/navigation", methods: {GET: GetNavigation}}
+  - {style: REST, path: "/v1/catalog:is-member", methods: {POST: IsMember}}
+
+events:
+  - {type: ucos.catalog.catalog.created.v1, payload: "{id, code, scope}"}
+  - {type: ucos.catalog.catalog.revised.v1, payload: "{id, revision}"}
+  - {type: ucos.catalog.catalog.submitted.v1, payload: "{id}"}
+  - {type: ucos.catalog.catalog.published.v1, payload: "{id, version, effectiveAt}"}
+  - {type: ucos.catalog.catalog.retired.v1, payload: "{id}"}
+  - {type: ucos.catalog.navigation.node-created.v1, payload: "{catalogId, nodeId, parentNodeId}"}
+  - {type: ucos.catalog.navigation.node-moved.v1, payload: "{catalogId, nodeId, newParentNodeId}"}
+  - {type: ucos.catalog.navigation.node-removed.v1, payload: "{catalogId, nodeId}"}
+  - {type: ucos.catalog.membership.changed.v1, payload: "{catalogId, generation, added[], removed[] (batched <= 1000)}", consumers: [search, recommendations, CDN purge]}
+  - {type: ucos.catalog.membership.generation-swapped.v1, payload: "{catalogId, fromGeneration, toGeneration, size}"}
+
+stateMachines:
+  - name: CatalogLifecycle
+    initial: draft
+    states: [draft, in-review, approved, materializing, published, retired]
+    terminal: [retired]
+    transitions:
+      - {from: draft, to: in-review, command: SubmitCatalog}
+      - {from: in-review, to: draft, command: ReviseCatalog}
+      - {from: in-review, to: approved, trigger: "ChangeSet approved"}
+      - {from: approved, to: materializing, command: PublishCatalog}
+      - {from: materializing, to: published, trigger: "generation complete and validated; swap"}
+      - {from: published, to: materializing, command: PublishCatalog, note: "new version"}
+      - {from: published, to: retired, command: RetireCatalog}
+
+rules:
+  - {id: RUL-CAT-1, statement: "Membership visible-state filter uses lifecycle categories (catalog.visible-states), never state codes."}
+  - {id: RUL-CAT-2, statement: "Selectors are evaluated against universal-context views; context-dependent visibility uses exclusion rules resolved at request time."}
+  - {id: RUL-CAT-3, statement: "No global unscoped fallback catalog (CIC-011-005 §4)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:catalog.resolution", purpose: "ResolutionConfig for catalog fact kind"}
+  - {urn: "urn:ucos:ucos.std:policy:catalog.visible-states", purpose: "Visible lifecycle categories by party relation"}
+  - {urn: "urn:ucos:ucos.std:policy:catalog-exclusion.resolution", purpose: "ResolutionConfig for exclusions (cardinality many)"}
+  - {urn: "urn:ucos:ucos.std:policy:catalog.eligibility", purpose: "Default eligibility (e.g. B2B catalogs only for parties with buyer role in organization)"}
+
+decisions:
+  - {id: DEC-CAT-1, question: "Which catalogs and members apply to this party in this context?", algorithm: "CIC-011-005 §2"}
+  - {id: DEC-CAT-2, question: "Is object X sellable through a catalog in context C?", algorithm: "IsMember over materialized membership + exclusions"}
+
+security:
+  permissions: [catalog.read, catalog.author, catalog.publish, catalog.preview]
+  dataClassification: "Public catalogs public; B2B/contract catalogs confidential (eligibility-guarded)."
+  threats: ["Catalog leakage via search -> search index stores catalog ACL keys; queries filtered by eligible catalogs"]
+
+governance:
+  changeControl: "Publication requires ChangeSet; membership changes from data updates are not governed (they derive from governed definitions)."
+  evidence: "Preview snapshot diff (added/removed counts) attached to ChangeSet."
+
+runtimeBehavior:
+  consistency: "Membership eventual, p99 5s lag; ResolveCatalog snapshot per request."
+  slo: {ResolveCatalog_page_p99_ms: 150, IsMember_p99_ms: 10, availability: "99.95%"}
+  scale: "10^4 catalogs per tenant; 10^8 membership rows per tenant."
+
+persistenceModel:
+  store: PostgreSQL schema ucos_catalog
+  tables:
+    - {name: catalogs, columns: "tenant_id uuid, id char(26), code text, body jsonb, scope jsonb, state text, version int, generation bigint, revision bigint", pk: "(tenant_id, id)"}
+    - {name: navigation_nodes, columns: "tenant_id, catalog_id, node_id, parent_node_id, ordinal text, body jsonb", pk: "(tenant_id, catalog_id, node_id)"}
+    - {name: catalog_membership, columns: "tenant_id uuid, catalog_id char(26), generation bigint, object_id char(26), valid_from timestamptz, valid_to timestamptz, source text", pk: "(tenant_id, catalog_id, generation, object_id)", indexes: ["(tenant_id, object_id, catalog_id)"]}
+    - {name: selector_dependencies, columns: "tenant_id, catalog_id, dependency_kind, dependency_ref", pk: "(tenant_id, dependency_kind, dependency_ref, catalog_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "catalog_membership hash(tenant_id) 64 then list(generation parity) to allow cheap swap/drop."
+  retention: "Old generations dropped 24h after swap."
+
+extensionModel:
+  extensionPoints: ["Custom source kinds via plugins (e.g. supplier feed catalogs)", "Ordering rule effect kinds", "Navigation node attributes via ontology"]
+  forbidden: ["Storing prices/stock in catalog", "Fixed category trees in code"]
+
+certificationCriteria:
+  - {id: CR-CAT-01, rule: "Passes CIC-011-005 CR-011-005-01..03.", level: L1}
+  - {id: CR-CAT-02, rule: "Generation swap is atomic: concurrent readers never observe a mix of generations within one page sequence.", level: L1}
+  - {id: CR-CAT-03, rule: "Membership lag p99 <= 5s at 5,000 object changes/s.", level: L2}
+validationRules:
+  - {id: VR-CAT-01, rule: "Every catalog in reference data has a non-empty scope or explicit universal flag."}
+  - {id: VR-CAT-02, rule: "Every policy listed exists in ucos.std pack."}

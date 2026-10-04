@@ -1,0 +1,222 @@
+header:
+  id: DOM-PTY
+  title: Party Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-000-002, CIC-002-001, CIC-003-001, CIC-011-001]
+  traces: [PRIN-001, PRIN-002, PRIN-007, PRIN-017, PRIN-014]
+  certification: [CR-PTY-01, CR-PTY-02, CR-PTY-03, CR-PTY-04]
+  validation: [VR-PTY-01, VR-PTY-02]
+
+purpose: >
+  Hold the single record of every actor that participates in commerce — persons, organizations,
+  organizational units, households, AI agents as economic actors, systems, and groups — with their
+  roles, contact mechanisms, and consents, independent of whether they buy, sell, supply, regulate, or partner.
+
+scope:
+  includes:
+    - Party (kind is ontology-typed: Person, Organization, OrganizationalUnit, Household, Agent, System, Group; extensible)
+    - PartyRole (customer, supplier, partner, reseller, employee, regulator, beneficiary, payer, … — metadata)
+    - Contact mechanisms (postal, email, phone, digital endpoints) with purpose and validity
+    - Party-to-party relationships via DOM-REL (employment, membership, ownership, household, account hierarchy)
+    - Consent and communication preferences (personal data purposes; enforcement in DOM-PRI)
+    - Duplicate detection and merge/unmerge (with DOM-MDM)
+  excludes:
+    - Authentication identities (DOM-IDN)
+    - Legal-entity verification artifacts (DOM-EVD / DOM-TRST via KYC/KYB plugins)
+    - Delegated authority to act (DOM-AUTH)
+    - Commercial accounts with balances (DOM-BIL)
+
+responsibilities:
+  - Single source of truth for parties (PRIN-001) — no customer/supplier/partner tables elsewhere.
+  - Lawful processing of personal data (encryption, purpose binding, erasure) together with DOM-PRI.
+  - Survivorship-preserving merges with complete lineage.
+
+principles: [PRIN-001, PRIN-002, PRIN-007, PRIN-014, PRIN-016, PRIN-017]
+
+boundaries:
+  upstream: [DOM-ONT, DOM-REL, DOM-PRI, DOM-MDM, DOM-GEO]
+  downstream: [DOM-IDN, DOM-ORG, DOM-AUTH, DOM-CTR, DOM-ORD, DOM-BIL, DOM-CTX, DOM-MKT, DOM-FRD]
+
+ownership:
+  boundedContext: party
+  owningRole: Chief Data Architect
+  service: party-service
+  schema: ucos_party
+
+capabilities:
+  - {id: PTY-C1, name: Register party, description: "Create a party of any party type with validated attributes."}
+  - {id: PTY-C2, name: Assign roles, description: "Time-bounded, context-scoped party roles."}
+  - {id: PTY-C3, name: Contact management, description: "Contact mechanisms with purposes, verification, and validity."}
+  - {id: PTY-C4, name: Consent, description: "Record consent grants/withdrawals per purpose with evidence."}
+  - {id: PTY-C5, name: Match & merge, description: "Detect duplicates, merge with survivorship rules, unmerge."}
+  - {id: PTY-C6, name: Segment, description: "Expose party-segment dimension values (computed by segmentation rules or plugins)."}
+
+services:
+  - {name: PartyCommandService, kind: application, operations: [RegisterParty, UpdatePartyAttributes, AssignPartyRole, EndPartyRole, AddContactMechanism, VerifyContactMechanism, EndContactMechanism, RecordConsent, WithdrawConsent, MergeParties, UnmergeParty, ErasePartyPersonalData]}
+  - {name: PartyMatcher, kind: domain-service, contract: "candidates(party) -> [{partyRef, score, matchedRules}] using blocking keys + probabilistic (Fellegi-Sunter) weights from policy party.matching"}
+  - {name: SurvivorshipEngine, kind: domain-service, contract: "merge(parties[], survivorshipRules) -> golden attributes with per-attribute source lineage"}
+  - {name: PartyQueryService, kind: application, operations: [GetParty, FindParties, ResolvePartyView, GetPartyRoles, GetConsents, FindMatchCandidates]}
+
+aggregates:
+  - name: Party
+    kernel: true
+    identity: "urn:ucos:<tenant>:party:<ulid>"
+    invariants:
+      - "INV-PTY-1: typeRef is a published subtype of ucos.std Party; attributes validate against its EffectiveSchema."
+      - "INV-PTY-2: role assignments for the same (roleType, scope) do not overlap in time."
+      - "INV-PTY-3: a merged party is read-only and redirects (mergedInto) to the survivor; chains are collapsed to depth 1."
+      - "INV-PTY-4: consents are append-only; current consent per purpose = latest event by effectiveAt."
+      - "INV-PTY-5: personal attributes are stored encrypted under the party's subject key."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: typeRef, type: MetadataUrn}
+      - {name: displayName, type: "LocalizedText (personal for persons)"}
+      - {name: values, type: "AttributeValue[] (ontology-typed; e.g. legalName, dateOfBirth, registrationNumber)"}
+      - {name: roles, type: "PartyRole[]"}
+      - {name: contacts, type: "ContactMechanism[]"}
+      - {name: consents, type: "Consent[]"}
+      - {name: status, type: string}
+      - {name: mergedInto, type: "InstanceUrn?"}
+      - {name: subjectKeyId, type: string}
+      - {name: homeRegion, type: RegionCode}
+      - {name: revision, type: long}
+
+entities:
+  - {name: PartyRole, within: Party, fields: [roleId, roleTypeRef, "scope (ApplicabilityScope, e.g. organization, market)", validFrom, validTo, attributes]}
+  - {name: ContactMechanism, within: Party, fields: [contactId, "kind (postal|email|phone|url|messaging|endpoint)", "value (encrypted when personal)", "purposes[] (billing|shipping|marketing|legal|support|…)", verified, verifiedAt, validFrom, validTo, preferred]}
+  - {name: Consent, within: Party, fields: [consentId, purposeRef, "status (granted|withdrawn|denied)", effectiveAt, expiresAt, "collectionPoint (channel/touchpoint)", evidenceRef, policyVersionRef]}
+
+valueObjects:
+  - {name: PostalAddress, definition: "ISO 19160 / UPU S42 compatible: {lines[], locality, adminArea, postalCode, country (ISO 3166-1), geo?: GeoPoint}; formatting via CLDR/libaddressinput metadata"}
+  - {name: PhoneNumber, definition: "E.164 string"}
+  - {name: EmailAddress, definition: "RFC 5322 addr-spec, IDNA-normalized domain"}
+  - {name: PersonName, definition: "{given, family, middle[], prefix, suffix, fullOverride?, script}; display assembled per locale"}
+  - {name: MatchScore, definition: "decimal 0..1 + matchedRules[]"}
+
+commands:
+  - {name: RegisterParty, input: "{typeRef, values[], roles[]?, contacts[]?, idempotencyKey}", emits: [PartyRegistered], note: "Runs PartyMatcher; if score >= policy auto-link threshold returns 409 E-PTY-PROBABLE-DUPLICATE with candidates unless force=true"}
+  - {name: UpdatePartyAttributes, input: "{id, expectedRevision, set[], unset[]}", emits: [PartyAttributesChanged]}
+  - {name: AssignPartyRole, input: "{id, roleTypeRef, scope, validFrom, validTo?, attributes?}", emits: [PartyRoleAssigned]}
+  - {name: EndPartyRole, input: "{id, roleId, validTo}", emits: [PartyRoleEnded]}
+  - {name: AddContactMechanism, input: "{id, contact}", emits: [ContactMechanismAdded]}
+  - {name: VerifyContactMechanism, input: "{id, contactId, proof (OTP digest | provider assertion)}", emits: [ContactMechanismVerified]}
+  - {name: EndContactMechanism, input: "{id, contactId, validTo}", emits: [ContactMechanismEnded]}
+  - {name: RecordConsent, input: "{id, purposeRef, status, collectionPoint, evidenceRef, policyVersionRef}", emits: [ConsentRecorded]}
+  - {name: WithdrawConsent, input: "{id, purposeRef, collectionPoint}", emits: [ConsentRecorded]}
+  - {name: MergeParties, input: "{survivorId, mergedIds[], survivorshipRulesRef?, reason}", emits: [PartiesMerged], preconditions: ["all parties same tenant", "PDP party.merge"]}
+  - {name: UnmergeParty, input: "{mergedId, reason}", emits: [PartyUnmerged], note: "Restores pre-merge state from event history; re-points relationships created before merge"}
+  - {name: ErasePartyPersonalData, input: "{id, legalBasis, requestRef}", emits: [PartyPersonalDataErased], note: "Crypto-shred subject key (CIC-003-001 §9); coordinated with DOM-PRI erasure workflow"}
+
+queries:
+  - {name: GetParty, input: "{id}", output: "Party (personal fields per PDP obligations)"}
+  - {name: ResolvePartyView, input: "{id, context}", output: "Context-resolved view (localized names, applicable roles, preferred contacts per purpose)"}
+  - {name: FindParties, input: "{typeRef?, roleType?, filter (non-personal fields or hashed exact-match on personal), cursor, limit}", output: "page"}
+  - {name: GetPartyRoles, input: "{id, asOf?, scope?}", output: "PartyRole[]"}
+  - {name: GetConsents, input: "{id, purposeRef?}", output: "current consent per purpose + history"}
+  - {name: FindMatchCandidates, input: "{candidate attributes | partyId}", output: "[{partyRef, score, matchedRules}]"}
+
+apis:
+  - {style: REST, path: "/v1/party/parties", methods: {POST: RegisterParty, GET: FindParties}}
+  - {style: REST, path: "/v1/party/parties/{id}", methods: {GET: GetParty, PATCH: UpdatePartyAttributes}}
+  - {style: REST, path: "/v1/party/parties/{id}/view", methods: {GET: ResolvePartyView}}
+  - {style: REST, path: "/v1/party/parties/{id}/roles", methods: {POST: AssignPartyRole, GET: GetPartyRoles}}
+  - {style: REST, path: "/v1/party/parties/{id}/roles/{roleId}:end", methods: {POST: EndPartyRole}}
+  - {style: REST, path: "/v1/party/parties/{id}/contacts", methods: {POST: AddContactMechanism}}
+  - {style: REST, path: "/v1/party/parties/{id}/contacts/{contactId}:verify", methods: {POST: VerifyContactMechanism}}
+  - {style: REST, path: "/v1/party/parties/{id}/contacts/{contactId}:end", methods: {POST: EndContactMechanism}}
+  - {style: REST, path: "/v1/party/parties/{id}/consents", methods: {POST: RecordConsent, GET: GetConsents}}
+  - {style: REST, path: "/v1/party/parties/{id}/consents:withdraw", methods: {POST: WithdrawConsent}}
+  - {style: REST, path: "/v1/party/parties:merge", methods: {POST: MergeParties}}
+  - {style: REST, path: "/v1/party/parties/{id}:unmerge", methods: {POST: UnmergeParty}}
+  - {style: REST, path: "/v1/party/parties/{id}:erase", methods: {POST: ErasePartyPersonalData}}
+  - {style: REST, path: "/v1/party/match-candidates", methods: {POST: FindMatchCandidates}}
+
+events:
+  - {type: ucos.party.party.registered.v1, payload: "{id, typeRef, nonPersonalValues, roles[]}", note: "Personal values omitted; consumers fetch with authorization"}
+  - {type: ucos.party.party.attributes-changed.v1, payload: "{id, revision, changedAttributeCodes[], nonPersonalValues}"}
+  - {type: ucos.party.party.role-assigned.v1, payload: "{id, roleId, roleTypeRef, scope, validFrom, validTo}"}
+  - {type: ucos.party.party.role-ended.v1, payload: "{id, roleId, validTo}"}
+  - {type: ucos.party.party.contact-added.v1, payload: "{id, contactId, kind, purposes}"}
+  - {type: ucos.party.party.contact-verified.v1, payload: "{id, contactId}"}
+  - {type: ucos.party.party.contact-ended.v1, payload: "{id, contactId}"}
+  - {type: ucos.party.party.consent-recorded.v1, payload: "{id, purposeRef, status, effectiveAt}", consumers: [privacy, marketing automation, communications]}
+  - {type: ucos.party.party.merged.v1, payload: "{survivorId, mergedIds[], lineage}"}
+  - {type: ucos.party.party.unmerged.v1, payload: "{mergedId, formerSurvivorId}"}
+  - {type: ucos.party.party.personal-data-erased.v1, payload: "{id, requestRef}"}
+
+stateMachines:
+  - name: PartyStatus
+    definition: "Interpreted LifecycleModel ucos.std:lifecycle:party (categories shown)"
+    initial: prospect
+    states: [prospect, active, inactive, blocked, merged, erased]
+    terminal: [merged, erased]
+    transitions:
+      - {from: prospect, to: active, command: activate, guard: "required attributes for active present"}
+      - {from: active, to: inactive, command: deactivate}
+      - {from: inactive, to: active, command: activate}
+      - {from: [prospect, active, inactive], to: blocked, command: block, policy: "party.block (fraud/sanctions/regulatory)"}
+      - {from: blocked, to: active, command: unblock, requires: "evidence"}
+      - {from: "*", to: merged, command: MergeParties}
+      - {from: "*", to: erased, command: ErasePartyPersonalData}
+
+rules:
+  - {id: RUL-PTY-1, statement: "Party kind differences (person vs organization vs agent) are expressed only via TypeDefinitions and facets; no code branches on party kind."}
+  - {id: RUL-PTY-2, statement: "Preferred contact for a purpose = verified, valid, preferred=true; else most recently verified valid; else none (never unverified for legal purposes)."}
+  - {id: RUL-PTY-3, statement: "Marketing contact requires current consent=granted for the purpose in the party's jurisdiction context (policy privacy.consent-requirements)."}
+  - {id: RUL-PTY-4, statement: "Merge survivorship per attribute: policy-defined source trust ranking, then most recently verified, then most recent."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:party.matching", purpose: "Blocking keys, weights, auto-link and review thresholds"}
+  - {urn: "urn:ucos:ucos.std:policy:party.survivorship", purpose: "Attribute survivorship rules"}
+  - {urn: "urn:ucos:ucos.std:policy:party.merge", purpose: "Authorization for merges and unmerges"}
+  - {urn: "urn:ucos:ucos.std:policy:party.block", purpose: "Who may block/unblock, required evidence"}
+  - {urn: "urn:ucos:ucos.std:policy:privacy.consent-requirements", purpose: "Purposes requiring consent per jurisdiction"}
+
+decisions:
+  - {id: DEC-PTY-1, question: "Is this a duplicate of an existing party?", algorithm: "PartyMatcher with party.matching thresholds; recorded as DecisionRecord type party-match when auto-linking"}
+  - {id: DEC-PTY-2, question: "Which value survives a merge?", algorithm: "SurvivorshipEngine per RUL-PTY-4"}
+  - {id: DEC-PTY-3, question: "May we contact this party for purpose P via channel C?", inputs: ["consent state", "contact verification", "privacy.consent-requirements"], output: "allow|deny"}
+
+security:
+  permissions: [party.read, party.read.personal, party.create, party.update, party.merge, party.block, party.erase, party.consent.record]
+  dataClassification: "Person attributes, contacts: personal (some sensitive-personal, e.g. date of birth, national IDs). Organization attributes: internal/public."
+  tenancy: "Parties are tenant-scoped; cross-tenant party sharing (marketplaces) via delegated read grants with field-level filtering."
+  threats: ["Enumeration -> FindParties never filters on plaintext personal fields; only keyed hash exact match with rate limits", "Mass export -> obligations cap page sizes for personal reads and require purpose header UCOS-Purpose"]
+
+governance:
+  changeControl: "Party TypeDefinitions and survivorship/matching policies via ChangeSet; merges above policy threshold count (bulk) require approval."
+  evidence: "Consents and blocks carry Evidence refs; merges store lineage."
+  audit: "All personal-data reads audited with purpose."
+
+runtimeBehavior:
+  consistency: "Strong per party; match index eventually consistent (p99 2s)."
+  slo: {GetParty_p99_ms: 20, RegisterParty_p99_ms: 200, FindMatchCandidates_p99_ms: 150, availability: "99.95%"}
+  scale: "10^9 parties per region."
+
+persistenceModel:
+  store: PostgreSQL schema ucos_party + match index (search projection with hashed tokens)
+  tables:
+    - {name: parties, columns: "tenant_id uuid, id char(26), type_urn text, status text, non_personal_values jsonb, personal_values_enc bytea, subject_key_id text, merged_into char(26), home_region text, revision bigint", pk: "(tenant_id, id)", indexes: ["(tenant_id, type_urn, status)", "(tenant_id, merged_into) WHERE merged_into IS NOT NULL"]}
+    - {name: party_roles, columns: "tenant_id, party_id, role_id, role_type, scope jsonb, valid_from, valid_to", pk: "(tenant_id, party_id, role_id)", indexes: ["(tenant_id, role_type, valid_from)"]}
+    - {name: contact_mechanisms, columns: "tenant_id, party_id, contact_id, kind, value_enc bytea, value_hash bytea, purposes text[], verified bool, valid_from, valid_to", pk: "(tenant_id, party_id, contact_id)", indexes: ["(tenant_id, kind, value_hash)"]}
+    - {name: consents, columns: "tenant_id, party_id, consent_id, purpose, status, effective_at, expires_at, evidence_ref", pk: "(tenant_id, party_id, consent_id)", indexes: ["(tenant_id, party_id, purpose, effective_at desc)"]}
+    - {name: event_store, columns: "standard (personal payload fields encrypted)"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 64; very large tenants in dedicated cell."
+  retention: "Personal data per DOM-PRI purpose retention; erasure via crypto-shred; non-personal history retained."
+
+extensionModel:
+  extensionPoints: ["New party types and role types (ontology)", "Matching plugins (ML matchers) returning MatchScore", "Verification plugins (KYC/KYB, email/phone verification)", "Segmentation plugins feeding party-segment dimension"]
+  forbidden: ["Duplicating party data into other contexts beyond URN + non-personal projection"]
+
+certificationCriteria:
+  - {id: CR-PTY-01, rule: "Merge/unmerge round trip restores byte-identical pre-merge party state and relationship endpoints for 10^4 random cases.", level: L1}
+  - {id: CR-PTY-02, rule: "Crypto-shred test (CR-003-001-05) passes for parties.", level: L1}
+  - {id: CR-PTY-03, rule: "Matching quality on reference dataset: precision >= 0.98 at auto-link threshold, recall >= 0.90 at review threshold.", level: L2}
+  - {id: CR-PTY-04, rule: "No party events contain personal attribute values in clear (schema + DLP scan).", level: L1}
+validationRules:
+  - {id: VR-PTY-01, rule: "Every party TypeDefinition marks personal attributes with sensitivity >= personal."}
+  - {id: VR-PTY-02, rule: "Every consent purpose referenced is registered in DOM-PRI purpose registry."}

@@ -1,0 +1,49 @@
+#!/bin/sh
+# UCOS-RI entry point (CIC-001-001 §1.1 rule 2). It only drives an OCI runtime with the Compose spec;
+# every toolchain runs inside digest-pinned containers. Override the runtime with UCOS_OCI=podman|nerdctl.
+set -eu
+cd "$(dirname "$0")"
+OCI="${UCOS_OCI:-docker}"
+UCOS_UID="$(id -u)"; UCOS_GID="$(id -g)"; export UCOS_UID UCOS_GID
+compose() { "$OCI" compose "$@"; }
+tools() { compose --profile tools run --rm --no-deps tools "$@"; }
+modules() { for m in domains/*/ucos-module.yaml; do dirname "$m"; done; }
+
+usage() {
+  cat <<USAGE
+usage: ./ucos <command>
+  verify        corpus lock + corpus validation + contract drift + contract lint + module manifests
+  gen           regenerate contracts from the vendored corpus
+  build         build tool and module images
+  test          run every module's unit/architecture tests (Containerfile 'test' stage)
+  up | down     start / stop and wipe the ucos-lite profile
+  conformance   start ucos-lite and run the black-box conformance suites
+  ci            verify, test, conformance, down
+  corpus-lock <tag> <commit>   rewrite corpus.lock after vendoring a new corpus release
+USAGE
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  verify)
+    compose --profile tools build tools
+    tools sh -c 'python tools/corpus_lock.py check &&
+      (cd corpus && python tools/validate.py) &&
+      python tools/gen_contracts.py --check && python tools/lint_contracts.py && python tools/check_modules.py' ;;
+  gen) compose --profile tools build tools && tools python tools/gen_contracts.py ;;
+  build) compose --profile tools build ;;
+  test)
+    for m in $(modules); do echo "== test $m"; "$OCI" build --target test -f "$m/Containerfile" "$m"; done ;;
+  up) compose --profile tools build && compose up -d echo ;;
+  down) compose --profile test down -v --remove-orphans ;;
+  conformance)
+    compose --profile tools build
+    compose up -d echo
+    compose --profile test run --rm conformance ;;
+  ci)
+    "$0" verify && "$0" test && status=0 && "$0" conformance || status=$?
+    [ "${status:-1}" -ne 0 ] && compose logs echo migrate 2>/dev/null | tail -100 || true
+    "$0" down; exit "${status:-1}" ;;
+  corpus-lock) tools python tools/corpus_lock.py write "$@" ;;
+  *) usage; [ -z "$cmd" ] || exit 2 ;;
+esac

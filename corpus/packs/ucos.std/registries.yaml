@@ -1,0 +1,175 @@
+# ucos.std contributed registry entries (CIC-029-001 §1).
+factKinds:
+  - {code: attribute-value,          owningContext: commercial-object, resolutionPolicy: cob.contextual-precedence,       regulated: false}
+  - {code: localized-variant,        owningContext: context,           resolutionPolicy: localized-variant.resolution,    regulated: false}
+  - {code: price-entry,              owningContext: pricing,           resolutionPolicy: price-entry.resolution,          regulated: false}
+  - {code: price-adjustment,         owningContext: pricing,           resolutionPolicy: price-adjustment.resolution,     regulated: false, effectKinds: [percent, amount, override, fixed-price, free-units]}
+  - {code: catalog,                  owningContext: catalog,           resolutionPolicy: catalog.resolution,              regulated: false}
+  - {code: catalog-exclusion,        owningContext: catalog,           resolutionPolicy: catalog-exclusion.resolution,    regulated: false, effectKinds: [exclude]}
+  - {code: catalog-ordering,         owningContext: catalog,           resolutionPolicy: catalog-ordering.resolution,     regulated: false, effectKinds: [pin, boost, bury]}
+  - {code: offer,                    owningContext: offer,             resolutionPolicy: offer.resolution,                regulated: false}
+  - {code: eligibility,              owningContext: offer,             resolutionPolicy: eligibility.resolution,          regulated: false, effectKinds: [allow, deny]}
+  - {code: configuration-constraint, owningContext: offer,             resolutionPolicy: configuration-constraint.resolution, regulated: false, effectKinds: [require, exclude, limit, default]}
+  - {code: sellability-rule,         owningContext: supply,            resolutionPolicy: sellability-rule.resolution,     regulated: true,  effectKinds: [allow, deny]}
+  - {code: context-derivation,       owningContext: context,           resolutionPolicy: context-derivation.resolution,   regulated: false, effectKinds: [derive]}
+  - {code: order-decomposition,      owningContext: transaction,       resolutionPolicy: order-decomposition.resolution,  regulated: false, effectKinds: [task-template]}
+  - {code: operating-role,           owningContext: party,             resolutionPolicy: operating-role.resolution,       regulated: true}
+  - {code: tax-rule,                 owningContext: finance,           resolutionPolicy: tax-rule.resolution,             regulated: true,  effectKinds: [rate, exempt, reverse-charge, out-of-scope, facilitator]}
+  - {code: posting-rule,             owningContext: finance,           resolutionPolicy: posting-rule.resolution,         regulated: true,  effectKinds: [journal-template, no-posting]}
+  - {code: revenue-pob-rule,         owningContext: revenue,           resolutionPolicy: revenue-pob-rule.resolution,     regulated: true,  effectKinds: [pob]}
+  - {code: settlement-rule,          owningContext: settlement,        resolutionPolicy: settlement-rule.resolution,      regulated: false, effectKinds: [settlement-item]}
+  - {code: cost-entry,               owningContext: finance,           resolutionPolicy: cost-entry.resolution,           regulated: false}
+  - {code: document-template,        owningContext: content,           resolutionPolicy: document-template.resolution,    regulated: false}
+  - {code: media-variant,            owningContext: content,           resolutionPolicy: media-variant.resolution,        regulated: false}
+  - {code: risk-rule,                owningContext: risk,              resolutionPolicy: risk-rule.resolution,            regulated: true,  effectKinds: [score, signal, band-override]}
+  - {code: quality-rule,             owningContext: data,              resolutionPolicy: quality-rule.resolution,         regulated: false, effectKinds: [finding]}
+  - {code: policy,                   owningContext: policy,            resolutionPolicy: policy.resolution,               regulated: true}
+
+meters:
+  - {code: api-calls,        unit: "{call}",   aggregation: sum}
+  - {code: data-volume,      unit: "GBy",      aggregation: sum}
+  - {code: storage-gb-month, unit: "GBy.mo",   aggregation: time-weighted-average}
+  - {code: voice-minutes,    unit: "min",      aggregation: sum}
+  - {code: messages,         unit: "{message}", aggregation: sum}
+  - {code: active-seats,     unit: "{seat}",   aggregation: max}
+  - {code: compute-hours,    unit: "h",        aggregation: sum}
+  - {code: ai-tokens,        unit: "{token}",  aggregation: sum}
+  - {code: transactions,     unit: "{transaction}", aggregation: count}
+
+purposes:
+  - {code: contract-performance, legalBases: [contract]}
+  - {code: billing,              legalBases: [contract, legal-obligation]}
+  - {code: shipping,             legalBases: [contract]}
+  - {code: support,              legalBases: [contract, legitimate-interest]}
+  - {code: fraud-prevention,     legalBases: [legitimate-interest, legal-obligation]}
+  - {code: legal-obligation,     legalBases: [legal-obligation]}
+  - {code: tax-determination,    legalBases: [legal-obligation]}
+  - {code: marketing-email,      legalBases: [consent]}
+  - {code: marketing-personalization, legalBases: [consent]}
+  - {code: analytics-aggregate,  legalBases: [legitimate-interest]}
+
+effectKinds:
+  - {kind: set-attribute,   dispatcher: in-transaction}
+  - {kind: emit-event,      dispatcher: outbox}
+  - {kind: send-command,    dispatcher: outbox}
+  - {kind: start-workflow,  dispatcher: automation}
+  - {kind: notify,          dispatcher: automation}
+  - {kind: attach-evidence, dispatcher: evidence}
+  - {kind: schedule,        dispatcher: lifecycle}
+
+requirementKinds: [approval, evidence, certification, checklist]
+
+evidenceKinds:
+  - {kind: approval,     retentionClass: standard}
+  - {kind: signature,    retentionClass: regulated}
+  - {kind: acceptance,   retentionClass: regulated}
+  - {kind: consent,      retentionClass: regulated}
+  - {kind: test-report,  retentionClass: standard}
+  - {kind: scan-report,  retentionClass: standard}
+  - {kind: sbom,         retentionClass: standard}
+  - {kind: attestation,  retentionClass: standard}
+  - {kind: document,     retentionClass: standard}
+  - {kind: log-segment,  retentionClass: regulated}
+  - {kind: decision-snapshot, retentionClass: regulated}
+
+reasonCodes:
+  - {code: R-ENT-SUSPENDED,        decisionTypes: [entitlement-check], messageKey: reason.ent.suspended}
+  - {code: R-ENT-QUOTA-EXHAUSTED,  decisionTypes: [entitlement-check], messageKey: reason.ent.quota}
+  - {code: R-AVL-EMBARGO,          decisionTypes: [availability],      messageKey: reason.avl.embargo}
+  - {code: R-AVL-AGE-RESTRICTED,   decisionTypes: [availability],      messageKey: reason.avl.age}
+  - {code: R-AVL-LICENCE-REQUIRED, decisionTypes: [availability],      messageKey: reason.avl.licence}
+  - {code: R-OFR-NOT-ELIGIBLE,     decisionTypes: [eligibility],       messageKey: reason.ofr.ineligible}
+  - {code: R-OFR-EXISTING-ENTITLEMENT-CONFLICT, decisionTypes: [eligibility], messageKey: reason.ofr.conflict}
+  - {code: R-ORD-RISK-HIGH,        decisionTypes: [order-acceptance],  messageKey: reason.ord.risk}
+  - {code: R-ORD-PAYMENT-DECLINED, decisionTypes: [order-acceptance],  messageKey: reason.ord.payment}
+  - {code: R-PAY-SOFT-DECLINE,     decisionTypes: [payment-routing],   messageKey: reason.pay.soft}
+  - {code: R-PAY-HARD-DECLINE,     decisionTypes: [payment-routing],   messageKey: reason.pay.hard}
+  - {code: R-CAT-NOT-ELIGIBLE,     decisionTypes: [catalog-eligibility], messageKey: reason.cat.ineligible}
+  - {code: R-QTE-DISCOUNT-LIMIT,   decisionTypes: [authorization],     messageKey: reason.qte.discountlimit}
+  - {code: R-AGT-SUGGEST-ONLY,     decisionTypes: [agent-action],      messageKey: reason.agt.suggestonly}
+
+taxonomies:
+  - {code: ucos.std.markets,          hierarchical: true,  seedTerms: [global]}
+  - {code: ucos.std.channels,         hierarchical: true,  seedTerms: [direct, direct.web, direct.app, direct.store, direct.call-center, indirect, indirect.reseller, indirect.marketplace, indirect.agent, machine, machine.api, machine.ai-agent]}
+  - {code: ucos.std.touchpoints,      hierarchical: true,  seedTerms: [browse, search, checkout, self-service, assisted]}
+  - {code: ucos.std.party-segments,   hierarchical: true,  seedTerms: [consumer, business, business.smb, business.enterprise, public-sector]}
+  - {code: ucos.std.price-list-tiers, hierarchical: false, seedTerms: [list, partner, wholesale, employee]}
+  - {code: ucos.std.party-roles,      hierarchical: false, seedTerms: [customer, buyer, payer, supplier, partner, reseller, employee, regulator, beneficiary, agent-principal]}
+  - {code: ucos.std.device-classes,   hierarchical: false, seedTerms: [desktop, mobile, tablet, kiosk, voice, headless]}
+  - {code: ucos.std.jurisdictions,    hierarchical: true,  seedTerms: [], note: "Populated by jurisdiction packs (country, subdivision, tax districts)"}
+  - {code: ucos.std.geo-areas,        hierarchical: true,  seedTerms: [], note: "ISO 3166-1/-2 plus tenant areas"}
+
+# Role definitions (DOM-AUTH RoleDefinition seeds). Permissions must be declared by some domain
+# spec's security.permissions (VR-AUTH-02); every role tested in CEL policies must be here (VR-AUTH-01).
+roles:
+  - {code: tenant-admin,        sensitivity: privileged, permissions: [packs.install, packs.uninstall, organization.read, authority.role.assign]}
+  - {code: platform-admin,      sensitivity: privileged, permissions: [cob.create, cob.update, organization.tenant.manage]}
+  - {code: platform-architect,  sensitivity: privileged, permissions: [ontology.type.author, ontology.type.publish, ontology.namespace.admin]}
+  - {code: platform-governance, sensitivity: privileged, permissions: [policy.author.platform, policy.publish, packs.publish]}
+  - {code: catalog-manager,     sensitivity: standard,   permissions: [cob.read, cob.create, cob.update, cob.transition, catalog.author, catalog.preview]}
+  - {code: product-approver,    sensitivity: standard,   permissions: [cob.read, cob.approve]}
+  - {code: product-manager,     sensitivity: standard,   permissions: [offer.read, offer.author, rules.author, cob.read]}
+  - {code: pricing-manager,     sensitivity: standard,   permissions: [pricing.list.read, pricing.list.author, pricing.list.approve, pricing.explain, rules.author]}
+  - {code: sales-rep,           sensitivity: standard,   permissions: [quote.read, quote.create, quote.adjust, order.place.on-behalf, offer.configure]}
+  - {code: sales-manager,       sensitivity: standard,   permissions: [quote.read, quote.create, quote.adjust, quote.approve]}
+  - {code: sales-director,      sensitivity: standard,   permissions: [quote.read, quote.adjust, quote.approve]}
+  - {code: buyer,               sensitivity: standard,   permissions: [catalog.read, order.place, quote.read]}
+  - {code: billing-agent,       sensitivity: standard,   permissions: [billing.read, billing.creditnote.issue, billing.payment.apply]}
+  - {code: finance-controller,  sensitivity: privileged, permissions: [billing.writeoff, billing.creditnote.issue, organization.operating-role.designate]}
+  - {code: payment-ops,         sensitivity: standard,   permissions: [payment.read, payment.refund, payment.capture, payment.void]}
+  - {code: payment-supervisor,  sensitivity: privileged, permissions: [payment.read, payment.refund.manual, payment.reconcile]}
+  - {code: entitlement-admin,   sensitivity: standard,   permissions: [entitlement.read, entitlement.grant, entitlement.grant.manual, entitlement.admin]}
+  - {code: fraud-analyst,       sensitivity: standard,   permissions: [party.read, party.block, decision.read.trace]}
+  - {code: compliance-officer,  sensitivity: privileged, permissions: [policy.author.regulatory, party.block, taxonomy.author, rules.author, decision.read.trace]}
+  - {code: legal-counsel,       sensitivity: privileged, permissions: [evidence.legal-hold, evidence.content.read, contract.approve]}
+  - {code: data-steward,        sensitivity: standard,   permissions: [party.read, party.merge, reference.bind, classification.assign]}
+  - {code: reference-steward,   sensitivity: standard,   permissions: [reference.read, reference.bind, reference.codelist.manage]}
+  - {code: identity-admin,      sensitivity: privileged, permissions: [identity.admin, identity.federation.admin, identity.token.revoke]}
+  - {code: integration-admin,   sensitivity: standard,   permissions: [eventing.subscribe, eventing.registry.read]}
+  - {code: ops-engineer,        sensitivity: privileged, permissions: [eventing.dlq.read, eventing.dlq.redrive, eventing.dlq.discard, eventing.replay]}
+  - {code: context-admin,       sensitivity: standard,   permissions: [context.dimension.author, context.dimension.publish]}
+  - {code: lifecycle-author,    sensitivity: standard,   permissions: [lifecycle.model.author]}
+  - {code: ontology-author,     sensitivity: standard,   permissions: [ontology.type.author, ontology.type.read]}
+  - {code: taxonomy-author,     sensitivity: standard,   permissions: [taxonomy.author, taxonomy.read]}
+  - {code: policy-author,       sensitivity: standard,   permissions: [policy.author.tenant, policy.simulate]}
+  - {code: rules-admin,         sensitivity: standard,   permissions: [rules.author, rules.publish, rules.simulate]}
+  - {code: organization-admin,  sensitivity: privileged, permissions: [organization.legal-entity.manage, organization.namespace.manage, organization.operating-role.designate]}
+  - {code: governance-viewer,   sensitivity: standard,   permissions: [kg.query, decision.read]}
+  - {code: party-viewer,        sensitivity: standard,   permissions: [party.read, kg.query]}
+  - {code: agent-supervisor,    sensitivity: privileged, permissions: [config.kill-switch.activate, decision.read.trace, decision.override, identity.token.revoke]}
+  - {code: gl-accountant,       sensitivity: privileged, permissions: [accounting.read, accounting.entry.manual, accounting.export]}
+
+# Port registry (CIC-029-001 §1, owner DOM-EXT). Every "<Name>Port" referenced anywhere in the corpus
+# must be registered here (VR-EXT-01). kind: infrastructure (CIC-021-001 §1, I0 adapters) or
+# provider/extension (CIC-028-001 plugins).
+ports:
+  - {name: SqlStorePort,               version: 1.0.0, kind: infrastructure, owner: DOM-RTM}
+  - {name: EventBusPort,               version: 1.0.0, kind: infrastructure, owner: DOM-EVT}
+  - {name: CachePort,                  version: 1.0.0, kind: infrastructure, owner: DOM-RTM}
+  - {name: SearchIndexPort,            version: 1.0.0, kind: infrastructure, owner: DOM-SRC}
+  - {name: GraphStorePort,             version: 1.0.0, kind: infrastructure, owner: DOM-KGR}
+  - {name: ObjectStorePort,            version: 1.0.0, kind: infrastructure, owner: DOM-RTM}
+  - {name: KeyManagementPort,          version: 1.0.0, kind: infrastructure, owner: DOM-SEC}
+  - {name: SecretsPort,                version: 1.0.0, kind: infrastructure, owner: DOM-SEC}
+  - {name: AnalyticsStorePort,         version: 1.0.0, kind: infrastructure, owner: DOM-ANL}
+  - {name: TimeSeriesStorePort,        version: 1.0.0, kind: infrastructure, owner: DOM-DTW}
+  - {name: TelemetryBackendPort,       version: 1.0.0, kind: infrastructure, owner: DOM-OBS}
+  - {name: PolicyPort,                 version: 1.0.0, kind: infrastructure, owner: DOM-POL}
+  - {name: WorkflowEnginePort,         version: 1.0.0, kind: infrastructure, owner: DOM-WFL}
+  - {name: IdentityProviderPort,       version: 1.0.0, kind: provider,       owner: DOM-IDN}
+  - {name: PaymentProviderPort,        version: 1.0.0, kind: provider,       owner: DOM-PAY}
+  - {name: TaxEnginePort,              version: 1.0.0, kind: provider,       owner: DOM-TAX}
+  - {name: CarrierPort,                version: 1.0.0, kind: provider,       owner: DOM-LOG}
+  - {name: ProvisioningPort,           version: 1.0.0, kind: provider,       owner: DOM-SDL}
+  - {name: FulfillmentExecutionPort,   version: 1.0.0, kind: provider,       owner: DOM-FUL}
+  - {name: ManufacturingExecutionPort, version: 1.0.0, kind: provider,       owner: DOM-MFG}
+  - {name: ChannelPort,                version: 1.0.0, kind: provider,       owner: DOM-DST}
+  - {name: GeocoderPort,               version: 1.0.0, kind: provider,       owner: DOM-GEO}
+  - {name: MachineTranslationPort,     version: 1.0.0, kind: provider,       owner: DOM-LOC}
+  - {name: ModelPort,                  version: 1.0.0, kind: provider,       owner: DOM-INT}
+  - {name: EmbeddingPort,              version: 1.0.0, kind: provider,       owner: DOM-INT}
+  - {name: SolverPort,                 version: 1.0.0, kind: provider,       owner: DOM-OPT}
+  - {name: PriceModelPort,             version: 1.0.0, kind: extension,      owner: DOM-PRC}
+  - {name: ConfiguratorPort,           version: 1.0.0, kind: extension,      owner: DOM-OFR}
+  - {name: EffectDispatcherPort,       version: 1.0.0, kind: extension,      owner: DOM-LFC}
+  - {name: ValueSourcePort,            version: 1.0.0, kind: extension,      owner: DOM-CTX}

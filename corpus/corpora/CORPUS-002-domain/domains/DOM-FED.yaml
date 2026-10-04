@@ -1,0 +1,174 @@
+header:
+  id: DOM-FED
+  title: Federation Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-014-001, CIC-006-001, CIC-009-001, CIC-002-001]
+  traces: [PRIN-015, PRIN-022, PRIN-010, PRIN-001]
+  certification: [CR-FED-01, CR-FED-02, CR-FED-03]
+  validation: [VR-FED-01, VR-FED-02]
+
+purpose: >
+  Let independent UCOS tenants and independent UCOS installations (different operators, regions,
+  sovereign clouds) share commercial data and transact without centralizing it: federation
+  agreements, shared views (catalogs, offers, availability, prices for partners), federated queries,
+  cross-installation event exchange, and identity/trust federation — each party remaining the system
+  of record for its own data.
+
+scope:
+  includes:
+    - Federation peers (tenants or installations) with verified identities (DOM-TRST anchors) and agreements
+    - Share definitions (what views/events are shared, to whom, under which purposes and policies)
+    - Federated query gateway (pull: named queries/API calls proxied with peer credentials and policy)
+    - Event exchange (push: filtered, signed CloudEvents between installations)
+    - Federated identifiers (peer URN namespaces; no ID rewriting)
+  excludes:
+    - Marketplace business rules (DOM-MKT), external non-UCOS integrations (DOM-DXC)
+
+responsibilities:
+  - No data leaves without an active share and agreement.
+  - Shared data provenance is preserved (origin peer, signature).
+  - Peers can revoke shares with immediate effect.
+
+principles: [PRIN-001, PRIN-010, PRIN-015, PRIN-022]
+
+boundaries:
+  upstream: [DOM-TRST, DOM-IDN, DOM-POL, DOM-SOV, DOM-PRI, DOM-EVT]
+  downstream: [DOM-MKT, DOM-DST, DOM-CAT, DOM-ORD, DOM-KGR]
+
+ownership:
+  boundedContext: data
+  owningRole: Chief Data Architect
+  service: federation-service
+  schema: ucos_data
+
+capabilities:
+  - {id: FED-C1, name: Peers, description: "Establish and verify federation peers."}
+  - {id: FED-C2, name: Agreements & shares, description: "Define what is shared under which policies."}
+  - {id: FED-C3, name: Federated query, description: "Proxy authorized queries to peers."}
+  - {id: FED-C4, name: Event exchange, description: "Signed, filtered event push between installations."}
+  - {id: FED-C5, name: Revocation, description: "Immediate share revocation and peer suspension."}
+
+services:
+  - {name: FederationCommandService, kind: application, operations: [RegisterPeer, VerifyPeer, SuspendPeer, CreateFederationAgreement, DefineShare, RevokeShare]}
+  - {name: FederationGateway, kind: infrastructure, contract: "mTLS + signed requests (HTTP Message Signatures RFC 9421) between installations; outbound filtering by share; inbound verification by peer anchor; rate limits per share"}
+  - {name: FederationQueryService, kind: application, operations: [QueryPeer, GetPeer, ListShares]}
+
+aggregates:
+  - name: FederationPeer
+    identity: "urn:ucos:<tenant>:federation-peer:<ulid>"
+    invariants: ["INV-FED-1: peer identity bound to a trust anchor (DOM-TRST) and verified via challenge before any share activates."]
+    fields:
+      - {name: kind, type: "same-installation-tenant|external-installation"}
+      - {name: peerRef, type: "tenant code | installation endpoint + anchor"}
+      - {name: organization, type: PartyUrn}
+      - {name: status, type: "pending|verified|suspended|terminated"}
+  - name: Share
+    identity: "urn:ucos:<tenant>:share:<ulid>"
+    invariants:
+      - "INV-FED-2: share has agreement, purpose, data classification ceiling, and peer allow-listed by sovereignty profile."
+      - "INV-FED-3: shared resources are named queries, API operations, or event types — never raw tables."
+    fields:
+      - {name: peer, type: InstanceUrn}
+      - {name: agreementRef, type: InstanceUrn}
+      - {name: resources, type: "[{kind: named-query|api-operation|event-type, ref, filter: CEL}]"}
+      - {name: purpose, type: string}
+      - {name: classificationCeiling, type: DataClassification}
+      - {name: direction, type: "outbound|inbound"}
+      - {name: validTo, type: "Instant?"}
+      - {name: status, type: "active|revoked|expired"}
+
+entities:
+  - {name: FederationAgreement, within: "standalone record linked to DOM-CTR contract", fields: [agreementId, contractRef, parties, termsSummary, validFrom, validTo]}
+
+valueObjects:
+  - {name: FederatedResult, definition: "{peer, resource, payload, signature, retrievedAt, originUrns}"}
+
+commands:
+  - {name: RegisterPeer, input: "{kind, peerRef, organization}", emits: [FederationPeerRegistered]}
+  - {name: VerifyPeer, input: "{id}", emits: [FederationPeerVerified]}
+  - {name: SuspendPeer, input: "{id, reason}", emits: [FederationPeerSuspended], note: "All shares with the peer stop immediately"}
+  - {name: CreateFederationAgreement, input: "FederationAgreement + changeSetRef", emits: [FederationAgreementCreated]}
+  - {name: DefineShare, input: "Share + changeSetRef", emits: [ShareDefined], preconditions: ["INV-FED-2/3"]}
+  - {name: RevokeShare, input: "{id, reason}", emits: [ShareRevoked]}
+
+queries:
+  - {name: QueryPeer, input: "{peer, resource, params}", output: FederatedResult}
+  - {name: GetPeer, input: "{id}", output: FederationPeer}
+  - {name: ListShares, input: "{peer?, direction?, status?}", output: "Share[]"}
+
+apis:
+  - {style: REST, path: "/v1/federation/peers", methods: {POST: RegisterPeer}}
+  - {style: REST, path: "/v1/federation/peers/{id}", methods: {GET: GetPeer}}
+  - {style: REST, path: "/v1/federation/peers/{id}:verify", methods: {POST: VerifyPeer}}
+  - {style: REST, path: "/v1/federation/peers/{id}:suspend", methods: {POST: SuspendPeer}}
+  - {style: REST, path: "/v1/federation/agreements", methods: {POST: CreateFederationAgreement}}
+  - {style: REST, path: "/v1/federation/shares", methods: {POST: DefineShare, GET: ListShares}}
+  - {style: REST, path: "/v1/federation/shares/{id}:revoke", methods: {POST: RevokeShare}}
+  - {style: REST, path: "/v1/federation:query", methods: {POST: QueryPeer}}
+
+events:
+  - {type: ucos.data.federation-peer.registered.v1, payload: "{id, kind}"}
+  - {type: ucos.data.federation-peer.verified.v1, payload: "{id}"}
+  - {type: ucos.data.federation-peer.suspended.v1, payload: "{id, reason}", consumers: [gateway (block)]}
+  - {type: ucos.data.federation-agreement.created.v1, payload: "{agreementId, parties}"}
+  - {type: ucos.data.share.defined.v1, payload: "{id, peer, resources, purpose}"}
+  - {type: ucos.data.share.revoked.v1, payload: "{id}", consumers: [gateway (block)]}
+
+stateMachines:
+  - name: ShareLifecycle
+    initial: active
+    states: [active, revoked, expired]
+    terminal: [revoked, expired]
+    transitions:
+      - {from: active, to: revoked, command: RevokeShare}
+      - {from: active, to: revoked, trigger: "peer suspended"}
+      - {from: active, to: expired, trigger: "validTo (timer)"}
+
+rules:
+  - {id: RUL-FED-1, statement: "Inbound federated data is never persisted as a local system-of-record copy; caching allowed only as projections tagged with origin peer and TTL from the share."}
+  - {id: RUL-FED-2, statement: "Federated URNs keep the peer namespace; local references to peer objects use the peer URN unchanged."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:federation.share-approval", purpose: "Approval plan for shares by classification ceiling"}
+
+decisions:
+  - {id: DEC-FED-1, question: "May resource X be returned to peer P?", algorithm: "Active share covering resource + filter + classification ceiling + sovereignty + PDP"}
+
+security:
+  permissions: [federation.read, federation.peer.manage, federation.share.manage, federation.query]
+  dataClassification: "Per share ceiling; transport encrypted and signed."
+  threats: ["Data exfiltration via shares -> named resources only, ceilings, rate limits, audit", "Peer impersonation -> anchor-bound mTLS + message signatures"]
+
+governance:
+  changeControl: "Agreements and shares via ChangeSet."
+  evidence: "Share definitions and revocations captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Shares enforced synchronously at gateway; revocation effective immediately (local) and within 60s at remote caches."
+  slo: {QueryPeer_overhead_p99_ms: 50, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_data (separate tables)
+  tables:
+    - {name: federation_peers, columns: "tenant_id, id, kind, peer_ref, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: shares, columns: "tenant_id, id, peer_id, body jsonb, status, valid_to", pk: "(tenant_id, id)", indexes: ["(tenant_id, peer_id, status)"]}
+    - {name: federation_agreements, columns: "tenant_id, agreement_id, body jsonb", pk: "(tenant_id, agreement_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None required."
+  retention: "Agreements contract retention; share history 7 years."
+
+extensionModel:
+  extensionPoints: ["Federation protocols for non-UCOS peers via DOM-DXC (e.g. dataspace connectors, IDSA/Gaia-X style)"]
+  forbidden: ["Raw table replication between tenants"]
+
+certificationCriteria:
+  - {id: CR-FED-01, rule: "Requests for unshared resources are denied (fuzzed resource names).", level: L1}
+  - {id: CR-FED-02, rule: "Revocation blocks the next request (local) and remote within 60s.", level: L1}
+  - {id: CR-FED-03, rule: "Message signature verification rejects tampered payloads.", level: L1}
+validationRules:
+  - {id: VR-FED-01, rule: "Every share resource refers to a registered named query, API operation, or event type."}
+  - {id: VR-FED-02, rule: "Every peer has a trust anchor."}

@@ -1,0 +1,162 @@
+header:
+  id: DOM-CYR
+  title: Cyber Risk Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Security Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-016-001, CIC-014-001, CIC-028-001, CIC-002-001]
+  traces: [PRIN-010, PRIN-012, PRIN-022, CIC-016-001]
+  certification: [CR-CYR-01, CR-CYR-02, CR-CYR-03]
+  validation: [VR-CYR-01, VR-CYR-02]
+
+purpose: >
+  Quantify and manage cyber risk across the commerce ecosystem — tenants' integrations, plugins and
+  their publishers, third-party processors, API clients and agents — with risk ratings, anomalous
+  usage detection, third-party risk records, and risk-based controls (step-up, throttling,
+  suspension) applied through policies.
+
+scope:
+  includes:
+    - Third-party risk records (publishers, processors, connectors) with assessments and attestations
+    - Plugin and integration risk ratings (permissions breadth, data classification, isolation, findings)
+    - API client and agent behavioral anomaly detection (volume, access patterns, enumeration)
+    - Cyber RiskAssessments feeding PDP (e.g. throttle, require-mfa, suspend client)
+  excludes:
+    - Security runtime and detections pipeline (DOM-SEC), fraud (DOM-FRD), certification (DOM-CRT)
+
+responsibilities:
+  - Every external party with system access has a current risk rating.
+  - Anomalous usage detected and acted upon via policy.
+
+principles: [PRIN-010, PRIN-012, PRIN-022]
+
+boundaries:
+  upstream: [DOM-SEC, DOM-EXT, DOM-IDN, DOM-OBS, DOM-SOV, DOM-TRST]
+  downstream: [DOM-POL, DOM-EXT, DOM-IDN, DOM-ORK, DOM-AGT]
+
+ownership:
+  boundedContext: risk
+  owningRole: Chief Security Architect
+  service: cyber-risk-service
+  schema: ucos_risk
+
+capabilities:
+  - {id: CYR-C1, name: Third-party risk, description: "Assess and track vendors, publishers, processors."}
+  - {id: CYR-C2, name: Integration ratings, description: "Rate plugins and connectors."}
+  - {id: CYR-C3, name: Anomaly detection, description: "Behavioral baselines for API clients and agents."}
+  - {id: CYR-C4, name: Risk-based controls, description: "Assessments driving PDP obligations."}
+
+services:
+  - {name: CyberRiskCommandService, kind: application, operations: [RegisterThirdParty, RecordAssessment, RecordAttestation, RateIntegration, DefineBaseline]}
+  - {name: UsageAnomalyDetector, kind: application, contract: "Per client/agent baselines over API metrics and audit streams (requests/min, distinct resources, error ratios, data volume); anomaly score -> RiskAssessment riskType cyber"}
+  - {name: CyberRiskQueryService, kind: application, operations: [AssessCyberRisk, GetThirdParty, GetIntegrationRating]}
+
+aggregates:
+  - name: ThirdParty
+    identity: "urn:ucos:<tenant|platform>:third-party:<ulid>"
+    invariants: ["INV-CYR-1: access-granting third parties have an unexpired assessment (<= 12 months) or are restricted to I1/I3 plugins only."]
+    fields:
+      - {name: party, type: PartyUrn}
+      - {name: role, type: "plugin-publisher|processor|connector-vendor|model-provider|carrier|psp"}
+      - {name: assessments, type: "[{date, method, rating, evidenceRef}]"}
+      - {name: attestations, type: "[{kind: soc2|iso27001|pci, validTo, evidenceRef}]"}
+      - {name: rating, type: "low|medium|high|critical"}
+  - name: IntegrationRating
+    identity: "urn:ucos:<tenant>:integration-rating:<subjectRef>"
+    fields:
+      - {name: subject, type: "plugin activation | connector | API client | agent identity"}
+      - {name: factors, type: "{permissionsBreadth, dataClassification, isolation, openFindings, publisherRating}"}
+      - {name: score, type: "0..1000"}
+      - {name: band, type: "low|medium|high|critical"}
+
+entities: []
+
+valueObjects:
+  - {name: Baseline, definition: "{subject, metrics: [{name, mean, stddev, p99}], window}"}
+
+commands:
+  - {name: RegisterThirdParty, input: "{party, role}", emits: [ThirdPartyRegistered]}
+  - {name: RecordAssessment, input: "{thirdPartyId, method, rating, evidenceRef}", emits: [ThirdPartyAssessed]}
+  - {name: RecordAttestation, input: "{thirdPartyId, kind, validTo, evidenceRef}", emits: [ThirdPartyAttestationRecorded]}
+  - {name: RateIntegration, input: "{subject}", emits: [IntegrationRated]}
+  - {name: DefineBaseline, input: "{subjectKind, metrics, window}", emits: [BaselineDefined]}
+
+queries:
+  - {name: AssessCyberRisk, input: "{subject, context}", output: "RiskAssessment (riskType cyber)"}
+  - {name: GetThirdParty, input: "{id}", output: ThirdParty}
+  - {name: GetIntegrationRating, input: "{subject}", output: IntegrationRating}
+
+apis:
+  - {style: REST, path: "/v1/cyber-risk/third-parties", methods: {POST: RegisterThirdParty}}
+  - {style: REST, path: "/v1/cyber-risk/third-parties/{id}", methods: {GET: GetThirdParty}}
+  - {style: REST, path: "/v1/cyber-risk/third-parties/{id}/assessments", methods: {POST: RecordAssessment}}
+  - {style: REST, path: "/v1/cyber-risk/third-parties/{id}/attestations", methods: {POST: RecordAttestation}}
+  - {style: REST, path: "/v1/cyber-risk/integrations/{subject}:rate", methods: {POST: RateIntegration}}
+  - {style: REST, path: "/v1/cyber-risk/integrations/{subject}", methods: {GET: GetIntegrationRating}}
+  - {style: REST, path: "/v1/cyber-risk/baselines", methods: {POST: DefineBaseline}}
+  - {style: REST, path: "/v1/cyber-risk:assess", methods: {POST: AssessCyberRisk}}
+
+events:
+  - {type: ucos.risk.third-party.registered.v1, payload: "{id, role}"}
+  - {type: ucos.risk.third-party.assessed.v1, payload: "{id, rating}"}
+  - {type: ucos.risk.third-party.attestation-recorded.v1, payload: "{id, kind, validTo}"}
+  - {type: ucos.risk.integration.rated.v1, payload: "{subject, band}", consumers: [extensions activation policy]}
+  - {type: ucos.risk.cyber.anomaly-detected.v1, payload: "{subject, score, metrics}", consumers: [policy obligations, security, operational risk]}
+  - {type: ucos.risk.cyber-baseline.defined.v1, payload: "{subjectKind}"}
+
+stateMachines:
+  - name: ThirdPartyAssessmentState
+    initial: unassessed
+    states: [unassessed, current, expiring, expired]
+    terminal: []
+    transitions:
+      - {from: [unassessed, expired, expiring], to: current, command: RecordAssessment}
+      - {from: current, to: expiring, trigger: "assessment age > 11 months"}
+      - {from: expiring, to: expired, trigger: "assessment age > 12 months -> restrict to I1/I3 (INV-CYR-1)"}
+
+rules:
+  - {id: RUL-CYR-1, statement: "Anomaly bands map to obligations via policy risk.cyber.bands: medium -> throttle, high -> require-mfa/step-up or token re-issue, critical -> suspend client (kill switch via DOM-CFG)."}
+  - {id: RUL-CYR-2, statement: "High/critical integration ratings block new activations and require security review for renewals."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:risk.cyber.bands", purpose: "Cyber score bands and mapped actions"}
+
+decisions:
+  - {id: DEC-CYR-1, question: "Is client/agent X behaving anomalously and what control applies?", algorithm: "UsageAnomalyDetector -> band -> policy risk.cyber.bands"}
+
+security:
+  permissions: [cyber-risk.read, cyber-risk.manage, cyber-risk.assess]
+  dataClassification: "Restricted."
+  threats: ["Attacker evading baselines with slow exfiltration -> long-window baselines and data-volume cumulative checks"]
+
+governance:
+  changeControl: "Bands and baselines via ChangeSet with Security approval."
+  evidence: "Assessments and attestations captured."
+
+runtimeBehavior:
+  consistency: "Streaming detection within 1 min; ratings recomputed on change."
+  slo: {anomaly_detection_latency_p95_s: 60, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_risk (separate tables)
+  tables:
+    - {name: third_parties, columns: "scope, id, party, role, body jsonb, rating", pk: "(scope, id)"}
+    - {name: integration_ratings, columns: "tenant_id, subject, body jsonb, band", pk: "(tenant_id, subject)"}
+    - {name: baselines, columns: "tenant_id, subject_kind, subject, body jsonb", pk: "(tenant_id, subject_kind, subject)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Assessments 7 years."
+
+extensionModel:
+  extensionPoints: ["Third-party rating feeds", "Anomaly models via DOM-INT"]
+  forbidden: ["Unassessed processors with data access"]
+
+certificationCriteria:
+  - {id: CR-CYR-01, rule: "Seeded enumeration and exfiltration patterns detected within 60s and mapped actions applied.", level: L2}
+  - {id: CR-CYR-02, rule: "Expired third-party assessments restrict activation (negative test).", level: L1}
+  - {id: CR-CYR-03, rule: "Integration rating recomputes on permission or finding changes.", level: L1}
+validationRules:
+  - {id: VR-CYR-01, rule: "Every certified I2/I4 plugin publisher is a registered third party."}
+  - {id: VR-CYR-02, rule: "Cyber bands policy exists (VR-016-001-01)."}

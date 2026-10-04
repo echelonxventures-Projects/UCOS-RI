@@ -1,0 +1,167 @@
+header:
+  id: DOM-LIN
+  title: Lineage Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-003-001, CIC-006-001, CIC-026-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-008, PRIN-011, DOM-EVD]
+  certification: [CR-LIN-01, CR-LIN-02, CR-LIN-03]
+  validation: [VR-LIN-01, VR-LIN-02]
+
+purpose: >
+  Record how data was derived: which jobs, migrations, projections, imports, models, and exports
+  read which datasets and produced which outputs, at field level where declared — OpenLineage-
+  compatible — to support impact analysis, root-cause analysis, regulatory traceability (BCBS 239-
+  style), and privacy data maps.
+
+scope:
+  includes:
+    - Dataset registry (tables, topics, indexes, files, external feeds) with schemas and owners
+    - Run lineage (job runs with inputs, outputs, facets, status) ingested via OpenLineage events
+    - Column/field-level lineage where producers declare it
+    - Aggregate-level lineage stamps (migrationRef, importBatchRef) linked from domain events
+  excludes:
+    - Physical-goods provenance (DOM-PRV)
+    - Data quality rules and scores (DOM-DQL; attaches results to datasets here)
+
+responsibilities:
+  - Complete lineage for every production data flow declared in module manifests.
+  - Lineage graph queries upstream/downstream.
+  - Feed privacy data maps and governance impact analysis.
+
+principles: [PRIN-001, PRIN-008, PRIN-011]
+
+boundaries:
+  upstream: [DOM-EVT, DOM-DXC, DOM-ANL, DOM-MDM, DOM-RTM]
+  downstream: [DOM-PRI, DOM-DQL, DOM-GOV, DOM-KGR, DOM-AUD]
+
+ownership:
+  boundedContext: evidence
+  owningRole: Chief Data Architect
+  service: lineage-service
+  schema: ucos_evidence
+
+capabilities:
+  - {id: LIN-C1, name: Datasets, description: "Register datasets with schema, owner, classification."}
+  - {id: LIN-C2, name: Ingest runs, description: "Accept OpenLineage RunEvents from jobs, pipelines, migrations, exports."}
+  - {id: LIN-C3, name: Field lineage, description: "Store column-level lineage facets."}
+  - {id: LIN-C4, name: Query, description: "Upstream/downstream traversal; impact of schema changes."}
+
+services:
+  - {name: LineageCommandService, kind: application, operations: [RegisterDataset, IngestRunEvent, DeprecateDataset]}
+  - {name: LineageQueryService, kind: application, operations: [GetDataset, GetUpstream, GetDownstream, GetRun, FindRuns]}
+
+aggregates:
+  - name: Dataset
+    identity: "urn:ucos:<tenant|platform>:dataset:<namespace>/<name>"
+    invariants: ["INV-LIN-1: (namespace, name) follows OpenLineage naming (e.g. postgres://cell/db.schema.table, kafka://cell/topic); owner and classification set."]
+    fields:
+      - {name: namespace, type: string}
+      - {name: name, type: string}
+      - {name: schema, type: "fields[] with types and sensitivity"}
+      - {name: owner, type: "context or PartyUrn"}
+      - {name: classification, type: DataClassification}
+      - {name: status, type: "active|deprecated"}
+  - name: LineageRun
+    identity: "urn:ucos:<tenant|platform>:lineage-run:<runId>"
+    invariants: ["INV-LIN-2: runs are append-only; terminal state COMPLETE|FAIL|ABORT recorded once."]
+    fields:
+      - {name: job, type: "{namespace, name}"}
+      - {name: runId, type: UUID}
+      - {name: inputs, type: "DatasetRef[] (+ facets)"}
+      - {name: outputs, type: "DatasetRef[] (+ columnLineage facets)"}
+      - {name: state, type: "START|RUNNING|COMPLETE|FAIL|ABORT"}
+      - {name: startedAt, type: Instant}
+      - {name: endedAt, type: "Instant?"}
+      - {name: refs, type: "{migrationRef?, changeSetRef?, importBatchRef?, modelRef?}"}
+
+entities: []
+
+valueObjects:
+  - {name: LineageGraph, definition: "{nodes: datasets|jobs, edges: reads|writes|derives(field), depth, truncated}"}
+
+commands:
+  - {name: RegisterDataset, input: "Dataset", emits: [DatasetRegistered]}
+  - {name: IngestRunEvent, input: "OpenLineage RunEvent (spec 2-0-2)", emits: [LineageRunUpdated]}
+  - {name: DeprecateDataset, input: "{urn, successor?}", emits: [DatasetDeprecated]}
+
+queries:
+  - {name: GetDataset, input: "{urn}", output: Dataset}
+  - {name: GetUpstream, input: "{dataset, field?, depth<=10}", output: LineageGraph}
+  - {name: GetDownstream, input: "{dataset, field?, depth<=10}", output: LineageGraph}
+  - {name: GetRun, input: "{runId}", output: LineageRun}
+  - {name: FindRuns, input: "{job?, dataset?, from?, to?, state?}", output: "page"}
+
+apis:
+  - {style: REST, path: "/v1/lineage/datasets", methods: {POST: RegisterDataset}}
+  - {style: REST, path: "/v1/lineage/datasets/{urn}", methods: {GET: GetDataset}}
+  - {style: REST, path: "/v1/lineage/datasets/{urn}:deprecate", methods: {POST: DeprecateDataset}}
+  - {style: REST, path: "/v1/lineage/datasets/{urn}/upstream", methods: {GET: GetUpstream}}
+  - {style: REST, path: "/v1/lineage/datasets/{urn}/downstream", methods: {GET: GetDownstream}}
+  - {style: REST, path: "/v1/lineage/runs", methods: {GET: FindRuns}}
+  - {style: REST, path: "/v1/lineage/runs/{runId}", methods: {GET: GetRun}}
+  - {style: REST, path: "/api/v1/lineage", methods: {POST: IngestRunEvent}, note: "OpenLineage-compatible endpoint path for existing emitters"}
+
+events:
+  - {type: ucos.evidence.dataset.registered.v1, payload: "{urn, owner, classification}"}
+  - {type: ucos.evidence.dataset.deprecated.v1, payload: "{urn, successor}"}
+  - {type: ucos.evidence.lineage-run.updated.v1, payload: "{runId, job, state, inputs, outputs}"}
+
+stateMachines:
+  - name: LineageRunState
+    initial: START
+    states: [START, RUNNING, COMPLETE, FAIL, ABORT]
+    terminal: [COMPLETE, FAIL, ABORT]
+    transitions:
+      - {from: START, to: RUNNING, trigger: "RunEvent RUNNING"}
+      - {from: [START, RUNNING], to: COMPLETE, trigger: "RunEvent COMPLETE"}
+      - {from: [START, RUNNING], to: FAIL, trigger: "RunEvent FAIL"}
+      - {from: [START, RUNNING], to: ABORT, trigger: "RunEvent ABORT"}
+
+rules:
+  - {id: RUL-LIN-1, statement: "Every resumable job (CIC-020-001 §5), migration, export, and analytics pipeline emits OpenLineage events; missing emission fails module certification."}
+  - {id: RUL-LIN-2, statement: "Datasets containing fields with sensitivity >= personal propagate classification to downstream datasets unless a declared transformation (aggregation/anonymization facet) lowers it."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:lineage.retention", purpose: "Run retention by dataset classification"}
+
+decisions:
+  - {id: DEC-LIN-1, question: "Which downstream datasets and jobs are affected by changing dataset D (field F)?", algorithm: "GetDownstream traversal"}
+
+security:
+  permissions: [lineage.read, lineage.ingest, lineage.dataset.manage]
+  dataClassification: "Metadata only (no data values); dataset names may be confidential."
+  threats: ["Lineage spoofing -> ingestion only from authenticated service identities with job ownership"]
+
+governance:
+  changeControl: "Dataset registrations derive from module manifests; manual datasets require owner approval."
+  evidence: "Regulatory lineage reports sealed as Evidence on request."
+
+runtimeBehavior:
+  consistency: "Eventual; runs visible within 10s."
+  slo: {IngestRunEvent_p99_ms: 50, GetUpstream_depth5_p99_ms: 300, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_evidence (separate tables) + graph projection
+  tables:
+    - {name: datasets, columns: "scope text, urn text, body jsonb, status", pk: "(scope, urn)"}
+    - {name: lineage_runs, columns: "scope, run_id uuid, job text, state, started_at, ended_at, body jsonb", pk: "(scope, run_id)", indexes: ["(scope, job, started_at desc)"]}
+    - {name: lineage_edges, columns: "scope, run_id, dataset_urn, direction, field_map jsonb", pk: "(scope, run_id, dataset_urn, direction)", indexes: ["(scope, dataset_urn, direction)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "lineage_runs range(started_at) monthly."
+  retention: "Per lineage.retention (default 2 years; regulated datasets 7 years)."
+
+extensionModel:
+  extensionPoints: ["OpenLineage facets (custom UCOS facets: ucosChangeSet, ucosMigration)", "Emitters for external pipelines (Spark, dbt, Airflow)"]
+  forbidden: ["Data values in lineage facets"]
+
+certificationCriteria:
+  - {id: CR-LIN-01, rule: "OpenLineage spec conformance for ingestion (schema validation of all event types).", level: L1}
+  - {id: CR-LIN-02, rule: "Every resumable job in the RI emits START and terminal events (100% coverage report).", level: L1}
+  - {id: CR-LIN-03, rule: "Classification propagation flags seeded personal-data flows into unclassified datasets.", level: L1}
+validationRules:
+  - {id: VR-LIN-01, rule: "Every persistence table declared in DOM specs is registered as a dataset in reference deployments."}
+  - {id: VR-LIN-02, rule: "Every export/integration job definition names input and output datasets."}

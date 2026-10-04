@@ -1,0 +1,59 @@
+# ucos.std FacetDefinitions (DOM-ONT). A facet is a reusable attribute bundle plus a behavioural
+# contract naming the bounded contexts that give it behaviour (INV-ONT-9).
+facets:
+  - name: Identifiable
+    attributes: [{ref: name, required: true}, {ref: shortName}, {ref: description}, {ref: sku, required: true}, {ref: gtin}, {ref: brand}, {ref: media}, {ref: keywords}]
+    capabilityContract: {contexts: [commercial-object, intelligence]}
+  - name: Classifiable
+    attributes: []
+    capabilityContract: {contexts: [ontology], note: "Instances may be classified with taxonomy terms (DOM-CLS)"}
+  - name: Priceable
+    attributes: [{ref: priceUnit}, {ref: taxCategory, required: true}]
+    requiresPolicies: [price-entry.resolution, price-adjustment.resolution, pricing.rounding]
+    requiresLifecycleCategories: [active]
+    capabilityContract: {contexts: [pricing, finance]}
+  - name: Fulfillable
+    attributes: [{ref: fulfillmentMode, required: true}]
+    capabilityContract: {contexts: [transaction, fulfillment], note: "Requires order-decomposition rules for action add (VR-ORD-01)"}
+  - name: Stockable
+    attributes: [{ref: unitOfMeasure, required: true}, {ref: serialized, required: true}, {ref: lotControlled, required: true}, {ref: shelfLifeDays}, {ref: countryOfOrigin}, {ref: hsCode}]
+    capabilityContract: {contexts: [supply]}
+  - name: Shippable
+    attributes: [{ref: netWeight}, {ref: grossWeight}, {ref: length}, {ref: width}, {ref: height}, {ref: shippingClass}, {ref: hazmatClass}]
+    capabilityContract: {contexts: [fulfillment]}
+  - name: Schedulable
+    attributes: [{ref: duration}, {ref: schedulingMode, required: true}, {ref: leadTime}]
+    capabilityContract: {contexts: [supply, fulfillment]}
+  - name: Deliverable
+    attributes: [{ref: deliveryMode, required: true}, {ref: serviceArea}, {ref: serviceLevel}]
+    capabilityContract: {contexts: [fulfillment]}
+  - name: CapacityBound
+    attributes: [{ref: capacityPerSlot, required: true}, {ref: slotDuration, required: true}]
+    capabilityContract: {contexts: [supply]}
+  - name: Recurring
+    attributes: [{ref: billingPeriod, required: true}, {ref: periodAlignment, required: true}]
+    capabilityContract: {contexts: [billing, pricing]}
+  - name: Renewable
+    attributes: [{ref: renewalMode, required: true}, {ref: renewalTerm}, {ref: noticePeriod}]
+    capabilityContract: {contexts: [contract, entitlement]}
+  - name: Entitling
+    attributes: [{ref: entitlementScope, required: true}, {ref: entitlementTemplate, required: true}]
+    capabilityContract: {contexts: [entitlement]}
+  - name: Metered
+    attributes: [{ref: meterCodes, required: true}]
+    capabilityContract: {contexts: [entitlement, billing]}
+  - name: Tiered
+    attributes: [{ref: tierLevel, required: true}, {ref: tierName}]
+    capabilityContract: {contexts: [entitlement, pricing]}
+  - name: Composite
+    attributes: [{ref: compositionMode, required: true}, {ref: priceComposition, required: true}]
+    capabilityContract: {contexts: [commercial-object, offer, pricing]}
+  - name: Transferable
+    attributes: [{ref: transferPolicy, required: true}]
+    capabilityContract: {contexts: [entitlement]}
+  - name: Serviceable
+    attributes: [{ref: serialNumber}, {ref: installedAt}, {ref: sourceCommercialObject, required: true}, {ref: serviceLevel}]
+    capabilityContract: {contexts: [fulfillment, commercial-object]}
+  - name: AgeRestricted
+    attributes: [{ref: minimumAge, required: true}]
+    capabilityContract: {contexts: [supply], note: "Evaluated by sellability rules (RUL-AVL-1)"}

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-ucos-id": "urn:ucos:ucos.kernel:schema:urn@1.0.0",
+  "title": "Urn",
+  "description": "Instance URN urn:ucos:<tenant>:<kind>:<ulid> or metadata URN urn:ucos:<namespace>:<kind>:<name>[@<semver>] (CIC-000-002 \u00a72).",
+  "type": "string",
+  "pattern": "^urn:ucos:[a-z0-9][a-z0-9.-]*:[a-z0-9][a-z0-9-]*:[A-Za-z0-9._~:/@-]+$"
+}

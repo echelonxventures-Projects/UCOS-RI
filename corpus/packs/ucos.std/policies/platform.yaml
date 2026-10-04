@@ -1,0 +1,97 @@
+# Platform, identity, data, and governance configuration policies.
+defaults: &cfg
+  kind: configuration
+  layer: platform
+  scope: {}
+
+policies:
+  - <<: *cfg
+    name: context.max-dimensions
+    outputSchema: {type: object, required: [maxPerTenant], properties: {maxPerTenant: {type: integer, minimum: 21, maximum: 256}}}
+    body: {language: static, source: &ctxMax {maxPerTenant: 64}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ctxMax}]
+
+  - <<: *cfg
+    name: eventing.retention
+    outputSchema: {type: object, required: [domain, integration, command], properties: {domain: {type: object, required: [logDays, compacted]}, integration: {type: object, required: [logDays]}, command: {type: object, required: [logDays]}}}
+    body: {language: static, source: &evtRetention {domain: {logDays: 30, compacted: true}, integration: {logDays: 7}, command: {logDays: 7}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *evtRetention}]
+
+  - <<: *cfg
+    name: evidence.anchoring
+    outputSchema: {type: object, required: [tsaUrls, intervalSeconds, minAnchors], properties: {tsaUrls: {type: array, minItems: 1, items: {type: string, format: uri}}, intervalSeconds: {type: integer, minimum: 10}, minAnchors: {type: integer, minimum: 1}, transparencyLog: {type: boolean}}}
+    body: {language: static, source: &evdAnchor {tsaUrls: ["https://freetsa.org/tsr", "http://timestamp.digicert.com"], intervalSeconds: 60, minAnchors: 1, transparencyLog: false}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *evdAnchor}]
+
+  - <<: *cfg
+    name: evidence.retention
+    outputSchema: {type: object, required: [byRetentionClass], properties: {byRetentionClass: {type: object, required: [standard, regulated], additionalProperties: {type: string, pattern: "^P"}}}}
+    body: {language: static, source: &evdRetention {byRetentionClass: {standard: P7Y, regulated: P10Y}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *evdRetention}]
+
+  - <<: *cfg
+    name: governance.policy-approval
+    layer: constitutional
+    outputSchema: {type: object, required: [byLayer, simulationChangedRatioExtraApprover], properties: {byLayer: {type: object, additionalProperties: {type: object, required: [approverRoles, quorum], properties: {approverRoles: {type: array, minItems: 1}, quorum: {type: integer, minimum: 1}}}}, simulationChangedRatioExtraApprover: {type: number, minimum: 0, maximum: 1}}}
+    body: {language: static, source: &govPolicy {byLayer: {tenant: {approverRoles: [policy-owner], quorum: 1}, organization: {approverRoles: [policy-owner], quorum: 1}, delegated: {approverRoles: [policy-owner], quorum: 1}, regulatory: {approverRoles: [compliance-officer, legal-counsel], quorum: 2}, platform: {approverRoles: [platform-governance, chief-architect], quorum: 2}, constitutional: {approverRoles: [constitutional-authority, chief-architect, chief-governance-architect], quorum: 3}}, simulationChangedRatioExtraApprover: 0.01}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *govPolicy}]
+
+  - <<: *cfg
+    name: identity.agent-delegation
+    outputSchema: {type: object, required: [maxDepth, allowedScopes, defaultSpendLimitMinor], properties: {maxDepth: {type: integer, minimum: 1, maximum: 5}, allowedScopes: {type: array, items: {type: string}}, defaultSpendLimitMinor: {type: integer, minimum: 0}, requireHumanApprovalAboveMinor: {type: integer, minimum: 0}}}
+    body: {language: static, source: &idnAgent {maxDepth: 3, allowedScopes: ["ucos:catalog:read", "ucos:pricing:read", "ucos:offer:read", "ucos:transaction:write", "ucos:entitlement:read"], defaultSpendLimitMinor: 100000, requireHumanApprovalAboveMinor: 100000}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *idnAgent}]
+
+  - <<: *cfg
+    name: identity.binding-assurance
+    outputSchema: {type: object, required: [byPartyType], properties: {byPartyType: {type: object, additionalProperties: {enum: [AAL1, AAL2, AAL3]}}}}
+    body: {language: static, source: &idnAssurance {byPartyType: {Person: AAL1, Organization: AAL2, Agent: AAL2, System: AAL3}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *idnAssurance}]
+
+  - <<: *cfg
+    name: identity.token-lifetimes
+    outputSchema: {type: object, required: [accessToken, refreshToken, session], properties: {accessToken: {type: string, pattern: "^PT"}, refreshToken: {type: string, pattern: "^P"}, session: {type: string, pattern: "^P"}}}
+    body: {language: static, source: &idnTokens {accessToken: PT10M, refreshToken: P14D, session: PT12H}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *idnTokens}]
+
+  - <<: *cfg
+    name: migration.failure-tolerance
+    outputSchema: {type: object, required: [maxFailureRatio], properties: {maxFailureRatio: {type: number, minimum: 0, maximum: 1}}}
+    body: {language: static, source: &migTolerance {maxFailureRatio: 0}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *migTolerance}]
+
+  - <<: *cfg
+    name: ontology.publication-approval
+    outputSchema: {type: object, required: [MAJOR, MINOR, PATCH], additionalProperties: {type: object, required: [approvers], properties: {approvers: {type: integer, minimum: 0}, mustInclude: {type: array}}}}
+    body: {language: static, source: &ontApproval {MAJOR: {approvers: 2, mustInclude: [domain-owner]}, MINOR: {approvers: 1}, PATCH: {approvers: 0}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ontApproval}]
+
+  - <<: *cfg
+    name: ontology.sensitivity-floor
+    outputSchema: {type: object, required: [rules], properties: {rules: {type: array, items: {type: object, required: [match, minimum], properties: {match: {type: string}, minimum: {type: string}}}}}}
+    body: {language: static, source: &ontSensitivity {rules: [{match: "code ~ '(?i)(birth|national|passport|ssn|health)'", minimum: sensitive-personal}, {match: "code ~ '(?i)(name|email|phone|address)' && type in Party", minimum: personal}, {match: "datatype == 'money' && facet == 'Contract'", minimum: confidential}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ontSensitivity}]
+
+  - <<: *cfg
+    name: party.matching
+    outputSchema: {type: object, required: [blockingKeys, autoLinkThreshold, reviewThreshold], properties: {blockingKeys: {type: array, minItems: 1}, autoLinkThreshold: {type: number, minimum: 0, maximum: 1}, reviewThreshold: {type: number, minimum: 0, maximum: 1}, weights: {type: object}}}
+    body: {language: static, source: &ptyMatching {blockingKeys: [emailHash, phoneHash, "familyName+postalCode", registrationNumber], autoLinkThreshold: 0.97, reviewThreshold: 0.85, weights: {emailHash: 8, phoneHash: 6, registrationNumber: 10, nameSimilarity: 4, addressSimilarity: 3, dateOfBirth: 5}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ptyMatching}]
+
+  - <<: *cfg
+    name: party.survivorship
+    outputSchema: {type: object, required: [sourceTrust, tieBreak], properties: {sourceTrust: {type: array, items: {type: string}}, tieBreak: {type: array, items: {enum: [most-recently-verified, most-recent, most-complete]}}}}
+    body: {language: static, source: &ptySurvivorship {sourceTrust: [verified-registry, party-self-service, assisted-channel, import], tieBreak: [most-recently-verified, most-recent]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ptySurvivorship}]
+
+  - <<: *cfg
+    name: privacy.consent-requirements
+    outputSchema: {type: object, required: [default], properties: {default: {type: object, additionalProperties: {enum: [consent-required, opt-out, not-required]}}, byJurisdiction: {type: object}}}
+    body: {language: static, source: &priConsent {default: {marketing-email: consent-required, marketing-personalization: consent-required, analytics-aggregate: opt-out, billing: not-required, shipping: not-required}, byJurisdiction: {US: {marketing-email: opt-out}}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *priConsent}]
+
+  - <<: *cfg
+    name: rel.traversal-limits
+    outputSchema: {type: object, required: [maxDepth, maxFanOut, timeoutMs], properties: {maxDepth: {type: integer, minimum: 1, maximum: 8}, maxFanOut: {type: integer, minimum: 1}, timeoutMs: {type: integer, minimum: 100}}}
+    body: {language: static, source: &relLimits {maxDepth: 8, maxFanOut: 1000, timeoutMs: 2000}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *relLimits}]

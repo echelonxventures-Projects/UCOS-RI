@@ -1,0 +1,218 @@
+header:
+  id: DOM-CTR
+  title: Contract Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-007-001, CIC-011-001, CIC-011-004, CIC-015-001, CIC-002-001]
+  traces: [PRIN-002, PRIN-005, PRIN-006, PRIN-008, PRIN-011]
+  certification: [CR-CTR-01, CR-CTR-02, CR-CTR-03]
+  validation: [VR-CTR-01, VR-CTR-02]
+
+purpose: >
+  Represent binding commercial agreements between parties — master agreements, subscriptions
+  agreements, framework/frame contracts, SLAs, licence agreements, policies (insurance),
+  tariffs and service contracts — as structured, versioned, executable terms that drive pricing,
+  entitlements, billing schedules, obligations, and renewals.
+
+scope:
+  includes:
+    - Contract aggregate with parties, roles, structured clauses, terms, and amendments
+    - Commercial terms executable by other domains (negotiated prices, discounts, commitments, payment terms, SLA targets)
+    - Obligations and milestones tracking
+    - Renewal, termination, and amendment processes
+    - Contract documents (rendered, signed) via DOM-DOC; signatures via e-signature plugins
+  excludes:
+    - Price computation (DOM-PRC uses contract dimension and contract price lists)
+    - Entitlement enforcement (DOM-ENT), invoicing (DOM-BIL), revenue allocation (DOM-REV)
+    - Legal clause authoring tools (content in DOM-DOC; templates governed)
+
+responsibilities:
+  - Single source of truth for agreed terms and their effective periods.
+  - Propagate executable terms to consuming domains via events, never by shared tables.
+  - Track obligations and renewal windows with timers.
+
+principles: [PRIN-002, PRIN-005, PRIN-006, PRIN-008, PRIN-011]
+
+boundaries:
+  upstream: [DOM-PTY, DOM-ORG, DOM-AUTH, DOM-OFR, DOM-QTE, DOM-DOC, DOM-EVD, DOM-LFC]
+  downstream: [DOM-PRC, DOM-ENT, DOM-BIL, DOM-REV, DOM-SDL, DOM-CTX]
+
+ownership:
+  boundedContext: contract
+  owningRole: Chief Product Architect
+  service: contract-service
+  schema: ucos_contract
+
+capabilities:
+  - {id: CTR-C1, name: Author & negotiate, description: "Draft from template or quote; redline structured terms; internal approvals."}
+  - {id: CTR-C2, name: Execute, description: "Collect signatures (plugin) with evidence; activate."}
+  - {id: CTR-C3, name: Executable terms, description: "Publish price/discount/commitment/SLA/payment terms to consuming domains."}
+  - {id: CTR-C4, name: Obligations, description: "Track obligations, milestones, commitments (e.g. minimum spend) with timers and alerts."}
+  - {id: CTR-C5, name: Amend/renew/terminate, description: "Versioned amendments; renewal and termination per terms."}
+  - {id: CTR-C6, name: Hierarchy, description: "Master/child contracts (framework -> call-offs) via DOM-REL."}
+
+services:
+  - {name: ContractCommandService, kind: application, operations: [DraftContract, ReviseContract, SubmitContractForApproval, ApproveContract, SendForSignature, RecordSignature, ActivateContract, AmendContract, RenewContract, TerminateContract, RecordObligationFulfilment]}
+  - {name: TermCompiler, kind: domain-service, contract: "compile(terms) -> executable artifacts: contract price list (DOM-PRC command), adjustment rules (DOM-RUL), entitlement grants (DOM-ENT), billing schedule spec (DOM-BIL), SLA monitors (DOM-SDL)"}
+  - {name: CommitmentTracker, kind: domain-service, contract: "track(commitment, consumption/billing events) -> progress, shortfall forecast"}
+  - {name: ContractQueryService, kind: application, operations: [GetContract, FindContracts, GetEffectiveTerms, GetObligations, GetCommitmentProgress]}
+
+aggregates:
+  - name: Contract
+    identity: "urn:ucos:<tenant>:contract:<ulid>"
+    invariants:
+      - "INV-CTR-1: >= 2 parties with distinct roles; each signatory holds signing authority for the represented party at signing time (DOM-AUTH check)."
+      - "INV-CTR-2: active version terms immutable; changes via amendment versions with effectiveFrom."
+      - "INV-CTR-3: amendment effective periods do not overlap for the same term key."
+      - "INV-CTR-4: child contracts' effective period within master's; child terms may not exceed master limits (e.g. discount caps)."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: typeRef, type: "MetadataUrn (ontology subtype of Contract: MasterAgreement, SubscriptionAgreement, InsurancePolicy, Tariff, …)"}
+      - {name: number, type: string}
+      - {name: parties, type: "ContractParty[]"}
+      - {name: versions, type: "ContractVersion[]"}
+      - {name: currentVersion, type: int}
+      - {name: effectiveFrom, type: Instant}
+      - {name: effectiveTo, type: "Instant?"}
+      - {name: governingLaw, type: "jurisdiction code"}
+      - {name: lifecycleState, type: string}
+      - {name: sourceRef, type: "quote | order | template"}
+      - {name: revision, type: long}
+
+entities:
+  - {name: ContractParty, within: Contract, fields: [partyRef, "role (seller|buyer|insurer|insured|licensor|licensee|guarantor|…)", "signatories[]"]}
+  - {name: ContractVersion, within: Contract, fields: [version, effectiveFrom, "terms: Term[]", "documentRef (DOM-DOC)", "signatures[] (evidence refs)", "amendmentReason?"]}
+  - {name: Term, within: ContractVersion, fields: [termKey, "kind (price|discount|commitment|payment|sla|renewal|termination|entitlement|liability|custom)", "params (validated against term kind schema)", "scope?", effectiveFrom, "effectiveTo?"]}
+  - {name: Obligation, within: Contract, fields: [obligationId, "obligor (party role)", description, "dueRule (CEL or date)", "measure?", status, "evidenceRefs[]"]}
+
+valueObjects:
+  - {name: PaymentTerms, definition: "{netDays, discountTerms: [{days, percent}], method[], currency, invoicingFrequency}"}
+  - {name: Commitment, definition: "{kind: spend|volume|seats, amount|quantity, period, trueUpPolicyRef, shortfallFeeRef?}"}
+  - {name: SlaTarget, definition: "{metricRef, objective (e.g. availability >= 99.9%), window, creditScheduleRef}"}
+
+commands:
+  - {name: DraftContract, input: "{typeRef, parties[], templateRef? | quoteRef?, terms[], effectiveFrom, effectiveTo?}", emits: [ContractDrafted]}
+  - {name: ReviseContract, input: "{id, expectedRevision, patch}", emits: [ContractRevised]}
+  - {name: SubmitContractForApproval, input: "{id}", emits: [ContractSubmitted], note: "Approval plan from policy contract.approval (deviation from standard terms, discount depth, liability caps)"}
+  - {name: ApproveContract, input: "{id, stage, decision, comment}", emits: [ContractApproved, ContractRejected]}
+  - {name: SendForSignature, input: "{id, signatories[], providerRef}", emits: [ContractSentForSignature]}
+  - {name: RecordSignature, input: "{id, signatory, evidenceRef}", emits: [ContractSigned], note: "Called by e-signature plugin webhook; verifies evidence"}
+  - {name: ActivateContract, input: "{id}", emits: [ContractActivated, ContractTermsPublished], preconditions: ["all required signatures present", "effectiveFrom reached (or timer)"]}
+  - {name: AmendContract, input: "{id, changes: Term[], effectiveFrom, reason}", emits: [ContractAmendmentDrafted], note: "Amendment follows the same approval/signature flow, then ContractAmended + ContractTermsPublished"}
+  - {name: RenewContract, input: "{id, newEffectiveTo, termChanges?}", emits: [ContractRenewed, ContractTermsPublished]}
+  - {name: TerminateContract, input: "{id, reason, effectiveAt, initiatedBy}", emits: [ContractTerminated], note: "Computes early termination fees per terms"}
+  - {name: RecordObligationFulfilment, input: "{id, obligationId, evidenceRefs[]}", emits: [ObligationFulfilled]}
+
+queries:
+  - {name: GetContract, input: "{id, version?}", output: Contract}
+  - {name: FindContracts, input: "{partyRef?, typeRef?, state?, expiringBefore?, cursor, limit}", output: "page"}
+  - {name: GetEffectiveTerms, input: "{id, asOf, termKind?}", output: "Term[] effective at asOf"}
+  - {name: GetObligations, input: "{id, status?}", output: "Obligation[]"}
+  - {name: GetCommitmentProgress, input: "{id, termKey}", output: "{committed, achieved, forecast, shortfallRisk}"}
+
+apis:
+  - {style: REST, path: "/v1/contract/contracts", methods: {POST: DraftContract, GET: FindContracts}}
+  - {style: REST, path: "/v1/contract/contracts/{id}", methods: {GET: GetContract, PATCH: ReviseContract}}
+  - {style: REST, path: "/v1/contract/contracts/{id}:submit", methods: {POST: SubmitContractForApproval}}
+  - {style: REST, path: "/v1/contract/contracts/{id}:approve", methods: {POST: ApproveContract}}
+  - {style: REST, path: "/v1/contract/contracts/{id}:send-for-signature", methods: {POST: SendForSignature}}
+  - {style: REST, path: "/v1/contract/contracts/{id}/signatures", methods: {POST: RecordSignature}}
+  - {style: REST, path: "/v1/contract/contracts/{id}:activate", methods: {POST: ActivateContract}}
+  - {style: REST, path: "/v1/contract/contracts/{id}/amendments", methods: {POST: AmendContract}}
+  - {style: REST, path: "/v1/contract/contracts/{id}:renew", methods: {POST: RenewContract}}
+  - {style: REST, path: "/v1/contract/contracts/{id}:terminate", methods: {POST: TerminateContract}}
+  - {style: REST, path: "/v1/contract/contracts/{id}/terms", methods: {GET: GetEffectiveTerms}}
+  - {style: REST, path: "/v1/contract/contracts/{id}/obligations", methods: {GET: GetObligations}}
+  - {style: REST, path: "/v1/contract/contracts/{id}/obligations/{obligationId}:fulfil", methods: {POST: RecordObligationFulfilment}}
+  - {style: REST, path: "/v1/contract/contracts/{id}/commitments/{termKey}", methods: {GET: GetCommitmentProgress}}
+
+events:
+  - {type: ucos.contract.contract.drafted.v1, payload: "{id, typeRef, parties}"}
+  - {type: ucos.contract.contract.revised.v1, payload: "{id, revision}"}
+  - {type: ucos.contract.contract.submitted.v1, payload: "{id, approvalPlan}"}
+  - {type: ucos.contract.contract.approved.v1, payload: "{id, stage, approver}"}
+  - {type: ucos.contract.contract.rejected.v1, payload: "{id, stage, approver, comment}"}
+  - {type: ucos.contract.contract.sent-for-signature.v1, payload: "{id, signatories}"}
+  - {type: ucos.contract.contract.signed.v1, payload: "{id, signatory, evidenceRef}"}
+  - {type: ucos.contract.contract.activated.v1, payload: "{id, version, effectiveFrom, effectiveTo}"}
+  - {type: ucos.contract.contract.terms-published.v1, payload: "{id, version, executableTerms (price list refs, rule refs, entitlement specs, billing schedule spec, SLA specs)}", consumers: [pricing, entitlement, billing, service-delivery, revenue]}
+  - {type: ucos.contract.contract.amendment-drafted.v1, payload: "{id, amendmentVersion, effectiveFrom}"}
+  - {type: ucos.contract.contract.amended.v1, payload: "{id, version, effectiveFrom, changedTermKeys}"}
+  - {type: ucos.contract.contract.renewed.v1, payload: "{id, newEffectiveTo}"}
+  - {type: ucos.contract.contract.terminated.v1, payload: "{id, effectiveAt, reason, fees}"}
+  - {type: ucos.contract.contract.renewal-window-opened.v1, payload: "{id, noticeDeadline}"}
+  - {type: ucos.contract.obligation.fulfilled.v1, payload: "{id, obligationId}"}
+  - {type: ucos.contract.obligation.overdue.v1, payload: "{id, obligationId, dueAt}"}
+
+stateMachines:
+  - name: ContractLifecycle
+    definition: "Interpreted ucos.std:lifecycle:contract; regions: commercial, signature"
+    initial: draft
+    states: [draft, in-approval, approved, out-for-signature, signed, active, in-renewal, terminating, expired, terminated]
+    terminal: [expired, terminated]
+    transitions:
+      - {from: draft, to: in-approval, command: SubmitContractForApproval}
+      - {from: in-approval, to: draft, command: ApproveContract, guard: "rejected"}
+      - {from: in-approval, to: approved, command: ApproveContract, guard: "all stages approved"}
+      - {from: approved, to: out-for-signature, command: SendForSignature}
+      - {from: out-for-signature, to: signed, command: RecordSignature, guard: "all required signatures"}
+      - {from: signed, to: active, command: ActivateContract}
+      - {from: active, to: in-renewal, trigger: "renewal window timer (effectiveTo - noticePeriod)"}
+      - {from: in-renewal, to: active, command: RenewContract}
+      - {from: in-renewal, to: expired, trigger: "effectiveTo reached without renewal (auto-renew executes RenewContract via timer if renewal.mode=auto)"}
+      - {from: [active, in-renewal], to: terminating, command: TerminateContract, guard: "effectiveAt > now"}
+      - {from: [active, in-renewal, terminating], to: terminated, trigger: "termination effectiveAt reached"}
+
+rules:
+  - {id: RUL-CTR-1, statement: "Executable terms are the only contract data other domains act on; free-text clauses never drive behavior."}
+  - {id: RUL-CTR-2, statement: "Contract prices are published as a PriceList scoped by contract dimension = contract id; priority above standard lists (RUL-PRC-2 still applies)."}
+  - {id: RUL-CTR-3, statement: "Amendments with retroactive effectiveFrom require Finance approval and trigger re-rating/re-billing requests (DOM-BIL) for the affected period."}
+  - {id: RUL-CTR-4, statement: "Termination fees computed per terms using DOM-PRC formula models; recorded as DecisionRecord type contract-fee."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:contract.approval", purpose: "Approval plan by deviation, discount depth, liability, value"}
+  - {urn: "urn:ucos:ucos.std:policy:contract.signing-authority", purpose: "Signing authority requirements per party kind and value"}
+  - {urn: "urn:ucos:ucos.std:policy:contract.term-schemas", purpose: "Allowed term kinds and params schemas per contract type"}
+
+decisions:
+  - {id: DEC-CTR-1, question: "Is this contract approvable / which approvals are needed?", algorithm: "Policy contract.approval over term deviation analysis vs template"}
+  - {id: DEC-CTR-2, question: "Which terms are effective at time T?", algorithm: "GetEffectiveTerms: latest version with effectiveFrom <= T per term key"}
+
+security:
+  permissions: [contract.read, contract.author, contract.approve, contract.sign.dispatch, contract.activate, contract.amend, contract.terminate]
+  dataClassification: "Confidential (commercial terms); party personal data for consumer contracts."
+  threats: ["Signature forgery -> signature evidence verified (certificate chain / provider assertion) and ledgered", "Unauthorized term change -> immutable versions + approvals + SoD"]
+
+governance:
+  changeControl: "Contract templates and term schemas governed via ChangeSet; instance contracts governed by their lifecycle approvals."
+  evidence: "Approvals, signatures, rendered document digest captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per contract; terms propagation to consumers eventual (p99 2s); consumers must not act on terms before ContractTermsPublished."
+  slo: {GetEffectiveTerms_p99_ms: 20, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_contract (event-sourced)
+  tables:
+    - {name: contracts, columns: "tenant_id uuid, id char(26), type_urn text, number text, state text, effective_from timestamptz, effective_to timestamptz, current_version int, body jsonb, revision bigint", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, number)", "(tenant_id, state, effective_to)"]}
+    - {name: contract_parties, columns: "tenant_id, contract_id, party_ref, role", pk: "(tenant_id, contract_id, party_ref, role)", indexes: ["(tenant_id, party_ref)"]}
+    - {name: contract_terms, columns: "tenant_id, contract_id, version int, term_key text, kind text, params jsonb, effective_from timestamptz, effective_to timestamptz", pk: "(tenant_id, contract_id, version, term_key)"}
+    - {name: obligations, columns: "tenant_id, contract_id, obligation_id, due_at, status, body jsonb", pk: "(tenant_id, contract_id, obligation_id)", indexes: ["(tenant_id, status, due_at)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 32."
+  retention: "Contract life + policy contract.retention (default 10 years) unless legal hold."
+
+extensionModel:
+  extensionPoints: ["Contract subtypes via ontology", "Term kinds with param schemas and compilers (plugins)", "E-signature provider plugins", "Clause libraries in DOM-DOC"]
+  forbidden: ["Domain behavior driven by unstructured clause text"]
+
+certificationCriteria:
+  - {id: CR-CTR-01, rule: "TermCompiler golden tests: each ucos.std term kind compiles to the expected downstream commands.", level: L1}
+  - {id: CR-CTR-02, rule: "Effective terms resolution matches golden timeline across amendments, renewals, retroactive changes.", level: L1}
+  - {id: CR-CTR-03, rule: "Activation without all signatures is impossible under concurrency (race test with signature revocation).", level: L1}
+validationRules:
+  - {id: VR-CTR-01, rule: "Every term kind used in templates has a param schema in contract.term-schemas."}
+  - {id: VR-CTR-02, rule: "Every contract TypeDefinition binds a LifecycleModel with categories covering active and closed."}

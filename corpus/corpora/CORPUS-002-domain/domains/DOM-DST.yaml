@@ -1,0 +1,191 @@
+header:
+  id: DOM-DST
+  title: Distribution Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-005, CIC-011-001, CIC-006-001, CIC-002-001]
+  traces: [PRIN-021, PRIN-020, PRIN-016, PRIN-022]
+  certification: [CR-DST-01, CR-DST-02, CR-DST-03]
+  validation: [VR-DST-01, VR-DST-02]
+
+purpose: >
+  Syndicate the tenant's commercial offering to external channels and partners — resellers,
+  external marketplaces, comparison and ads feeds, partner portals, B2B procurement networks, AI
+  agent shopping surfaces — as governed distribution agreements producing context-resolved feeds
+  and accepting channel orders back, without hardcoding any channel (PRIN-021).
+
+scope:
+  includes:
+    - DistributionChannel definitions (channel dimension value + connector + format)
+    - DistributionAgreements with partners (what may be distributed, where, at which price tier, with which assets)
+    - Feed generation (full and delta) from catalog/pricing/availability resolution for the channel context
+    - Channel order intake (mapped to DOM-ORD with channel context and partner role)
+    - Feed quality and rejection handling from channels
+  excludes:
+    - Marketplace operation where the tenant is the operator (DOM-MKT)
+    - Settlement of partner commissions (DOM-STL)
+
+responsibilities:
+  - Feeds reflect exactly what resolution returns for the channel context.
+  - Agreements constrain distribution (scope, price tier, territories).
+  - Channel orders enter UCOS with full traceability.
+
+principles: [PRIN-016, PRIN-020, PRIN-021, PRIN-022]
+
+boundaries:
+  upstream: [DOM-CAT, DOM-PRC, DOM-AVL, DOM-COB, DOM-MED, DOM-RGT, DOM-TER]
+  downstream: [DOM-ORD, DOM-STL, DOM-ANL]
+  antiCorruption: "ChannelPort adapters map UCOS views to channel schemas (e.g. Google Merchant, Amazon SP-API, cXML/OCI punchout, schema.org/ACP-style agent feeds) and channel orders back."
+
+ownership:
+  boundedContext: marketplace
+  owningRole: Chief Product Architect
+  service: distribution-service
+  schema: ucos_marketplace
+
+capabilities:
+  - {id: DST-C1, name: Channels, description: "Register channels as dimension values with connectors."}
+  - {id: DST-C2, name: Agreements, description: "Distribution agreements per partner/channel."}
+  - {id: DST-C3, name: Feeds, description: "Generate, validate, deliver full/delta feeds."}
+  - {id: DST-C4, name: Channel orders, description: "Ingest and map channel orders."}
+  - {id: DST-C5, name: Feed quality, description: "Track channel rejections and fix loops."}
+
+services:
+  - {name: DistributionCommandService, kind: application, operations: [RegisterChannel, CreateDistributionAgreement, EndDistributionAgreement, GenerateFeed, DeliverFeed, RecordChannelFeedback, IngestChannelOrder]}
+  - {name: FeedBuilder, kind: domain-service, contract: "build(agreement, mode: full|delta, since) -> items from ResolveCatalog + Price + ResolveAvailability in channel context; mapped by ChannelPort schema; delta via change events since watermark"}
+  - {name: DistributionQueryService, kind: application, operations: [GetChannel, GetDistributionAgreement, GetFeedRun, GetFeedQuality]}
+
+aggregates:
+  - name: DistributionChannel
+    identity: "urn:ucos:<tenant>:distribution-channel:<code>"
+    invariants: ["INV-DST-1: code is a term in ucos.std.channels (or tenant extension) taxonomy; connector plugin active."]
+    fields:
+      - {name: code, type: string}
+      - {name: connectorRef, type: "plugin activation ref"}
+      - {name: format, type: string}
+      - {name: deliveryMode, type: "push|pull|api"}
+  - name: DistributionAgreement
+    identity: "urn:ucos:<tenant>:distribution-agreement:<ulid>"
+    invariants: ["INV-DST-2: scope territories and objects ⊆ rights held (DOM-RGT) for distribution in those territories."]
+    fields:
+      - {name: partner, type: PartyUrn}
+      - {name: channel, type: string}
+      - {name: catalogRef, type: InstanceUrn}
+      - {name: context, type: "ContextVector template (channel, territory, currency, locale, price-list-tier)"}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: assets, type: "media usage rights"}
+      - {name: settlementAgreementRef, type: "InstanceUrn?"}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: status, type: "active|suspended|ended"}
+  - name: FeedRun
+    identity: "urn:ucos:<tenant>:feed-run:<ulid>"
+    fields:
+      - {name: agreementRef, type: InstanceUrn}
+      - {name: mode, type: "full|delta"}
+      - {name: watermark, type: "event offset/time"}
+      - {name: items, type: long}
+      - {name: validationErrors, type: long}
+      - {name: deliveryStatus, type: "pending|delivered|failed"}
+
+entities: []
+
+valueObjects:
+  - {name: ChannelFeedback, definition: "{feedRunRef, itemRef, code, message, severity}"}
+
+commands:
+  - {name: RegisterChannel, input: "DistributionChannel", emits: [DistributionChannelRegistered]}
+  - {name: CreateDistributionAgreement, input: "DistributionAgreement + changeSetRef", emits: [DistributionAgreementCreated], preconditions: ["INV-DST-2"]}
+  - {name: EndDistributionAgreement, input: "{id, effectiveAt}", emits: [DistributionAgreementEnded], note: "Triggers withdrawal feed (delete items)"}
+  - {name: GenerateFeed, input: "{agreementId, mode}", emits: [FeedGenerated], async: true}
+  - {name: DeliverFeed, input: "{feedRunId}", emits: [FeedDelivered, FeedDeliveryFailed]}
+  - {name: RecordChannelFeedback, input: "{feedRunId, feedback[]}", emits: [ChannelFeedbackRecorded]}
+  - {name: IngestChannelOrder, input: "{channel, partner, channelOrder}", emits: [ChannelOrderIngested], note: "Maps to DOM-ORD PlaceOrder with channel context; idempotent on channel order id"}
+
+queries:
+  - {name: GetChannel, input: "{code}", output: DistributionChannel}
+  - {name: GetDistributionAgreement, input: "{id}", output: DistributionAgreement}
+  - {name: GetFeedRun, input: "{id}", output: FeedRun}
+  - {name: GetFeedQuality, input: "{agreementId, window}", output: "{items, rejected, topIssues[]}"}
+
+apis:
+  - {style: REST, path: "/v1/distribution/channels", methods: {POST: RegisterChannel}}
+  - {style: REST, path: "/v1/distribution/channels/{code}", methods: {GET: GetChannel}}
+  - {style: REST, path: "/v1/distribution/agreements", methods: {POST: CreateDistributionAgreement}}
+  - {style: REST, path: "/v1/distribution/agreements/{id}", methods: {GET: GetDistributionAgreement}}
+  - {style: REST, path: "/v1/distribution/agreements/{id}:end", methods: {POST: EndDistributionAgreement}}
+  - {style: REST, path: "/v1/distribution/agreements/{id}/feeds", methods: {POST: GenerateFeed}}
+  - {style: REST, path: "/v1/distribution/feed-runs/{id}", methods: {GET: GetFeedRun}}
+  - {style: REST, path: "/v1/distribution/feed-runs/{id}:deliver", methods: {POST: DeliverFeed}}
+  - {style: REST, path: "/v1/distribution/feed-runs/{id}/feedback", methods: {POST: RecordChannelFeedback}}
+  - {style: REST, path: "/v1/distribution/agreements/{id}/quality", methods: {GET: GetFeedQuality}}
+  - {style: REST, path: "/v1/distribution/channels/{code}/orders", methods: {POST: IngestChannelOrder}}
+
+events:
+  - {type: ucos.marketplace.distribution-channel.registered.v1, payload: "{code, connectorRef}"}
+  - {type: ucos.marketplace.distribution-agreement.created.v1, payload: "{id, partner, channel, scope}"}
+  - {type: ucos.marketplace.distribution-agreement.ended.v1, payload: "{id, effectiveAt}"}
+  - {type: ucos.marketplace.feed.generated.v1, payload: "{feedRunId, agreementId, mode, items, validationErrors}"}
+  - {type: ucos.marketplace.feed.delivered.v1, payload: "{feedRunId}"}
+  - {type: ucos.marketplace.feed.delivery-failed.v1, payload: "{feedRunId, reason}"}
+  - {type: ucos.marketplace.channel-feedback.recorded.v1, payload: "{feedRunId, rejected}"}
+  - {type: ucos.marketplace.channel-order.ingested.v1, payload: "{channel, partner, channelOrderId, orderRef}"}
+
+stateMachines:
+  - name: FeedRunLifecycle
+    initial: generating
+    states: [generating, generated, delivered, failed]
+    terminal: [delivered, failed]
+    transitions:
+      - {from: generating, to: generated, trigger: "items built and validated"}
+      - {from: generated, to: delivered, command: DeliverFeed, guard: "connector ack"}
+      - {from: [generating, generated], to: failed, trigger: "build error or delivery retries exhausted"}
+
+rules:
+  - {id: RUL-DST-1, statement: "Feeds contain only items whose catalog membership, price, availability, and rights resolve successfully in the agreement context; unresolved items are omitted with reason in the feed run report."}
+  - {id: RUL-DST-2, statement: "Ending an agreement or losing rights triggers delta withdrawal within policy distribution.withdrawal-sla."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:distribution.withdrawal-sla", purpose: "Maximum time to withdraw items from channels after rights/agreement change"}
+
+decisions:
+  - {id: DEC-DST-1, question: "Which items, at which prices, go to partner P on channel C?", algorithm: "FeedBuilder with agreement context and RUL-DST-1"}
+
+security:
+  permissions: [distribution.read, distribution.manage, distribution.feed.run, distribution.order.ingest]
+  dataClassification: "Feeds contain public/partner-confidential commercial data; channel orders contain personal data (encrypted)."
+  threats: ["Unauthorized price exposure -> agreement-scoped price tiers only", "Order injection -> channel connector authentication and idempotency"]
+
+governance:
+  changeControl: "Agreements and channel registrations via ChangeSet."
+  evidence: "Feed run reports retained for dispute resolution."
+
+runtimeBehavior:
+  consistency: "Delta feeds from event watermarks; full feeds snapshot-consistent per run."
+  slo: {delta_feed_latency_p95_min: 15, GenerateFeed_1M_items_p95_min: 30, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_marketplace (separate tables) + object storage for feed files
+  tables:
+    - {name: distribution_channels, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: distribution_agreements, columns: "tenant_id, id, partner, channel, body jsonb, status, valid_from, valid_to", pk: "(tenant_id, id)"}
+    - {name: feed_runs, columns: "tenant_id, id, agreement_id, mode, watermark, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: channel_orders, columns: "tenant_id, channel, channel_order_id, order_ref", pk: "(tenant_id, channel, channel_order_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "feed_runs range(created) monthly."
+  retention: "Feed runs 1 year; files 90 days."
+
+extensionModel:
+  extensionPoints: ["ChannelPort plugins per channel/network", "Feed format mappers", "Agent-commerce feed profiles"]
+  forbidden: ["Channel-specific code in core"]
+
+certificationCriteria:
+  - {id: CR-DST-01, rule: "Feed items equal resolution results for the agreement context on sampled items (price, availability, membership).", level: L1}
+  - {id: CR-DST-02, rule: "Channel order ingestion idempotent on channel order id.", level: L1}
+  - {id: CR-DST-03, rule: "Rights loss triggers withdrawal within distribution.withdrawal-sla (scenario test).", level: L1}
+validationRules:
+  - {id: VR-DST-01, rule: "Every channel code is a term in the channel taxonomy."}
+  - {id: VR-DST-02, rule: "Every agreement context template includes channel and currency."}

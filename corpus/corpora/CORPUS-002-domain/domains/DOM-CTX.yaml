@@ -1,0 +1,197 @@
+header:
+  id: DOM-CTX
+  title: Context Domain Specification
+  version: 1.1.1
+  status: normative
+  authority: Chief Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-011-003, CIC-002-001]
+  traces: [PRIN-006, PRIN-020, PRIN-021, PRIN-017, CIC-011-001]
+  certification: [CR-CTX-01, CR-CTX-02, CR-CTX-03]
+  validation: [VR-CTX-01, VR-CTX-02]
+
+purpose: >
+  Own the definitions of context dimensions, the assembly of ContextVectors from requests, and the
+  reference implementation of the Context Resolution Algorithm used by every contextual fact in UCOS.
+  Markets, channels, territories, segments, and any future context axis exist only as dimension data here.
+
+scope:
+  includes:
+    - ContextDimension definitions and their value sources and hierarchies
+    - Context derivation rule registration (fact kind context-derivation)
+    - ResolutionConfig policies per fact kind (schema and defaults)
+    - Context assembly and resolution runtime library (ucos-context-runtime)
+    - Fact kind registry (which fact kinds exist, which context owns each)
+  excludes:
+    - Storage of contextual facts (owned by the domain of each fact kind)
+    - Geographic reference data (DOM-GEO), territory definitions (DOM-TER), locale data (DOM-LOC)
+
+responsibilities:
+  - Guarantee a single, deterministic resolution semantics across all domains.
+  - Validate context values against dimension value sources.
+  - Publish dimension hierarchies to resolvers for descendant-of matching and fallback.
+
+principles: [PRIN-006, PRIN-016, PRIN-017, PRIN-020, PRIN-021]
+
+boundaries:
+  upstream: [DOM-ONT, DOM-TXO, DOM-GEO, DOM-TER, DOM-LOC, DOM-PTY, DOM-POL, DOM-RUL]
+  downstream: [DOM-COB, DOM-PRC, DOM-CAT, DOM-AVL, DOM-POL, DOM-RUL, DOM-OFR, DOM-TAX]
+
+ownership:
+  boundedContext: context
+  owningRole: Chief Architect
+  service: context-service
+  schema: ucos_context
+
+capabilities:
+  - {id: CTX-C1, name: Define dimension, description: "Register a new context dimension with value source, hierarchy, weight, precedence."}
+  - {id: CTX-C2, name: Assemble context, description: "Build a validated ContextVector from request, principal, derivations, and defaults (CIC-011-001 §2)."}
+  - {id: CTX-C3, name: Resolve, description: "Library-level Resolve() used in-process by every context."}
+  - {id: CTX-C4, name: Explain, description: "Return resolution traces for debugging and audit."}
+  - {id: CTX-C5, name: Register fact kind, description: "Declare a fact kind, its owning context, its default ResolutionConfig policy."}
+
+services:
+  - {name: ContextDefinitionService, kind: application, operations: [DefineDimension, ReviseDimension, PublishDimension, DeprecateDimension, RegisterFactKind]}
+  - {name: ContextAssemblyService, kind: application, operations: [AssembleContext, ValidateContext], deployment: "embedded library + remote API for clients without the runtime"}
+  - {name: HierarchyIndex, kind: domain-service, contract: "ancestors(dimension, value) -> ordered list; isDescendant(dimension, v, x) -> bool; O(1) via pre-computed closure tables refreshed from hierarchy events"}
+  - {name: ContextResolver, kind: domain-service, contract: "CIC-011-001 Resolve; pure function of (candidates, ctx, cfg)"}
+
+aggregates:
+  - name: ContextDimension
+    kernel: true
+    identity: "urn:ucos:<namespace>:dim:<code>@<semver>"
+    invariants:
+      - "INV-CTX-1: code unique within tenant-visible dimension set (ucos.std + tenant namespaces)."
+      - "INV-CTX-2: hierarchical-enum dimensions reference an acyclic hierarchical RelationshipType."
+      - "INV-CTX-3: weight in 1..1000; defaultPrecedence unique among published dimensions visible to a tenant."
+      - "INV-CTX-4: a required dimension without default must be derivable by at least one derivation rule or always supplied by principal claims."
+    fields:
+      - {name: urn, type: MetadataUrn}
+      - {name: code, type: string}
+      - {name: label, type: LocalizedText}
+      - {name: valueType, type: "enum(enum, hierarchical-enum, range, instance-ref, boolean)"}
+      - {name: valueSource, type: ValueSource}
+      - {name: hierarchy, type: "HierarchyRef?"}
+      - {name: weight, type: int}
+      - {name: defaultPrecedence, type: int}
+      - {name: required, type: boolean}
+      - {name: default, type: "json?"}
+      - {name: sensitivity, type: DataClassification}
+      - {name: state, type: DefinitionState}
+  - name: FactKind
+    identity: "urn:ucos:<namespace>:factkind:<code>"
+    invariants: ["INV-CTX-5: each fact kind has exactly one owning bounded context and one resolution policy."]
+    fields:
+      - {name: code, type: string}
+      - {name: owningContext, type: string}
+      - {name: resolutionPolicyRef, type: MetadataUrn}
+      - {name: regulated, type: boolean, description: "If true, 100% trace capture and cache bypass on lag > 1s"}
+      - {name: effectKinds, type: "string[]", description: "For rule fact kinds"}
+
+entities: []
+
+valueObjects:
+  - {name: ContextVector, definition: "CIC-011-001 §1.2"}
+  - {name: ContextValue, definition: "{value, source: explicit|derived|default, confidence}"}
+  - {name: ApplicabilityScope, definition: "CIC-011-001 §1.3"}
+  - {name: ResolutionConfig, definition: "{dimensionPrecedence[], conflictStrategy, fallbackChains[], cardinality, relaxationAllowed, maxFallbackSteps}"}
+  - {name: Resolution, definition: "{outcome: one|many|not-found|ambiguous, selected[], trace}"}
+  - {name: ValueSource, definition: "{kind: taxonomy|party|geo|registry|instance|inline|plugin, ref, inlineValues?}"}
+  - {name: HierarchyRef, definition: "{relTypeRef, rootValues[]}"}
+
+commands:
+  - {name: DefineDimension, input: "ContextDimension draft + changeSetRef", emits: [DimensionDefined]}
+  - {name: ReviseDimension, input: "{urn, expectedRevision, patch}", emits: [DimensionRevised]}
+  - {name: PublishDimension, input: "{urn, approvalRef}", emits: [DimensionPublished], preconditions: ["INV-CTX-1..4", "ChangeSet approved"]}
+  - {name: DeprecateDimension, input: "{urn, successor?}", emits: [DimensionDeprecated], preconditions: ["no published ResolutionConfig lists it in dimensionPrecedence without successor mapping"]}
+  - {name: RegisterFactKind, input: "FactKind", emits: [FactKindRegistered]}
+
+queries:
+  - {name: ListDimensions, input: "{tenant}", output: "ContextDimension[] (published, visible)"}
+  - {name: GetDimension, input: "{urn}", output: ContextDimension}
+  - {name: AssembleContext, input: "{explicit: map, principal (from token), asOf?}", output: ContextVector}
+  - {name: ValidateContext, input: "{vector}", output: "violations[]"}
+  - {name: GetAncestors, input: "{dimension, value}", output: "value[]"}
+  - {name: ListFactKinds, input: "{}", output: "FactKind[]"}
+
+apis:
+  - {style: REST, path: "/v1/context/dimensions", methods: {POST: DefineDimension, GET: ListDimensions}}
+  - {style: REST, path: "/v1/context/dimensions/{urn}", methods: {GET: GetDimension, PATCH: ReviseDimension}}
+  - {style: REST, path: "/v1/context/dimensions/{urn}:publish", methods: {POST: PublishDimension}}
+  - {style: REST, path: "/v1/context/dimensions/{urn}:deprecate", methods: {POST: DeprecateDimension}}
+  - {style: REST, path: "/v1/context/dimensions/{code}/values/{value}/ancestors", methods: {GET: GetAncestors}}
+  - {style: REST, path: "/v1/context:assemble", methods: {POST: AssembleContext}}
+  - {style: REST, path: "/v1/context:validate", methods: {POST: ValidateContext}}
+  - {style: REST, path: "/v1/context/fact-kinds", methods: {POST: RegisterFactKind, GET: ListFactKinds}}
+
+events:
+  - {type: ucos.context.dimension.defined.v1, payload: "{urn, code, valueType}"}
+  - {type: ucos.context.dimension.revised.v1, payload: "{urn, revision, patch}"}
+  - {type: ucos.context.dimension.published.v1, payload: "{urn, code, weight, defaultPrecedence, hierarchy}"}
+  - {type: ucos.context.dimension.deprecated.v1, payload: "{urn, successor}"}
+  - {type: ucos.context.fact-kind.registered.v1, payload: "{code, owningContext, resolutionPolicyRef, regulated}"}
+
+stateMachines:
+  - name: DimensionLifecycle
+    initial: draft
+    states: [draft, in-review, published, deprecated, retired]
+    terminal: [retired]
+    transitions:
+      - {from: draft, to: in-review, command: submit}
+      - {from: in-review, to: published, command: PublishDimension}
+      - {from: published, to: deprecated, command: DeprecateDimension}
+      - {from: deprecated, to: retired, command: retire, guard: "no scoped fact references the dimension (fact-kind owners report zero via usage query)"}
+
+rules:
+  - {id: RUL-CTX-1, statement: "Derivation rules execute in topological order of input/output dimensions; a cycle in derivation dependencies fails publication (E-CTX-DERIVATION-CYCLE)."}
+  - {id: RUL-CTX-2, statement: "Explicit values win over derived values unless the derivation rule is authoritative."}
+  - {id: RUL-CTX-3, statement: "Scopes referencing deprecated dimensions are rewritten via successor mapping at read time; writes referencing deprecated dimensions are rejected."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:context.dimension-authoring", purpose: "Who may define tenant dimensions"}
+  - {urn: "urn:ucos:ucos.std:policy:<factKind>.resolution", purpose: "ResolutionConfig per fact kind (one policy per registered fact kind)"}
+  - {urn: "urn:ucos:ucos.std:policy:context.max-dimensions", purpose: "Upper bound on dimensions per tenant (default 64) to bound index cost"}
+
+decisions:
+  - {id: DEC-CTX-1, question: "Which fact applies in this context?", algorithm: "CIC-011-001 §3"}
+  - {id: DEC-CTX-2, question: "Which value does a derived dimension take?", algorithm: "CIC-011-001 §2 step 3 over context-derivation rules"}
+
+security:
+  permissions: [context.dimension.read, context.dimension.author, context.dimension.publish, context.factkind.register]
+  dataClassification: "Dimension definitions internal. Context vectors may include personal dimensions -> never logged raw; digest only (CIC-011-001 §6)."
+  threats: ["Context spoofing: caller-supplied jurisdiction/territory overridden by authoritative derivations from verified data", "Cache key leakage of personal dimensions: tenant-salted digests (CIC-011-003 §3)"]
+
+governance:
+  changeControl: "Dimension publication and weight/precedence changes require ChangeSet with impact analysis: count of scoped facts per fact kind whose ranking changes (computed by simulation job over sampled contexts)."
+  evidence: "Impact analysis report attached as Evidence to the ChangeSet."
+
+runtimeBehavior:
+  consistency: "Dimension definitions eventually consistent to embedded runtimes within 5s (event-driven refresh)."
+  slo: {AssembleContext_p99_ms: 2, Resolve_p99_ms: 2, availability: "embedded; remote API 99.99%"}
+  caching: "Dimension set and hierarchy closures cached in-process, version-keyed by dimension.published sequence."
+
+persistenceModel:
+  store: PostgreSQL schema ucos_context
+  tables:
+    - {name: dimensions, columns: "tenant_id uuid (null for ucos.std -> stored as nil uuid), urn text, code text, body jsonb, state text, revision bigint", pk: "(tenant_id, urn)"}
+    - {name: hierarchy_closure, columns: "tenant_id uuid, dimension_code text, ancestor text, descendant text, depth int", pk: "(tenant_id, dimension_code, descendant, ancestor)", indexes: ["(tenant_id, dimension_code, ancestor)"]}
+    - {name: fact_kinds, columns: "tenant_id uuid, code text, owning_context text, resolution_policy text, regulated bool", pk: "(tenant_id, code)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash by tenant_id (16) for hierarchy_closure."
+  retention: "Indefinite for definitions."
+
+extensionModel:
+  extensionPoints:
+    - "Tenant dimensions in tenant namespaces"
+    - "Plugin value sources (valueSource.kind=plugin) e.g. external segmentation engines"
+    - "Custom conflict strategies via policy:<urn>"
+  forbidden: ["Overriding ucos.std dimension weights except via tenant-layer configuration policy"]
+
+certificationCriteria:
+  - {id: CR-CTX-01, rule: "Every ucos-context-runtime implementation (one per language, CIC-001-001 §1.1) passes CIC-011-001 CR-011-001-01..04.", level: L1}
+  - {id: CR-CTX-02, rule: "Derivation cycle detection rejects 100% of generated cyclic rule sets.", level: L1}
+  - {id: CR-CTX-03, rule: "Closure table equals transitive closure computed from hierarchy edges after 10^4 random edge mutations.", level: L1}
+validationRules:
+  - {id: VR-CTX-01, rule: "Every ucos.std dimension listed in CIC-011-001 §1.1 exists in the ucos.std pack."}
+  - {id: VR-CTX-02, rule: "Every fact kind referenced by a domain spec is registered."}

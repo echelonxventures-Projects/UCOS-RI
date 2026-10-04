@@ -1,0 +1,207 @@
+header:
+  id: DOM-QTE
+  title: Quote Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-004, CIC-007-001, CIC-010-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-006, PRIN-008, DOM-OFR, DOM-PRC]
+  certification: [CR-QTE-01, CR-QTE-02, CR-QTE-03]
+  validation: [VR-QTE-01]
+
+purpose: >
+  Produce priced, configured, approvable, and time-bounded commercial proposals — from simple
+  B2C price quotes to complex B2B, telecom, insurance, and public-sector proposals with negotiated
+  discounts — that convert into orders and contracts with the exact quoted terms.
+
+scope:
+  includes:
+    - Quote aggregate with versions, lines (offer configurations), terms, validity
+    - Price lock via pricingSnapshotId; manual/negotiated adjustments with approval routing
+    - Deal approval (discount depth, margin, non-standard terms)
+    - Quote documents (DOM-DOC rendering), acceptance (click/e-signature)
+    - Conversion to order and/or contract
+  excludes:
+    - Configuration logic (DOM-OFR Configurator), price computation (DOM-PRC)
+    - Contract execution (DOM-CTR), order processing (DOM-ORD)
+    - Opportunity/pipeline management (out of substrate; integrated CRM via DOM-DXC)
+
+responsibilities:
+  - Reproducible quoted prices (replayable snapshot) for the validity period.
+  - Approval compliance before a quote is presented.
+  - Lossless conversion: order/contract terms equal accepted quote terms.
+
+principles: [PRIN-002, PRIN-005, PRIN-006, PRIN-008, PRIN-011]
+
+boundaries:
+  upstream: [DOM-OFR, DOM-PRC, DOM-CAT, DOM-PTY, DOM-CTX, DOM-POL, DOM-DOC, DOM-PRF]
+  downstream: [DOM-ORD, DOM-CTR, DOM-ANL]
+
+ownership:
+  boundedContext: transaction
+  owningRole: Chief Product Architect
+  service: quote-service
+  schema: ucos_transaction
+
+capabilities:
+  - {id: QTE-C1, name: Build quote, description: "Add configured offer lines; reprice; validate."}
+  - {id: QTE-C2, name: Negotiate, description: "Manual adjustments (phase MANUAL) with reason codes; versioning."}
+  - {id: QTE-C3, name: Approve, description: "Policy-driven approval routing with SoD."}
+  - {id: QTE-C4, name: Present & accept, description: "Render document, send, accept (with evidence)."}
+  - {id: QTE-C5, name: Convert, description: "Create order and/or contract from accepted version."}
+
+services:
+  - {name: QuoteCommandService, kind: application, operations: [CreateQuote, AddQuoteLine, UpdateQuoteLine, RemoveQuoteLine, ApplyManualAdjustment, RepriceQuote, SubmitQuoteForApproval, DecideQuoteApproval, PresentQuote, AcceptQuote, DeclineQuote, ReviseQuote, ConvertQuote, ExpireQuote]}
+  - {name: DealApprovalRouter, kind: domain-service, contract: "plan(quoteVersion) -> approval stages from policy quote.approval using discount depth vs list, margin (DOM-PRF), non-standard terms, total value"}
+  - {name: QuoteQueryService, kind: application, operations: [GetQuote, FindQuotes, GetQuoteVersion, CompareQuoteVersions]}
+
+aggregates:
+  - name: Quote
+    identity: "urn:ucos:<tenant>:quote:<ulid>"
+    invariants:
+      - "INV-QTE-1: a presented version is immutable; changes create a new version and invalidate approvals of the old."
+      - "INV-QTE-2: every line carries a valid configuration per DOM-OFR at the version's pricing time."
+      - "INV-QTE-3: version total equals Price replay of its pricingSnapshotId plus recorded manual adjustments."
+      - "INV-QTE-4: acceptance only of the latest presented, unexpired, approved version."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: number, type: string}
+      - {name: customer, type: PartyUrn}
+      - {name: owner, type: "PartyUrn (sales rep / agent)"}
+      - {name: context, type: ContextVector}
+      - {name: versions, type: "QuoteVersion[]"}
+      - {name: currentVersion, type: int}
+      - {name: lifecycleState, type: string}
+      - {name: conversion, type: "{orderRef?, contractRef?}"}
+      - {name: revision, type: long}
+
+entities:
+  - {name: QuoteVersion, within: Quote, fields: [version, "lines: QuoteLine[]", "terms (OfferTerms overrides, PaymentTerms)", pricingSnapshotId, "priceResult", "manualAdjustments[]", validUntil, "approvals[]", "documentRef?", "acceptanceEvidenceRef?"]}
+  - {name: QuoteLine, within: QuoteVersion, fields: [lineId, offerRef@version, configuration, quantity, "action", "targetRef?", "requestedStart?"]}
+  - {name: ManualAdjustment, within: QuoteVersion, fields: [adjustmentId, "target (line|quote)", "effect (percent|amount|override)", value, reasonCode, appliedBy]}
+
+valueObjects:
+  - {name: ApprovalStage, definition: "{stage, approverRoles[], quorum, reasonCodes[]}"}
+
+commands:
+  - {name: CreateQuote, input: "{customer, context, owner?, sourceRef? (opportunity external ref)}", emits: [QuoteCreated]}
+  - {name: AddQuoteLine, input: "{id, offerRef, configuration, quantity, action?, targetRef?}", emits: [QuoteLineAdded]}
+  - {name: UpdateQuoteLine, input: "{id, lineId, patch}", emits: [QuoteLineUpdated]}
+  - {name: RemoveQuoteLine, input: "{id, lineId}", emits: [QuoteLineRemoved]}
+  - {name: ApplyManualAdjustment, input: "{id, adjustment}", emits: [QuoteAdjustmentApplied], preconditions: ["PDP quote.adjust within role limits"]}
+  - {name: RepriceQuote, input: "{id}", emits: [QuoteRepriced], note: "Calls DOM-PRC Price; stores new pricingSnapshotId"}
+  - {name: SubmitQuoteForApproval, input: "{id}", emits: [QuoteSubmittedForApproval, QuoteAutoApproved]}
+  - {name: DecideQuoteApproval, input: "{id, stage, decision, comment}", emits: [QuoteApprovalDecided]}
+  - {name: PresentQuote, input: "{id, channels[], recipients[]}", emits: [QuotePresented], preconditions: ["approved", "document rendered"]}
+  - {name: AcceptQuote, input: "{id, version, acceptedBy, evidenceRef}", emits: [QuoteAccepted], preconditions: ["INV-QTE-4", "acceptor holds authority for customer (DOM-AUTH)"]}
+  - {name: DeclineQuote, input: "{id, reasonCode}", emits: [QuoteDeclined]}
+  - {name: ReviseQuote, input: "{id}", emits: [QuoteRevised], note: "Creates new draft version from current"}
+  - {name: ConvertQuote, input: "{id, targets: [order, contract]}", emits: [QuoteConverted], note: "Calls DOM-ORD PlaceOrder with quoteRef and/or DOM-CTR DraftContract with quoteRef"}
+  - {name: ExpireQuote, input: "{id}", emits: [QuoteExpired], note: "Timer at validUntil"}
+
+queries:
+  - {name: GetQuote, input: "{id}", output: Quote}
+  - {name: GetQuoteVersion, input: "{id, version}", output: QuoteVersion}
+  - {name: FindQuotes, input: "{customer?, owner?, state?, expiringBefore?, cursor, limit}", output: "page"}
+  - {name: CompareQuoteVersions, input: "{id, fromVersion, toVersion}", output: "line/price/terms diff"}
+
+apis:
+  - {style: REST, path: "/v1/transaction/quotes", methods: {POST: CreateQuote, GET: FindQuotes}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}", methods: {GET: GetQuote}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}/lines", methods: {POST: AddQuoteLine}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}/lines/{lineId}", methods: {PATCH: UpdateQuoteLine, DELETE: RemoveQuoteLine}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}/adjustments", methods: {POST: ApplyManualAdjustment}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}:reprice", methods: {POST: RepriceQuote}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}:submit", methods: {POST: SubmitQuoteForApproval}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}:decide-approval", methods: {POST: DecideQuoteApproval}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}:present", methods: {POST: PresentQuote}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}:accept", methods: {POST: AcceptQuote}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}:decline", methods: {POST: DeclineQuote}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}:revise", methods: {POST: ReviseQuote}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}:convert", methods: {POST: ConvertQuote}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}/versions/{version}", methods: {GET: GetQuoteVersion}}
+  - {style: REST, path: "/v1/transaction/quotes/{id}/versions:compare", methods: {GET: CompareQuoteVersions}}
+
+events:
+  - {type: ucos.transaction.quote.created.v1, payload: "{id, number, customer, owner}"}
+  - {type: ucos.transaction.quote.line-added.v1, payload: "{id, version, lineId, offerRef}"}
+  - {type: ucos.transaction.quote.line-updated.v1, payload: "{id, version, lineId}"}
+  - {type: ucos.transaction.quote.line-removed.v1, payload: "{id, version, lineId}"}
+  - {type: ucos.transaction.quote.adjustment-applied.v1, payload: "{id, version, adjustmentId, reasonCode}"}
+  - {type: ucos.transaction.quote.repriced.v1, payload: "{id, version, pricingSnapshotId, totals}"}
+  - {type: ucos.transaction.quote.submitted-for-approval.v1, payload: "{id, version, plan}"}
+  - {type: ucos.transaction.quote.auto-approved.v1, payload: "{id, version}"}
+  - {type: ucos.transaction.quote.approval-decided.v1, payload: "{id, version, stage, decision, approver}"}
+  - {type: ucos.transaction.quote.presented.v1, payload: "{id, version, validUntil}"}
+  - {type: ucos.transaction.quote.accepted.v1, payload: "{id, version, acceptedBy, evidenceRef}"}
+  - {type: ucos.transaction.quote.declined.v1, payload: "{id, reasonCode}"}
+  - {type: ucos.transaction.quote.revised.v1, payload: "{id, newVersion}"}
+  - {type: ucos.transaction.quote.converted.v1, payload: "{id, version, orderRef, contractRef}"}
+  - {type: ucos.transaction.quote.expired.v1, payload: "{id, version}"}
+
+stateMachines:
+  - name: QuoteLifecycle
+    definition: "Interpreted ucos.std:lifecycle:quote"
+    initial: draft
+    states: [draft, in-approval, approved, presented, accepted, converted, declined, expired]
+    terminal: [converted, declined, expired]
+    transitions:
+      - {from: draft, to: in-approval, command: SubmitQuoteForApproval, guard: "plan non-empty"}
+      - {from: draft, to: approved, command: SubmitQuoteForApproval, guard: "plan empty (auto-approve)"}
+      - {from: in-approval, to: approved, command: DecideQuoteApproval, guard: "all stages approved"}
+      - {from: in-approval, to: draft, command: DecideQuoteApproval, guard: "rejected"}
+      - {from: approved, to: presented, command: PresentQuote}
+      - {from: [approved, presented], to: draft, command: ReviseQuote}
+      - {from: presented, to: accepted, command: AcceptQuote}
+      - {from: presented, to: declined, command: DeclineQuote}
+      - {from: [draft, in-approval, approved, presented], to: expired, trigger: "validUntil timer"}
+      - {from: accepted, to: converted, command: ConvertQuote}
+
+rules:
+  - {id: RUL-QTE-1, statement: "Default validity from policy quote.validity; validity cannot exceed the validTo of any referenced offer version or price list."}
+  - {id: RUL-QTE-2, statement: "Manual adjustments are applied in pricing phase MANUAL by DOM-PRC (request carries adjustments) so stacking and floors apply uniformly."}
+  - {id: RUL-QTE-3, statement: "Converted order uses the quote's pricingSnapshotId (RUL-ORD-2) and terms; differences fail conversion."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:quote.approval", purpose: "Approval stages by discount/margin/terms/value"}
+  - {urn: "urn:ucos:ucos.std:policy:quote.adjust", purpose: "Manual adjustment limits per role"}
+  - {urn: "urn:ucos:ucos.std:policy:quote.validity", purpose: "Default validity per context"}
+
+decisions:
+  - {id: DEC-QTE-1, question: "Which approvals does this quote version need?", algorithm: "DealApprovalRouter with policy quote.approval"}
+  - {id: DEC-QTE-2, question: "Can this quote be accepted now?", algorithm: "INV-QTE-4 + authority check"}
+
+security:
+  permissions: [quote.read, quote.create, quote.adjust, quote.approve, quote.present, quote.accept.on-behalf, quote.convert]
+  dataClassification: "Confidential commercial terms."
+  threats: ["Approval bypass by editing after approval -> INV-QTE-1", "Unauthorized acceptance -> authority check + evidence"]
+
+governance:
+  changeControl: "Approval policies and quote templates via ChangeSet."
+  evidence: "Approvals and acceptance captured as Evidence; quote document digest stored."
+
+runtimeBehavior:
+  consistency: "Strong per quote."
+  slo: {RepriceQuote_200lines_p99_ms: 400, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_transaction (shared with orders, separate tables; event-sourced)
+  tables:
+    - {name: quotes, columns: "tenant_id uuid, id char(26), number text, customer text, owner text, state text, current_version int, valid_until timestamptz, revision bigint", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, number)", "(tenant_id, customer, state)", "(tenant_id, state, valid_until)"]}
+    - {name: quote_versions, columns: "tenant_id, quote_id, version, body jsonb, pricing_snapshot_id text, totals jsonb", pk: "(tenant_id, quote_id, version)"}
+    - {name: event_store, columns: "standard (shared context store)"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 32."
+  retention: "Accepted/converted: financial retention; declined/expired: 3 years."
+
+extensionModel:
+  extensionPoints: ["Quote TypeDefinitions (e.g. insurance proposal with underwriting attributes)", "Approval inputs via plugins (e.g. credit risk)", "Document templates"]
+  forbidden: ["Client-side price computation"]
+
+certificationCriteria:
+  - {id: CR-QTE-01, rule: "Replay of every accepted quote's pricingSnapshotId plus adjustments equals stored totals (10^4 samples).", level: L1}
+  - {id: CR-QTE-02, rule: "Any revision after approval invalidates approvals (negative tests).", level: L1}
+  - {id: CR-QTE-03, rule: "Conversion produces order lines and prices identical to the accepted version.", level: L1}
+validationRules:
+  - {id: VR-QTE-01, rule: "quote.approval policy has test vectors for each approval stage threshold."}

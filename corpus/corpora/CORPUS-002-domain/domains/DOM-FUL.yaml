@@ -1,0 +1,191 @@
+header:
+  id: DOM-FUL
+  title: Fulfillment Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Systems Engineer
+  corpus: CORPUS-002
+  dependencies: [CIC-018-001, CIC-011-006, CIC-006-001, CIC-002-001]
+  traces: [PRIN-002, PRIN-008, PRIN-016, PRIN-022]
+  certification: [CR-FUL-01, CR-FUL-02, CR-FUL-03]
+  validation: [VR-FUL-01, VR-FUL-02]
+
+purpose: >
+  Execute the physical and digital fulfillment tasks issued by order decomposition — allocate,
+  release to warehouses, pick/pack/ship, digital delivery (downloads, codes, activations), store
+  pickup, and returns receipt — tracking each fulfillment order to completion and reporting progress
+  back to the order without product-specific logic.
+
+scope:
+  includes:
+    - FulfillmentOrder per (order, plan, node) from fulfillment tasks (CIC DOM-ORD FulfillmentPlan)
+    - Release to execution systems (WMS/store systems via FulfillmentExecutionPort) or native digital delivery
+    - Partial fulfillment, splits, substitutions (policy-governed), cancellations before point-of-no-return
+    - Digital delivery (licence codes from resource pools, download links, activation calls)
+    - Return orders (RMA receipt, inspection outcome, restock/dispose)
+  excludes:
+    - Transport and carriers (DOM-LOG), service activation/field work (DOM-SDL)
+    - Stock positions and reservations (DOM-INV), sourcing decisions (DOM-AVL)
+
+responsibilities:
+  - Exactly-once execution per fulfillment task (idempotent by taskId).
+  - Accurate progress events driving order status, billing, revenue, and entitlements.
+  - Point-of-no-return declaration per fulfillment order.
+
+principles: [PRIN-002, PRIN-008, PRIN-016, PRIN-022]
+
+boundaries:
+  upstream: [DOM-ORD, DOM-AVL, DOM-INV, DOM-COB, DOM-PTY]
+  downstream: [DOM-LOG, DOM-INV, DOM-ORD, DOM-BIL, DOM-REV, DOM-ENT, DOM-CST]
+  antiCorruption: "FulfillmentExecutionPort adapters translate to WMS/OMS/store systems; external statuses map to UCOS fulfillment states in adapters."
+
+ownership:
+  boundedContext: fulfillment
+  owningRole: Chief Systems Engineer
+  service: fulfillment-service
+  schema: ucos_fulfillment
+
+capabilities:
+  - {id: FUL-C1, name: Create fulfillment orders, description: "From order fulfillment tasks, grouped by node and delivery promise."}
+  - {id: FUL-C2, name: Release & execute, description: "Release to execution systems or execute digital delivery natively."}
+  - {id: FUL-C3, name: Track, description: "Line-level status, partials, exceptions, point-of-no-return."}
+  - {id: FUL-C4, name: Returns, description: "Receive and disposition returns."}
+
+services:
+  - {name: FulfillmentCommandService, kind: application, operations: [CreateFulfillmentOrder, ReleaseFulfillmentOrder, RecordFulfillmentEvent, CancelFulfillmentOrder, SubstituteLine, CreateReturnOrder, ReceiveReturn, DispositionReturn]}
+  - {name: DigitalDeliveryService, kind: domain-service, contract: "deliver(line) -> allocate code from DOM-INV resource pool | generate signed download URL (TTL policy) | call activation via DOM-SDL; idempotent per taskId"}
+  - {name: FulfillmentQueryService, kind: application, operations: [GetFulfillmentOrder, FindFulfillmentOrders, GetReturnOrder]}
+
+aggregates:
+  - name: FulfillmentOrder
+    identity: "urn:ucos:<tenant>:fulfillment-order:<ulid>"
+    invariants:
+      - "INV-FUL-1: unique per (orderId, taskId); lines quantity <= task quantity."
+      - "INV-FUL-2: after pointOfNoReturn the order cannot be cancelled, only returned."
+      - "INV-FUL-3: shipped quantity per line equals Σ shipment line quantities (DOM-LOG) once closed."
+    fields:
+      - {name: orderRef, type: InstanceUrn}
+      - {name: taskId, type: string}
+      - {name: nodeRef, type: InstanceUrn}
+      - {name: mode, type: "ship|pickup|digital|drop-ship"}
+      - {name: lines, type: "FulfillmentLine[]"}
+      - {name: deliveryPromise, type: PromiseWindow}
+      - {name: shipTo, type: "address ref (encrypted personal)"}
+      - {name: executionRef, type: "external WMS ref?"}
+      - {name: pointOfNoReturn, type: boolean}
+      - {name: lifecycleState, type: string}
+  - name: ReturnOrder
+    identity: "urn:ucos:<tenant>:return-order:<ulid>"
+    fields:
+      - {name: orderRef, type: InstanceUrn}
+      - {name: rmaNumber, type: string}
+      - {name: lines, type: "[{lineId, objectRef, quantity, serials[], reasonCode}]"}
+      - {name: receivingNode, type: InstanceUrn}
+      - {name: inspection, type: "[{lineId, outcome: restock|refurbish|dispose|return-to-vendor}]"}
+      - {name: status, type: "authorized|in-transit|received|inspected|closed"}
+
+entities:
+  - {name: FulfillmentLine, within: FulfillmentOrder, fields: [lineId, orderLineId, objectRef, quantity, fulfilledQuantity, "serials[]", "lotRef?", "digitalArtifactRef?", status]}
+
+valueObjects:
+  - {name: FulfillmentEvent, definition: "{kind: released|picked|packed|shipped|delivered|ready-for-pickup|picked-up|delivered-digitally|exception|cancelled, lines[], at, externalRef}"}
+
+commands:
+  - {name: CreateFulfillmentOrder, input: "{orderRef, taskId, nodeRef, mode, lines, deliveryPromise, shipTo}", emits: [FulfillmentOrderCreated], note: "Consumed from order.fulfillment-task-issued (command message)"}
+  - {name: ReleaseFulfillmentOrder, input: "{id}", emits: [FulfillmentOrderReleased]}
+  - {name: RecordFulfillmentEvent, input: "{id, event: FulfillmentEvent}", emits: [FulfillmentProgressed, FulfillmentCompleted], note: "From execution adapters; idempotent on externalRef"}
+  - {name: CancelFulfillmentOrder, input: "{id, reason}", emits: [FulfillmentOrderCancelled], preconditions: ["INV-FUL-2"]}
+  - {name: SubstituteLine, input: "{id, lineId, substituteObjectRef, reason}", emits: [FulfillmentLineSubstituted], preconditions: ["policy fulfillment.substitution allows and customer consent when required"]}
+  - {name: CreateReturnOrder, input: "{orderRef, lines, rmaNumber}", emits: [ReturnOrderCreated], note: "From order.return-requested"}
+  - {name: ReceiveReturn, input: "{returnId, receivedLines}", emits: [ReturnReceived]}
+  - {name: DispositionReturn, input: "{returnId, inspection}", emits: [ReturnDispositioned]}
+
+queries:
+  - {name: GetFulfillmentOrder, input: "{id}", output: FulfillmentOrder}
+  - {name: FindFulfillmentOrders, input: "{orderRef?, nodeRef?, state?, cursor}", output: "page"}
+  - {name: GetReturnOrder, input: "{id}", output: ReturnOrder}
+
+apis:
+  - {style: REST, path: "/v1/fulfillment/orders", methods: {POST: CreateFulfillmentOrder, GET: FindFulfillmentOrders}}
+  - {style: REST, path: "/v1/fulfillment/orders/{id}", methods: {GET: GetFulfillmentOrder}}
+  - {style: REST, path: "/v1/fulfillment/orders/{id}:release", methods: {POST: ReleaseFulfillmentOrder}}
+  - {style: REST, path: "/v1/fulfillment/orders/{id}/events", methods: {POST: RecordFulfillmentEvent}}
+  - {style: REST, path: "/v1/fulfillment/orders/{id}:cancel", methods: {POST: CancelFulfillmentOrder}}
+  - {style: REST, path: "/v1/fulfillment/orders/{id}/lines/{lineId}:substitute", methods: {POST: SubstituteLine}}
+  - {style: REST, path: "/v1/fulfillment/returns", methods: {POST: CreateReturnOrder}}
+  - {style: REST, path: "/v1/fulfillment/returns/{id}", methods: {GET: GetReturnOrder}}
+  - {style: REST, path: "/v1/fulfillment/returns/{id}:receive", methods: {POST: ReceiveReturn}}
+  - {style: REST, path: "/v1/fulfillment/returns/{id}:disposition", methods: {POST: DispositionReturn}}
+
+events:
+  - {type: ucos.fulfillment.fulfillment-order.created.v1, payload: "{id, orderRef, taskId, nodeRef, mode}"}
+  - {type: ucos.fulfillment.fulfillment-order.released.v1, payload: "{id, executionRef}"}
+  - {type: ucos.fulfillment.fulfillment-order.progressed.v1, payload: "{id, orderRef, taskId, kind, lines, pointOfNoReturn}", consumers: [order (task progress), inventory (issue movements), logistics]}
+  - {type: ucos.fulfillment.fulfillment-order.completed.v1, payload: "{id, orderRef, taskId, completedAt}", consumers: [order, billing (ship-triggered charges), revenue (point-in-time satisfaction), entitlement, asset creation]}
+  - {type: ucos.fulfillment.fulfillment-order.cancelled.v1, payload: "{id, reason}"}
+  - {type: ucos.fulfillment.fulfillment-order.line-substituted.v1, payload: "{id, lineId, substituteObjectRef}"}
+  - {type: ucos.fulfillment.return-order.created.v1, payload: "{id, orderRef, rmaNumber}"}
+  - {type: ucos.fulfillment.return-order.received.v1, payload: "{id, lines}", consumers: [billing (refund/credit), inventory (receipt)]}
+  - {type: ucos.fulfillment.return-order.dispositioned.v1, payload: "{id, inspection}"}
+
+stateMachines:
+  - name: FulfillmentOrderLifecycle
+    initial: created
+    states: [created, released, in-progress, partially-fulfilled, fulfilled, cancelled, exception]
+    terminal: [fulfilled, cancelled]
+    transitions:
+      - {from: created, to: released, command: ReleaseFulfillmentOrder}
+      - {from: released, to: in-progress, trigger: "first execution event (picked)"}
+      - {from: in-progress, to: partially-fulfilled, trigger: "some lines shipped/delivered"}
+      - {from: [in-progress, partially-fulfilled], to: fulfilled, trigger: "all lines fulfilled or remaining cancelled"}
+      - {from: [created, released], to: cancelled, command: CancelFulfillmentOrder}
+      - {from: [released, in-progress, partially-fulfilled], to: exception, trigger: "execution exception (short pick, damage)"}
+      - {from: exception, to: in-progress, command: resolveException}
+
+rules:
+  - {id: RUL-FUL-1, statement: "Point-of-no-return is reached at first of: packed (ship), code allocated (digital), ready-for-pickup (pickup) unless policy overrides per node kind."}
+  - {id: RUL-FUL-2, statement: "Short picks trigger re-sourcing via DOM-AVL DecideSourcing for the shortfall before backorder (policy fulfillment.short-pick)."}
+  - {id: RUL-FUL-3, statement: "Digital artifacts (codes) are delivered only through authorized channels; events carry references, never secret values (RUL-INV-3)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:fulfillment.substitution", purpose: "Whether and how substitutions are allowed"}
+  - {urn: "urn:ucos:ucos.std:policy:fulfillment.short-pick", purpose: "Short pick handling: re-source, backorder, cancel line"}
+
+decisions:
+  - {id: DEC-FUL-1, question: "Is this fulfillment order past its point of no return?", algorithm: "RUL-FUL-1"}
+
+security:
+  permissions: [fulfillment.read, fulfillment.manage, fulfillment.event.record, fulfillment.return.manage]
+  dataClassification: "Confidential; ship-to addresses personal (encrypted)."
+  threats: ["Fake delivery events -> adapters authenticated via workload identity; event idempotency by externalRef"]
+
+governance:
+  changeControl: "Substitution and short-pick policies via ChangeSet."
+  evidence: "Delivery proofs referenced from DOM-LOG."
+
+runtimeBehavior:
+  consistency: "Strong per fulfillment order; progress events in order per (orderRef, taskId)."
+  slo: {CreateFulfillmentOrder_p99_ms: 100, digital_delivery_p99_s: 5, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_fulfillment
+  tables:
+    - {name: fulfillment_orders, columns: "tenant_id, id, order_ref, task_id, node_ref, mode, body jsonb, ponr bool, state, revision", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, order_ref, task_id)", "(tenant_id, node_ref, state)"]}
+    - {name: fulfillment_lines, columns: "tenant_id, fo_id, line_id, object_ref, quantity, fulfilled_quantity, status", pk: "(tenant_id, fo_id, line_id)"}
+    - {name: return_orders, columns: "tenant_id, id, order_ref, rma_number, body jsonb, status", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, rma_number)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 64."
+  retention: "Order life + financial retention for proof of delivery references."
+
+extensionModel:
+  extensionPoints: ["FulfillmentExecutionPort adapters (WMS, OMS, store, 3PL)", "Fulfillment modes registry", "Return disposition kinds"]
+  forbidden: ["Product-specific fulfillment logic"]
+
+certificationCriteria:
+  - {id: CR-FUL-01, rule: "Duplicate task delivery creates exactly one fulfillment order (idempotency).", level: L1}
+  - {id: CR-FUL-02, rule: "Cancellation after point-of-no-return is rejected in all modes (negative tests).", level: L1}
+  - {id: CR-FUL-03, rule: "Adapter conformance suite (status mapping, partials, exceptions) passes for each certified execution adapter.", level: L1}
+validationRules:
+  - {id: VR-FUL-01, rule: "Every order-decomposition task template targeting fulfillment references CreateFulfillmentOrder."}
+  - {id: VR-FUL-02, rule: "Every fulfillment mode has a point-of-no-return rule."}

@@ -1,0 +1,189 @@
+header:
+  id: DOM-LOG
+  title: Logistics Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Systems Engineer
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-028-001, CIC-006-001, CIC-002-001]
+  traces: [PRIN-022, PRIN-016, PRIN-006]
+  certification: [CR-LOG-01, CR-LOG-02, CR-LOG-03]
+  validation: [VR-LOG-01, VR-LOG-02]
+
+purpose: >
+  Move goods: shipment planning, carrier and service selection (rate shopping), labels and customs
+  documents, tracking normalization, delivery proof, and transit-time data for promises — across any
+  carrier through certified plugins.
+
+scope:
+  includes:
+    - Shipments and packages (from fulfillment), consolidation and multi-package shipments
+    - Carrier/service selection by policy (cost, transit time, constraints: hazmat, weight, destination)
+    - Label and customs document generation via CarrierPort plugins (incl. commercial invoice data from billing/tax)
+    - Tracking events normalization and exception handling
+    - Proof of delivery capture (signature, photo, geo) as Evidence
+    - Transit-time tables feeding DOM-AVL promise computation
+  excludes:
+    - Warehouse execution (DOM-FUL adapters), stock (DOM-INV), freight billing reconciliation (DOM-FCT with DOM-PAY/ACC)
+
+responsibilities:
+  - Valid, compliant shipments (dangerous goods, export documents).
+  - Normalized tracking for customers and operations.
+  - Accurate transit data for promises.
+
+principles: [PRIN-006, PRIN-016, PRIN-022]
+
+boundaries:
+  upstream: [DOM-FUL, DOM-COB, DOM-GEO, DOM-TAX, DOM-EXT, DOM-TIM]
+  downstream: [DOM-FUL, DOM-AVL, DOM-ORD, DOM-EVD, DOM-CST, DOM-SUS]
+
+ownership:
+  boundedContext: fulfillment
+  owningRole: Chief Systems Engineer
+  service: logistics-service
+  schema: ucos_fulfillment
+
+capabilities:
+  - {id: LOG-C1, name: Plan shipments, description: "Create shipments/packages from fulfillment orders."}
+  - {id: LOG-C2, name: Rate & select, description: "Rate shop and select carrier service per policy."}
+  - {id: LOG-C3, name: Document, description: "Labels, customs, dangerous goods declarations."}
+  - {id: LOG-C4, name: Track, description: "Normalize tracking; detect exceptions; capture POD."}
+  - {id: LOG-C5, name: Transit data, description: "Maintain transit time tables per lane and service."}
+
+services:
+  - {name: ShipmentCommandService, kind: application, operations: [CreateShipment, RateShipment, SelectCarrierService, PurchaseLabel, VoidLabel, RecordTrackingEvent, RecordProofOfDelivery, ImportTransitTimes]}
+  - {name: CarrierGateway, kind: infrastructure, contract: "CarrierPort (I2 plugins): rate, label, void, track webhook/poll, customs; status codes mapped to UCOS tracking states"}
+  - {name: ShipmentQueryService, kind: application, operations: [GetShipment, FindShipments, GetTracking, GetTransitTime]}
+
+aggregates:
+  - name: Shipment
+    identity: "urn:ucos:<tenant>:shipment:<ulid>"
+    invariants:
+      - "INV-LOG-1: packages contain only lines of the referenced fulfillment orders; hazmat items require compliant service and declarations."
+      - "INV-LOG-2: international shipments carry customs data (HS codes, origin, values) before label purchase."
+    fields:
+      - {name: fulfillmentOrderRefs, type: "InstanceUrn[]"}
+      - {name: from, type: "node/address"}
+      - {name: to, type: "address ref (personal, encrypted)"}
+      - {name: packages, type: "Package[]"}
+      - {name: carrier, type: "string?"}
+      - {name: service, type: "string?"}
+      - {name: rates, type: "[{carrier, service, cost: Money, transitDays, guaranteed}]"}
+      - {name: labelRef, type: "document ref?"}
+      - {name: trackingNumbers, type: "string[]"}
+      - {name: status, type: string}
+  - name: TransitTime
+    identity: "urn:ucos:<tenant>:transit-time:<carrier>/<service>/<originZone>/<destZone>"
+    fields:
+      - {name: minDays, type: int}
+      - {name: maxDays, type: int}
+      - {name: cutoffLocal, type: "time"}
+      - {name: calendarRef, type: "business calendar"}
+
+entities:
+  - {name: Package, within: Shipment, fields: [packageId, "lines [{fulfillmentLineRef, quantity}]", weight, dimensions, "dangerousGoods?", trackingNumber]}
+  - {name: TrackingEvent, within: Shipment, fields: [at, "status (label-created|picked-up|in-transit|out-for-delivery|delivered|exception|returned-to-sender)", location, carrierCode, description]}
+
+valueObjects:
+  - {name: ProofOfDelivery, definition: "{deliveredAt, recipientName?, signatureRef?, photoRef?, geo?, evidenceRef}"}
+
+commands:
+  - {name: CreateShipment, input: "{fulfillmentOrderRefs, packages, from, to}", emits: [ShipmentCreated]}
+  - {name: RateShipment, input: "{id}", emits: [ShipmentRated]}
+  - {name: SelectCarrierService, input: "{id, carrier?, service?}", emits: [CarrierServiceSelected], note: "Auto-select per policy logistics.carrier-selection when not specified"}
+  - {name: PurchaseLabel, input: "{id, idempotencyKey}", emits: [LabelPurchased], preconditions: ["INV-LOG-1,2"]}
+  - {name: VoidLabel, input: "{id}", emits: [LabelVoided]}
+  - {name: RecordTrackingEvent, input: "{trackingNumber, carrierEvent}", emits: [ShipmentTracked, ShipmentDelivered, ShipmentException]}
+  - {name: RecordProofOfDelivery, input: "{id, pod}", emits: [ProofOfDeliveryRecorded]}
+  - {name: ImportTransitTimes, input: "{carrier, table}", emits: [TransitTimesImported]}
+
+queries:
+  - {name: GetShipment, input: "{id}", output: Shipment}
+  - {name: FindShipments, input: "{fulfillmentOrderRef?, trackingNumber?, status?, cursor}", output: "page"}
+  - {name: GetTracking, input: "{trackingNumber | shipmentId, audience}", output: "TrackingEvent[] (customer audience: normalized, no internal codes)"}
+  - {name: GetTransitTime, input: "{originZone, destZone, service?}", output: "TransitTime[]"}
+
+apis:
+  - {style: REST, path: "/v1/logistics/shipments", methods: {POST: CreateShipment, GET: FindShipments}}
+  - {style: REST, path: "/v1/logistics/shipments/{id}", methods: {GET: GetShipment}}
+  - {style: REST, path: "/v1/logistics/shipments/{id}:rate", methods: {POST: RateShipment}}
+  - {style: REST, path: "/v1/logistics/shipments/{id}:select-service", methods: {POST: SelectCarrierService}}
+  - {style: REST, path: "/v1/logistics/shipments/{id}/label", methods: {POST: PurchaseLabel, DELETE: VoidLabel}}
+  - {style: REST, path: "/v1/logistics/shipments/{id}/proof-of-delivery", methods: {POST: RecordProofOfDelivery}}
+  - {style: REST, path: "/v1/logistics/carriers/{carrier}/tracking-events", methods: {POST: RecordTrackingEvent}, note: "Carrier webhook ingress via plugin adapter"}
+  - {style: REST, path: "/v1/logistics/tracking", methods: {GET: GetTracking}}
+  - {style: REST, path: "/v1/logistics/transit-times", methods: {POST: ImportTransitTimes, GET: GetTransitTime}}
+
+events:
+  - {type: ucos.fulfillment.shipment.created.v1, payload: "{id, fulfillmentOrderRefs, packages}"}
+  - {type: ucos.fulfillment.shipment.rated.v1, payload: "{id, rates}"}
+  - {type: ucos.fulfillment.shipment.service-selected.v1, payload: "{id, carrier, service, cost}"}
+  - {type: ucos.fulfillment.shipment.label-purchased.v1, payload: "{id, trackingNumbers, cost}", consumers: [cost (freight), fulfillment (shipped)]}
+  - {type: ucos.fulfillment.shipment.label-voided.v1, payload: "{id}"}
+  - {type: ucos.fulfillment.shipment.tracked.v1, payload: "{id, status, at}", consumers: [customer notifications]}
+  - {type: ucos.fulfillment.shipment.delivered.v1, payload: "{id, deliveredAt}", consumers: [fulfillment, revenue, order]}
+  - {type: ucos.fulfillment.shipment.exception.v1, payload: "{id, code, description}"}
+  - {type: ucos.fulfillment.shipment.pod-recorded.v1, payload: "{id, evidenceRef}"}
+  - {type: ucos.fulfillment.transit-times.imported.v1, payload: "{carrier, lanes}", consumers: [availability]}
+
+stateMachines:
+  - name: ShipmentLifecycle
+    initial: created
+    states: [created, rated, labeled, in-transit, delivered, exception, returned, cancelled]
+    terminal: [delivered, returned, cancelled]
+    transitions:
+      - {from: created, to: rated, command: RateShipment}
+      - {from: [created, rated], to: labeled, command: PurchaseLabel}
+      - {from: labeled, to: cancelled, command: VoidLabel}
+      - {from: labeled, to: in-transit, trigger: "tracking picked-up"}
+      - {from: in-transit, to: delivered, trigger: "tracking delivered"}
+      - {from: in-transit, to: exception, trigger: "tracking exception"}
+      - {from: exception, to: in-transit, trigger: "tracking resumed"}
+      - {from: [in-transit, exception], to: returned, trigger: "returned-to-sender"}
+
+rules:
+  - {id: RUL-LOG-1, statement: "Carrier selection uses policy logistics.carrier-selection (weights: cost, promise fit, carbon) constrained by eligibility (weight, hazmat, destination)."}
+  - {id: RUL-LOG-2, statement: "Customer-facing tracking never exposes other parties' data or internal exception codes."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:logistics.carrier-selection", purpose: "Selection weights and constraints"}
+
+decisions:
+  - {id: DEC-LOG-1, question: "Which carrier service ships this shipment?", algorithm: "Rate shop -> filter eligibility -> weighted score per policy -> deterministic tie-break by carrier code"}
+
+security:
+  permissions: [logistics.read, logistics.manage, logistics.label.purchase, logistics.tracking.ingest]
+  dataClassification: "Confidential; recipient addresses personal."
+  threats: ["Webhook spoofing -> carrier adapter signature verification", "Label fraud -> label purchase PDP + cost anomaly monitoring"]
+
+governance:
+  changeControl: "Carrier selection policy and carrier plugin activation via ChangeSet."
+  evidence: "PODs as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per shipment; tracking at-least-once deduped by (trackingNumber, carrierEventId)."
+  slo: {RateShipment_p99_ms: 1500, PurchaseLabel_p99_ms: 3000, availability: "99.9% (carrier-bound)"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_fulfillment (separate tables)
+  tables:
+    - {name: shipments, columns: "tenant_id, id, body jsonb, carrier, service, status, revision", pk: "(tenant_id, id)"}
+    - {name: tracking_numbers, columns: "tenant_id, tracking_number, shipment_id", pk: "(tenant_id, tracking_number)"}
+    - {name: tracking_events, columns: "tenant_id, shipment_id, carrier_event_id, at, status, body jsonb", pk: "(tenant_id, shipment_id, carrier_event_id)"}
+    - {name: transit_times, columns: "tenant_id, carrier, service, origin_zone, dest_zone, min_days, max_days, cutoff, calendar_ref", pk: "(tenant_id, carrier, service, origin_zone, dest_zone)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "tracking_events range(at) monthly."
+  retention: "2 years (tracking); PODs per evidence retention."
+
+extensionModel:
+  extensionPoints: ["CarrierPort plugins", "Customs/trade compliance plugins", "Carbon calculators (DOM-SUS)"]
+  forbidden: ["Carrier-specific logic outside adapters"]
+
+certificationCriteria:
+  - {id: CR-LOG-01, rule: "CarrierPort conformance (rate, label, void, tracking mapping) passes for each certified adapter.", level: L1}
+  - {id: CR-LOG-02, rule: "International shipments without customs data cannot purchase labels (negative test).", level: L1}
+  - {id: CR-LOG-03, rule: "Tracking dedupe: duplicate carrier events produce one state change.", level: L1}
+validationRules:
+  - {id: VR-LOG-01, rule: "Every Shippable type with hazmatClass maps to allowed carrier services."}
+  - {id: VR-LOG-02, rule: "Every active fulfillment node has transit-time coverage for its sourcing destinations."}

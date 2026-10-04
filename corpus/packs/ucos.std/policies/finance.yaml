@@ -1,0 +1,80 @@
+# Billing and payment configuration policies (platform defaults; jurisdiction packs refine via
+# regulatory-layer policies scoped by the jurisdiction dimension).
+defaults: &cfg
+  kind: configuration
+  layer: platform
+  scope: {}
+
+policies:
+  - <<: *cfg
+    name: billing.allocation
+    outputSchema: {type: object, required: [order], properties: {order: {enum: [oldest-first, largest-first, explicit-only]}, overpayment: {enum: [unapplied-credit, refund]}}}
+    body: {language: static, source: &bilAlloc {order: oldest-first, overpayment: unapplied-credit}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *bilAlloc}]
+
+  - <<: *cfg
+    name: billing.anomaly-threshold
+    outputSchema: {type: object, required: [deviationPercent, minimumHistoryCycles], properties: {deviationPercent: {type: integer, minimum: 1}, minimumHistoryCycles: {type: integer, minimum: 1}}}
+    body: {language: static, source: &bilAnomaly {deviationPercent: 50, minimumHistoryCycles: 3}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *bilAnomaly}]
+
+  - <<: *cfg
+    name: billing.dunning
+    outputSchema:
+      type: object
+      required: [steps]
+      properties:
+        steps:
+          type: array
+          minItems: 1
+          items: {type: object, required: [daysOverdue, action], properties: {daysOverdue: {type: integer, minimum: 0}, action: {enum: [reminder, fee, suspend-entitlements, collections-handoff, write-off-review]}, feeMinor: {type: integer, minimum: 0}}}
+    body: {language: static, source: &bilDunning {steps: [{daysOverdue: 3, action: reminder}, {daysOverdue: 14, action: reminder}, {daysOverdue: 30, action: suspend-entitlements}, {daysOverdue: 60, action: collections-handoff}, {daysOverdue: 180, action: write-off-review}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *bilDunning}]
+
+  - <<: *cfg
+    name: billing.grouping
+    outputSchema: {type: object, required: [groupBy], properties: {groupBy: {type: array, items: {enum: [source, offer, charge-type, period, site]}}, separateUsage: {type: boolean}}}
+    body: {language: static, source: &bilGroup {groupBy: [offer, charge-type, period], separateUsage: true}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *bilGroup}]
+
+  - <<: *cfg
+    name: billing.invoice-format
+    outputSchema: {type: object, required: [default], properties: {default: {$ref: "#/$defs/fmt"}, byJurisdiction: {type: object, additionalProperties: {$ref: "#/$defs/fmt"}}}, $defs: {fmt: {type: object, required: [document], properties: {document: {enum: [pdf, pdf-a3]}, eInvoice: {enum: [none, en16931-ubl, en16931-cii, peppol-bis-3, clearance-plugin]}, clearancePluginKind: {type: string}}}}}
+    body: {language: static, source: &bilFormat {default: {document: pdf-a3, eInvoice: none}, byJurisdiction: {EU: {document: pdf-a3, eInvoice: en16931-ubl}}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *bilFormat}]
+
+  - <<: *cfg
+    name: billing.proration
+    outputSchema: {type: object, required: [method], properties: {method: {enum: [daily-exact, thirty-360, none]}, creditUnusedOnDowngrade: {type: boolean}}}
+    body: {language: static, source: &bilProration {method: daily-exact, creditUnusedOnDowngrade: true}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *bilProration}]
+
+  - <<: *cfg
+    name: payment.methods
+    outputSchema: {type: object, required: [enabled], properties: {enabled: {type: array, minItems: 1, items: {type: string}}, hideWhenProviderUnhealthy: {type: boolean}}}
+    body: {language: static, source: &payMethods {enabled: [card, wallet, bank-transfer], hideWhenProviderUnhealthy: true}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *payMethods}]
+
+  - <<: *cfg
+    name: payment.refund-routing
+    outputSchema: {type: object, required: [destinations], properties: {destinations: {type: array, items: {enum: [original-method, store-credit, bank-transfer]}}}}
+    body: {language: static, source: &payRefundRouting {destinations: [original-method]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *payRefundRouting}]
+
+  - <<: *cfg
+    name: payment.routing
+    outputSchema: {type: object, required: [strategy, maxCascade], properties: {strategy: {enum: [priority, lowest-cost, highest-success-rate, weighted]}, maxCascade: {type: integer, minimum: 0, maximum: 2}, cascadeOn: {type: array, items: {enum: [soft-decline, timeout, provider-error]}}}}
+    body: {language: static, source: &payRouting {strategy: priority, maxCascade: 1, cascadeOn: [soft-decline, provider-error]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *payRouting}]
+
+  - <<: *cfg
+    name: payment.sca
+    outputSchema: {type: object, required: [default], properties: {default: {enum: [required, risk-based, not-required]}, byJurisdiction: {type: object, additionalProperties: {type: object, required: [mode], properties: {mode: {enum: [required, risk-based, not-required]}, exemptions: {type: array, items: {enum: [low-value, tra, recurring-merchant-initiated, trusted-beneficiary, secure-corporate]}}, lowValueLimitMinor: {type: integer}}}}}}
+    body: {language: static, source: &paySca {default: risk-based, byJurisdiction: {EU: {mode: required, exemptions: [low-value, tra, recurring-merchant-initiated], lowValueLimitMinor: 3000}, GB: {mode: required, exemptions: [low-value, tra, recurring-merchant-initiated], lowValueLimitMinor: 3000}}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *paySca}]
+
+  - <<: *cfg
+    name: payment.sca-timeout
+    outputSchema: {type: object, required: [timeout], properties: {timeout: {type: string, pattern: "^PT"}}}
+    body: {language: static, source: &payScaTimeout {timeout: PT15M}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *payScaTimeout}]

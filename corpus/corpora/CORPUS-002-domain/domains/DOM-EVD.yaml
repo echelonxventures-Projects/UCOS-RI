@@ -1,0 +1,218 @@
+header:
+  id: DOM-EVD
+  title: Evidence Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-000-004, CIC-003-001, CIC-010-001, CIC-002-001]
+  traces: [PRIN-011, PRIN-012, PRIN-008, CIC-000-004]
+  certification: [CR-EVD-01, CR-EVD-02, CR-EVD-03, CR-EVD-04]
+  validation: [VR-EVD-01, VR-EVD-02]
+
+purpose: >
+  Capture, seal, store, and verify tamper-evident evidence that substantiates certifications,
+  approvals, consents, decisions, compliance controls, provenance claims, and audits — so that any
+  assertion UCOS makes can be proven to a third party.
+
+scope:
+  includes:
+    - Evidence records (metadata + content reference + digest + signatures)
+    - Evidence content storage (WORM object storage) and legal holds
+    - Hash-chained evidence ledger per tenant with periodic external anchoring (RFC 3161 timestamps; optional public transparency log)
+    - Verification (digest, signature, chain inclusion proofs)
+    - Evidence packages (export bundles for auditors/regulators)
+  excludes:
+    - Provenance graphs of commercial objects (DOM-PRV; uses Evidence)
+    - Data lineage of datasets (DOM-LIN)
+    - Trust frameworks and issuer accreditation (DOM-TRST)
+    - Audit log of operations (DOM-AUD; audit segments are sealed as Evidence)
+
+responsibilities:
+  - Make evidence immutable and independently verifiable.
+  - Bind evidence to subjects (aggregates, certifications, decisions) via typed links.
+  - Enforce retention and legal holds.
+
+principles: [PRIN-008, PRIN-011, PRIN-012, PRIN-022]
+
+boundaries:
+  upstream: [DOM-IDN, DOM-PTY, DOM-SEC]
+  downstream: [DOM-CRT, DOM-GOV, DOM-CMPL, DOM-AUD, DOM-PRV, DOM-LIN, DOM-TRST, DOM-DEC]
+
+ownership:
+  boundedContext: evidence
+  owningRole: Chief Governance Architect
+  service: evidence-service
+  schema: ucos_evidence
+
+capabilities:
+  - {id: EVD-C1, name: Capture, description: "Register evidence content or reference with digest; seal into ledger."}
+  - {id: EVD-C2, name: Verify, description: "Verify content digest, signatures, ledger inclusion, and external anchor."}
+  - {id: EVD-C3, name: Link, description: "Associate evidence with subjects and claims."}
+  - {id: EVD-C4, name: Hold & retain, description: "Apply legal holds; enforce retention."}
+  - {id: EVD-C5, name: Package, description: "Produce verifiable export packages (evidence + proofs + manifest)."}
+
+services:
+  - {name: EvidenceCommandService, kind: application, operations: [CaptureEvidence, LinkEvidence, PlaceLegalHold, ReleaseLegalHold, CreateEvidencePackage, RedactEvidence]}
+  - {name: Ledger, kind: domain-service, contract: "append(evidenceDigest) -> {index, leafHash, treeRoot}; Merkle tree (RFC 6962 style) per tenant; root sealed every 60s or 10,000 leaves"}
+  - {name: Anchorer, kind: infrastructure, contract: "anchor(treeRoot) -> RFC 3161 timestamp token from >= 1 TSA (policy evidence.anchoring); optional transparency-log anchor"}
+  - {name: Verifier, kind: domain-service, contract: "verify(evidenceId) -> {digestOk, signaturesOk, inclusionProof, anchorOk}"}
+  - {name: EvidenceQueryService, kind: application, operations: [GetEvidence, FindEvidence, VerifyEvidence, GetInclusionProof, GetEvidencePackage]}
+
+aggregates:
+  - name: Evidence
+    kernel: true
+    identity: "urn:ucos:<tenant>:evidence:<ulid>"
+    invariants:
+      - "INV-EVD-1: digest = sha256(content) at capture; content is never modified (WORM)."
+      - "INV-EVD-2: every evidence is included in the tenant ledger before capture is acknowledged."
+      - "INV-EVD-3: evidence under legal hold cannot be deleted or crypto-shredded."
+      - "INV-EVD-4: redaction creates a new derived evidence linked by redactionOf; original access restricted, never altered."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: kind, type: "string (registered: approval, consent, test-report, scan-report, sbom, attestation, document, screenshot, log-segment, model-card, decision-snapshot, identity-proofing-ref, …)"}
+      - {name: digest, type: Sha256}
+      - {name: contentRef, type: "{store: worm|external, uri, size, mediaType, encryptionKeyId?}"}
+      - {name: signatures, type: "[{signer: urn, alg, signature, certChain?}]"}
+      - {name: capturedBy, type: PrincipalUrn}
+      - {name: capturedAt, type: Instant}
+      - {name: claims, type: "[{predicate, value}] (in-toto/SLSA predicate style where applicable)"}
+      - {name: links, type: "EvidenceLink[]"}
+      - {name: ledgerEntry, type: "{index, leafHash, treeRootRef}"}
+      - {name: classification, type: DataClassification}
+      - {name: retentionClass, type: string}
+      - {name: legalHolds, type: "HoldRef[]"}
+      - {name: redactionOf, type: "InstanceUrn?"}
+  - name: LedgerCheckpoint
+    identity: "urn:ucos:<tenant>:ledger-checkpoint:<sequence>"
+    invariants: ["INV-EVD-5: each checkpoint signs (treeSize, rootHash, previousCheckpointHash) and carries >= 1 anchor token."]
+    fields:
+      - {name: sequence, type: long}
+      - {name: treeSize, type: long}
+      - {name: rootHash, type: Sha256}
+      - {name: previousCheckpointHash, type: Sha256}
+      - {name: signature, type: "platform signing key (HSM)"}
+      - {name: anchors, type: "[{kind: rfc3161|transparency-log, token}]"}
+  - name: LegalHold
+    identity: "urn:ucos:<tenant>:legal-hold:<ulid>"
+    fields:
+      - {name: matter, type: string}
+      - {name: selector, type: "{subjects[] | CEL over evidence metadata}"}
+      - {name: placedBy, type: PartyUrn}
+      - {name: status, type: "enum(active, released)"}
+
+entities:
+  - {name: EvidenceLink, within: Evidence, fields: [subjectRef, "role (substantiates|approves|consents|certifies|derived-from|supersedes)", "claimRef?", linkedAt]}
+  - {name: EvidencePackage, within: "standalone (operation result)", fields: [packageId, "evidenceIds[]", "manifest (digests + inclusion proofs + checkpoints)", signature, createdFor, expiresAt]}
+
+valueObjects:
+  - {name: Sha256, definition: "lowercase hex, 64 chars, prefixed sha256:"}
+  - {name: InclusionProof, definition: "RFC 6962 audit path {leafIndex, treeSize, auditPath[]} + checkpoint ref"}
+  - {name: VerificationResult, definition: "{digestOk, signaturesOk, inclusionOk, anchorOk, checkedAt, details[]}"}
+
+commands:
+  - {name: CaptureEvidence, input: "{kind, content (upload stream) | externalRef + digest, signatures?, claims?, links[], classification, retentionClass}", emits: [EvidenceCaptured], preconditions: ["digest verified on upload", "kind registered"]}
+  - {name: LinkEvidence, input: "{id, link}", emits: [EvidenceLinked]}
+  - {name: PlaceLegalHold, input: "{matter, selector}", emits: [LegalHoldPlaced], preconditions: ["PDP evidence.legal-hold (Legal role)"]}
+  - {name: ReleaseLegalHold, input: "{holdId, reason}", emits: [LegalHoldReleased]}
+  - {name: RedactEvidence, input: "{id, redactionSpec}", emits: [EvidenceCaptured, EvidenceRedacted]}
+  - {name: CreateEvidencePackage, input: "{evidenceIds[] | selector, recipient, expiresAt}", emits: [EvidencePackageCreated], async: true}
+
+queries:
+  - {name: GetEvidence, input: "{id}", output: "Evidence metadata (+ signed content URL if evidence.content.read)"}
+  - {name: FindEvidence, input: "{subjectRef?, kind?, from?, to?, cursor, limit}", output: "page"}
+  - {name: VerifyEvidence, input: "{id}", output: VerificationResult}
+  - {name: GetInclusionProof, input: "{id, checkpoint?}", output: InclusionProof}
+  - {name: GetEvidencePackage, input: "{packageId}", output: "package download URL + manifest"}
+  - {name: GetLedgerCheckpoint, input: "{sequence | latest}", output: LedgerCheckpoint}
+
+apis:
+  - {style: REST, path: "/v1/evidence/items", methods: {POST: CaptureEvidence, GET: FindEvidence}, note: "POST multipart or resumable upload (tus protocol) for content > 32MB"}
+  - {style: REST, path: "/v1/evidence/items/{id}", methods: {GET: GetEvidence}}
+  - {style: REST, path: "/v1/evidence/items/{id}/links", methods: {POST: LinkEvidence}}
+  - {style: REST, path: "/v1/evidence/items/{id}:verify", methods: {POST: VerifyEvidence}}
+  - {style: REST, path: "/v1/evidence/items/{id}:redact", methods: {POST: RedactEvidence}}
+  - {style: REST, path: "/v1/evidence/items/{id}/inclusion-proof", methods: {GET: GetInclusionProof}}
+  - {style: REST, path: "/v1/evidence/checkpoints/{sequence}", methods: {GET: GetLedgerCheckpoint}}
+  - {style: REST, path: "/v1/evidence/legal-holds", methods: {POST: PlaceLegalHold}}
+  - {style: REST, path: "/v1/evidence/legal-holds/{id}:release", methods: {POST: ReleaseLegalHold}}
+  - {style: REST, path: "/v1/evidence/packages", methods: {POST: CreateEvidencePackage}}
+  - {style: REST, path: "/v1/evidence/packages/{packageId}", methods: {GET: GetEvidencePackage}}
+
+events:
+  - {type: ucos.evidence.evidence.captured.v1, payload: "{id, kind, digest, links[], ledgerIndex}"}
+  - {type: ucos.evidence.evidence.linked.v1, payload: "{id, subjectRef, role}"}
+  - {type: ucos.evidence.evidence.redacted.v1, payload: "{originalId, redactedId}"}
+  - {type: ucos.evidence.ledger.checkpointed.v1, payload: "{sequence, treeSize, rootHash, anchors}"}
+  - {type: ucos.evidence.legal-hold.placed.v1, payload: "{id, matter}"}
+  - {type: ucos.evidence.legal-hold.released.v1, payload: "{id}"}
+  - {type: ucos.evidence.package.created.v1, payload: "{packageId, count, recipient}"}
+  - {type: ucos.evidence.evidence.verification-failed.v1, payload: "{id, details}", severity: "Sev-1 security incident"}
+
+stateMachines:
+  - name: EvidenceRetention
+    initial: active
+    states: [active, held, expired, disposed]
+    terminal: [disposed]
+    transitions:
+      - {from: active, to: held, trigger: "LegalHoldPlaced matching"}
+      - {from: held, to: active, trigger: "last matching hold released"}
+      - {from: active, to: expired, trigger: "retention period elapsed (timer)"}
+      - {from: expired, to: disposed, trigger: "disposal job; content deleted/crypto-shredded; ledger leaf retained (digest only)"}
+      - {from: expired, to: held, trigger: "LegalHoldPlaced before disposal"}
+
+rules:
+  - {id: RUL-EVD-1, statement: "Ledger leaves are never removed; disposal removes content only, preserving verifiability of the ledger."}
+  - {id: RUL-EVD-2, statement: "Approvals that gate certification or publication must be captured as Evidence before the gated transition commits."}
+  - {id: RUL-EVD-3, statement: "Evidence content containing personal data is encrypted under the subject key; disposal or erasure crypto-shreds unless held."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:evidence.retention", purpose: "Retention by kind and jurisdiction"}
+  - {urn: "urn:ucos:ucos.std:policy:evidence.anchoring", purpose: "TSA list, anchoring frequency, transparency log usage"}
+  - {urn: "urn:ucos:ucos.std:policy:evidence.legal-hold", purpose: "Who may place/release holds"}
+  - {urn: "urn:ucos:ucos.std:policy:evidence.content-access", purpose: "Who may read evidence content per classification"}
+
+decisions:
+  - {id: DEC-EVD-1, question: "Is this evidence authentic and unaltered?", algorithm: "Verifier: digest, signatures, RFC 6962 inclusion against signed checkpoint, RFC 3161 anchor validation"}
+  - {id: DEC-EVD-2, question: "May this evidence be disposed?", inputs: ["retention policy", "active holds"], output: "allow|deny"}
+
+security:
+  permissions: [evidence.read, evidence.content.read, evidence.capture, evidence.legal-hold, evidence.package.create, evidence.redact]
+  dataClassification: "Inherited per item; ledger metadata internal."
+  threats: ["Insider tampering -> WORM storage (object lock compliance mode) + Merkle ledger + external anchors", "Signing key compromise -> HSM keys, rotation, checkpoints cross-signed by next key", "Exfiltration via packages -> packages scoped, expiring, watermarked, audited"]
+
+governance:
+  changeControl: "Evidence kinds and retention policies via ChangeSet with Compliance approval."
+  evidence: "Checkpoints themselves are evidence of ledger state."
+  audit: "Content reads audited."
+
+runtimeBehavior:
+  consistency: "Capture strongly consistent incl. ledger append (synchronous); anchoring asynchronous (<= 60s)."
+  slo: {CaptureEvidence_small_p99_ms: 150, VerifyEvidence_p99_ms: 50, checkpoint_interval_s: 60, availability: "99.95%"}
+  failureModes: ["TSA unavailable: checkpoints queue anchors; alert after 15 min; capture continues", "WORM store unavailable: capture fails (no evidence without content durability)"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_evidence + WORM object storage + HSM
+  tables:
+    - {name: evidence, columns: "tenant_id uuid, id char(26), kind text, digest bytea, content_ref jsonb, signatures jsonb, claims jsonb, classification text, retention_class text, ledger_index bigint, state text, captured_at timestamptz", pk: "(tenant_id, id)", indexes: ["(tenant_id, kind, captured_at)", "unique(tenant_id, ledger_index)"]}
+    - {name: evidence_links, columns: "tenant_id, evidence_id, subject_ref, role, linked_at", pk: "(tenant_id, evidence_id, subject_ref, role)", indexes: ["(tenant_id, subject_ref)"]}
+    - {name: ledger_nodes, columns: "tenant_id, level int, idx bigint, hash bytea", pk: "(tenant_id, level, idx)"}
+    - {name: checkpoints, columns: "tenant_id, sequence, tree_size, root_hash, prev_hash, signature, anchors jsonb", pk: "(tenant_id, sequence)"}
+    - {name: legal_holds, columns: "tenant_id, id, matter, selector jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "evidence hash(tenant_id) 32; ledger_nodes per tenant range by idx."
+  retention: "Metadata and ledger indefinite; content per evidence.retention."
+
+extensionModel:
+  extensionPoints: ["New evidence kinds with claim schemas", "Anchor providers (TSA, transparency logs, public blockchains via certified plugins)", "WORM storage adapters", "Signature formats (JWS, COSE, CMS, Sigstore bundles)"]
+  forbidden: ["Mutable evidence content", "Evidence without ledger inclusion"]
+
+certificationCriteria:
+  - {id: CR-EVD-01, rule: "Tamper test: modifying any content byte, metadata digest, or ledger node is detected by VerifyEvidence (100% of 10^4 mutations).", level: L1}
+  - {id: CR-EVD-02, rule: "Inclusion and consistency proofs validate with an independent RFC 6962 verifier.", level: L1}
+  - {id: CR-EVD-03, rule: "Legal hold test: disposal job never removes held content under concurrent hold placement.", level: L1}
+  - {id: CR-EVD-04, rule: "WORM configuration verified (object lock compliance mode, retention set) in every production region.", level: L2}
+validationRules:
+  - {id: VR-EVD-01, rule: "Every evidence kind referenced in the corpus is registered with a retention class."}
+  - {id: VR-EVD-02, rule: "Every CertificationRecord rule result 'pass' references evidence kinds allowed for that rule type."}

@@ -1,0 +1,96 @@
+# ucos.std AttributeDefinitions (DOM-ONT). Short codes resolve to urn:ucos:ucos.std:attr:<code>@1.0.0
+# cardinality: {min, max} where max may be "unbounded".
+attributes:
+  # --- Identity & description -------------------------------------------------
+  - {code: name, datatype: localized-text, cardinality: {min: 1, max: 1}, localizable: true, sensitivity: public, searchable: {fullText: true, boost: 3}}
+  - {code: shortName, datatype: localized-text, cardinality: {min: 0, max: 1}, localizable: true, sensitivity: public, contextualizable: true}
+  - {code: description, datatype: localized-text, cardinality: {min: 0, max: 1}, localizable: true, sensitivity: public, contextualizable: true, searchable: {fullText: true}}
+  - {code: sku, datatype: string, cardinality: {min: 1, max: 1}, sensitivity: internal, constraints: [{kind: pattern, expression: "^[A-Z0-9][A-Z0-9._-]{0,63}$", messageKey: attr.sku.pattern}], searchable: {exact: true}}
+  - {code: gtin, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: public, constraints: [{kind: pattern, expression: "^[0-9]{8}$|^[0-9]{12,14}$", messageKey: attr.gtin.pattern}, {kind: cel, expression: "ucos.gs1.checkDigitValid(value)", messageKey: attr.gtin.checkdigit}], searchable: {exact: true}}
+  - {code: brand, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: public, searchable: {facet: true}}
+  - {code: media, datatype: binary-ref, cardinality: {min: 0, max: unbounded, ordered: true}, sensitivity: public, contextualizable: true}
+  - {code: keywords, datatype: localized-text, cardinality: {min: 0, max: unbounded}, localizable: true, sensitivity: public, searchable: {fullText: true}}
+
+  # --- Pricing & tax ----------------------------------------------------------
+  - {code: priceUnit, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: internal, description: "UCUM unit the base price refers to (e.g. 1, kg, h)"}
+  - {code: taxCategory, datatype: string, cardinality: {min: 1, max: 1}, sensitivity: internal, contextualizable: true, description: "Tax category code resolved by DOM-TAX per jurisdiction"}
+
+  # --- Physical goods ---------------------------------------------------------
+  - {code: unitOfMeasure, datatype: string, cardinality: {min: 1, max: 1}, sensitivity: internal, description: "UCUM base stocking unit"}
+  - {code: netWeight, datatype: quantity, cardinality: {min: 0, max: 1}, unitDimension: mass, sensitivity: public, constraints: [{kind: range, expression: "value.value > 0", messageKey: attr.positive}]}
+  - {code: grossWeight, datatype: quantity, cardinality: {min: 0, max: 1}, unitDimension: mass, sensitivity: internal}
+  - {code: length, datatype: quantity, cardinality: {min: 0, max: 1}, unitDimension: length, sensitivity: public}
+  - {code: width, datatype: quantity, cardinality: {min: 0, max: 1}, unitDimension: length, sensitivity: public}
+  - {code: height, datatype: quantity, cardinality: {min: 0, max: 1}, unitDimension: length, sensitivity: public}
+  - {code: hsCode, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: internal, constraints: [{kind: pattern, expression: "^[0-9]{6,10}$", messageKey: attr.hscode.pattern}]}
+  - {code: countryOfOrigin, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: public, constraints: [{kind: pattern, expression: "^[A-Z]{2}$", messageKey: attr.iso3166.pattern}]}
+  - {code: serialized, datatype: boolean, cardinality: {min: 1, max: 1}, sensitivity: internal, default: false}
+  - {code: lotControlled, datatype: boolean, cardinality: {min: 1, max: 1}, sensitivity: internal, default: false}
+  - {code: shelfLifeDays, datatype: integer, cardinality: {min: 0, max: 1}, sensitivity: internal, constraints: [{kind: range, expression: "value >= 1", messageKey: attr.positive}]}
+  - {code: shippingClass, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: internal}
+  - {code: hazmatClass, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: internal, description: "UN hazard class, e.g. 3, 9"}
+
+  # --- Fulfilment & delivery --------------------------------------------------
+  - {code: fulfillmentMode, datatype: enum, cardinality: {min: 1, max: 1}, sensitivity: internal, constraints: [{kind: enum, expression: "physical|digital|service|activation|none", messageKey: attr.enum}]}
+  - {code: deliveryMode, datatype: enum, cardinality: {min: 1, max: 1}, sensitivity: public, constraints: [{kind: enum, expression: "onsite|remote|digital|hybrid", messageKey: attr.enum}]}
+  - {code: serviceArea, datatype: geo-shape, cardinality: {min: 0, max: 1}, sensitivity: public, contextualizable: true}
+
+  # --- Scheduling & capacity --------------------------------------------------
+  - {code: duration, datatype: duration, cardinality: {min: 0, max: 1}, sensitivity: public}
+  - {code: schedulingMode, datatype: enum, cardinality: {min: 1, max: 1}, sensitivity: internal, constraints: [{kind: enum, expression: "appointment|fixed-time|on-demand", messageKey: attr.enum}]}
+  - {code: leadTime, datatype: duration, cardinality: {min: 0, max: 1}, sensitivity: internal, contextualizable: true}
+  - {code: capacityPerSlot, datatype: integer, cardinality: {min: 1, max: 1}, sensitivity: internal, constraints: [{kind: range, expression: "value >= 1", messageKey: attr.positive}]}
+  - {code: slotDuration, datatype: duration, cardinality: {min: 1, max: 1}, sensitivity: internal}
+  - {code: startsAt, datatype: datetime, cardinality: {min: 0, max: 1}, sensitivity: public}
+  - {code: endsAt, datatype: datetime, cardinality: {min: 0, max: 1}, sensitivity: public, constraints: [{kind: cel, expression: "!has(object.startsAt) || value > object.startsAt", messageKey: attr.endsafterstart}]}
+  - {code: venueLocation, datatype: geo-point, cardinality: {min: 0, max: 1}, sensitivity: public}
+  - {code: minimumAge, datatype: integer, cardinality: {min: 0, max: 1}, sensitivity: public, contextualizable: true}
+
+  # --- Recurrence, renewal, entitlement ---------------------------------------
+  - {code: billingPeriod, datatype: duration, cardinality: {min: 1, max: 1}, sensitivity: public, description: "ISO 8601 period, e.g. P1M, P1Y"}
+  - {code: periodAlignment, datatype: enum, cardinality: {min: 1, max: 1}, sensitivity: internal, default: anniversary, constraints: [{kind: enum, expression: "anniversary|calendar", messageKey: attr.enum}]}
+  - {code: renewalMode, datatype: enum, cardinality: {min: 1, max: 1}, sensitivity: public, default: auto, constraints: [{kind: enum, expression: "auto|manual|none", messageKey: attr.enum}]}
+  - {code: renewalTerm, datatype: duration, cardinality: {min: 0, max: 1}, sensitivity: public}
+  - {code: noticePeriod, datatype: duration, cardinality: {min: 0, max: 1}, sensitivity: public}
+  - {code: entitlementScope, datatype: enum, cardinality: {min: 1, max: 1}, sensitivity: internal, constraints: [{kind: enum, expression: "individual|organization-seats|household|group", messageKey: attr.enum}]}
+  - {code: entitlementTemplate, datatype: json, cardinality: {min: 1, max: 1}, sensitivity: internal, description: "Grant spec consumed by DOM-ENT: {capabilities: [urn], meters: [{meter, allowance, period, overage}]}"}
+  - {code: meterCodes, datatype: string, cardinality: {min: 1, max: unbounded, unique: true}, sensitivity: internal, description: "Codes from the meters registry"}
+  - {code: tierLevel, datatype: integer, cardinality: {min: 1, max: 1}, sensitivity: public, constraints: [{kind: range, expression: "value >= 0", messageKey: attr.nonnegative}]}
+  - {code: tierName, datatype: localized-text, cardinality: {min: 0, max: 1}, localizable: true, sensitivity: public}
+  - {code: transferPolicy, datatype: enum, cardinality: {min: 1, max: 1}, sensitivity: internal, default: none, constraints: [{kind: enum, expression: "none|within-organization|any", messageKey: attr.enum}]}
+
+  # --- Composition ------------------------------------------------------------
+  - {code: compositionMode, datatype: enum, cardinality: {min: 1, max: 1}, sensitivity: internal, constraints: [{kind: enum, expression: "fixed|configurable|dynamic", messageKey: attr.enum}]}
+  - {code: priceComposition, datatype: enum, cardinality: {min: 1, max: 1}, sensitivity: internal, default: own-price, constraints: [{kind: enum, expression: "own-price|sum-of-components|own-price-components-zero", messageKey: attr.enum}]}
+
+  # --- Assets & capabilities --------------------------------------------------
+  - {code: serialNumber, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: internal, searchable: {exact: true}}
+  - {code: installedAt, datatype: datetime, cardinality: {min: 0, max: 1}, sensitivity: internal}
+  - {code: sourceCommercialObject, datatype: urn, cardinality: {min: 1, max: 1}, sensitivity: internal, description: "The sold CommercialObject this asset instantiates"}
+  - {code: serviceLevel, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: internal}
+  - {code: capabilityKey, datatype: string, cardinality: {min: 1, max: 1}, sensitivity: internal, constraints: [{kind: pattern, expression: "^[a-z][a-z0-9.-]{1,127}$", messageKey: attr.capabilitykey.pattern}]}
+
+  # --- Parties ----------------------------------------------------------------
+  - {code: displayName, datatype: string, cardinality: {min: 1, max: 1}, sensitivity: personal}
+  - {code: givenName, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: personal}
+  - {code: familyName, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: personal}
+  - {code: dateOfBirth, datatype: date, cardinality: {min: 0, max: 1}, sensitivity: sensitive-personal}
+  - {code: nationalIdentifier, datatype: json, cardinality: {min: 0, max: unbounded}, sensitivity: "regulated(national-id)", description: "{scheme, value, issuingCountry}"}
+  - {code: legalName, datatype: string, cardinality: {min: 1, max: 1}, sensitivity: public}
+  - {code: registrationNumber, datatype: json, cardinality: {min: 0, max: unbounded}, sensitivity: public, description: "{registry, value, country} e.g. LEI, company register"}
+  - {code: taxIdentifier, datatype: json, cardinality: {min: 0, max: unbounded}, sensitivity: internal, description: "{scheme, value, country}"}
+  - {code: legalForm, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: public}
+  - {code: incorporationCountry, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: public, constraints: [{kind: pattern, expression: "^[A-Z]{2}$", messageKey: attr.iso3166.pattern}]}
+  - {code: agentModelRef, datatype: string, cardinality: {min: 0, max: 1}, sensitivity: internal}
+  - {code: accountableParty, datatype: urn, cardinality: {min: 1, max: 1}, sensitivity: internal}
+  - {code: systemEndpoint, datatype: uri, cardinality: {min: 0, max: 1}, sensitivity: internal}
+
+  # --- Contracts ----------------------------------------------------------------
+  - {code: governingLaw, datatype: string, cardinality: {min: 1, max: 1}, sensitivity: internal}
+  - {code: contractValue, datatype: money, cardinality: {min: 0, max: 1}, sensitivity: confidential}
+  - {code: slaMetrics, datatype: json, cardinality: {min: 1, max: unbounded}, sensitivity: internal, description: "SlaTarget value objects (DOM-CTR)"}
+
+  # --- Supply network nodes -----------------------------------------------------
+  - {code: nodeKind, datatype: enum, cardinality: {min: 1, max: 1}, sensitivity: internal, constraints: [{kind: enum, expression: "warehouse|store|distribution-center|virtual|drop-ship|service-hub", messageKey: attr.enum}]}
+  - {code: nodeLocation, datatype: geo-point, cardinality: {min: 0, max: 1}, sensitivity: internal}
+  - {code: timezone, datatype: string, cardinality: {min: 1, max: 1}, sensitivity: internal, description: "IANA zone id"}

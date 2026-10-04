@@ -1,0 +1,203 @@
+header:
+  id: DOM-INT
+  title: Intelligence (ML Platform) Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief AI Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-017-001, CIC-010-001, CIC-016-001, CIC-028-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-012, PRIN-022, CIC-017-001]
+  certification: [CR-INT-01, CR-INT-02, CR-INT-03, CR-INT-04]
+  validation: [VR-INT-01, VR-INT-02]
+
+purpose: >
+  Provide the governed machine-learning platform used by fraud, risk, recommendations, forecasting,
+  search ranking, and agents: model registry and lifecycle (CIC-017-001 §5), feature definitions and
+  feature store, inference endpoints with deterministic modes for regulated decisions, monitoring
+  (drift, quality, cost), and model cards — provider-neutral via ModelPort.
+
+scope:
+  includes:
+    - Model registry (versions, artifacts by digest, lineage to training data, model cards, lifecycle state)
+    - Feature definitions (metadata) and feature store (online/offline) with point-in-time correctness
+    - Inference serving (online, batch), shadow and canary routing, deterministic mode
+    - Monitoring: input/output drift (PSI), outcome-linked quality, latency, cost; alerts
+    - Prohibited-features list (sensitive/protected attributes) enforcement
+  excludes:
+    - Use-case logic (DOM-FRD, DOM-RCM, DOM-FCS, DOM-AGT), LLM agent orchestration (DOM-AGT)
+
+responsibilities:
+  - Only approved, certified model versions serve production decisions.
+  - Point-in-time correct features (no leakage) for training and replay.
+  - Monitoring with automatic rollback on breach.
+
+principles: [PRIN-005, PRIN-012, PRIN-022]
+
+boundaries:
+  upstream: [DOM-ANL, DOM-LIN, DOM-PRI, DOM-CRT, DOM-EXT, DOM-SOV, DOM-GOV]
+  downstream: [DOM-FRD, DOM-FRK, DOM-RCM, DOM-FCS, DOM-SRC, DOM-AGT, DOM-DEC]
+
+ownership:
+  boundedContext: intelligence
+  owningRole: Chief AI Architect
+  service: ml-platform-service
+  schema: ucos_intelligence
+
+capabilities:
+  - {id: INT-C1, name: Registry, description: "Register model versions with artifacts, lineage, model cards."}
+  - {id: INT-C2, name: Lifecycle, description: "Evaluate, approve, shadow, canary, activate, deprecate, retire."}
+  - {id: INT-C3, name: Features, description: "Define features; serve online/offline with point-in-time joins."}
+  - {id: INT-C4, name: Inference, description: "Online/batch inference; deterministic mode; routing."}
+  - {id: INT-C5, name: Monitor, description: "Drift, quality, latency, cost monitoring and auto-rollback."}
+
+services:
+  - {name: ModelRegistryService, kind: application, operations: [RegisterModelVersion, SubmitEvaluation, ApproveModelVersion, PromoteModelVersion, RollbackModel, DeprecateModelVersion]}
+  - {name: FeatureService, kind: application, operations: [DefineFeature, MaterializeFeatures, GetOnlineFeatures, GetPointInTimeFeatures]}
+  - {name: InferenceGateway, kind: infrastructure, contract: "ModelPort adapters (self-hosted runtimes, external providers); routes by deployment (active/shadow/canary %); deterministic flag pins seeds/temperature=0 and records model+feature snapshot for DecisionRecords; enforces sovereignty processor allow-list"}
+  - {name: ModelMonitor, kind: application, contract: "Compute PSI per feature/prediction daily, link outcomes from DOM-DEC, alert and auto-rollback per policy ml.monitoring"}
+  - {name: IntelligenceQueryService, kind: application, operations: [Infer, BatchInfer, GetModel, GetModelCard, GetMonitoringReport]}
+
+aggregates:
+  - name: ModelVersion
+    identity: "urn:ucos:<tenant|platform>:model:<name>@<version>"
+    invariants:
+      - "INV-INT-1: artifact digest signed; model card Evidence present; training data lineage (DOM-LIN datasets) recorded."
+      - "INV-INT-2: features used contain no prohibited features (ml.prohibited-features) unless use case and jurisdiction explicitly permit."
+      - "INV-INT-3: production-active only with CertificationRecord L2 (regulated use cases L3) and approved ChangeSet."
+    fields:
+      - {name: name, type: string}
+      - {name: version, type: string}
+      - {name: useCase, type: "fraud|credit|recommendation|forecast|ranking|classification|generation|embedding"}
+      - {name: artifact, type: "{ref, digest, runtime, providerRef?}"}
+      - {name: features, type: "FeatureRef[]"}
+      - {name: evaluation, type: "{metrics, datasets, fairness, robustness, evidenceRef}"}
+      - {name: modelCardRef, type: InstanceUrn}
+      - {name: lifecycleState, type: string}
+      - {name: deployment, type: "{mode: active|shadow|canary, trafficPct}"}
+  - name: FeatureDefinition
+    identity: "urn:ucos:<tenant|namespace>:feature:<name>@<semver>"
+    fields:
+      - {name: entity, type: "party|object|order|session|seller|…"}
+      - {name: source, type: "dataset/event aggregation spec (window, function)"}
+      - {name: dataType, type: string}
+      - {name: freshness, type: duration}
+      - {name: sensitivity, type: DataClassification}
+      - {name: prohibited, type: boolean}
+
+entities: []
+
+valueObjects:
+  - {name: InferenceRequest, definition: "{model (name or pinned), inputs | entityKeys (features fetched), deterministic: bool, purpose}"}
+  - {name: InferenceResult, definition: "{output, modelVersion, featureSnapshotRef, attributions?, latencyMs}"}
+  - {name: MonitoringReport, definition: "{model, window, psiByFeature, predictionPsi, outcomeMetrics, alerts[]}"}
+
+commands:
+  - {name: RegisterModelVersion, input: "ModelVersion (registered)", emits: [ModelVersionRegistered]}
+  - {name: SubmitEvaluation, input: "{model, evaluation}", emits: [ModelEvaluated]}
+  - {name: ApproveModelVersion, input: "{model, changeSetRef, certificationRef}", emits: [ModelApproved]}
+  - {name: PromoteModelVersion, input: "{model, mode: shadow|canary|active, trafficPct?}", emits: [ModelPromoted]}
+  - {name: RollbackModel, input: "{name, toVersion, reason}", emits: [ModelRolledBack]}
+  - {name: DeprecateModelVersion, input: "{model}", emits: [ModelDeprecated]}
+  - {name: DefineFeature, input: "FeatureDefinition + changeSetRef", emits: [FeatureDefined]}
+  - {name: MaterializeFeatures, input: "{features, window}", emits: [FeaturesMaterialized], async: true}
+
+queries:
+  - {name: Infer, input: InferenceRequest, output: InferenceResult}
+  - {name: BatchInfer, input: "{model, inputsRef}", output: "outputsRef", note: "Async job"}
+  - {name: GetOnlineFeatures, input: "{features, entityKeys}", output: "values + freshness"}
+  - {name: GetPointInTimeFeatures, input: "{features, entityKeys, asOf}", output: "values as of asOf"}
+  - {name: GetModel, input: "{name, version?}", output: ModelVersion}
+  - {name: GetModelCard, input: "{model}", output: "model card (Evidence)"}
+  - {name: GetMonitoringReport, input: "{model, window}", output: MonitoringReport}
+
+apis:
+  - {style: REST, path: "/v1/ml/models", methods: {POST: RegisterModelVersion}}
+  - {style: REST, path: "/v1/ml/models/{name}", methods: {GET: GetModel}}
+  - {style: REST, path: "/v1/ml/models/{name}/versions/{version}/evaluations", methods: {POST: SubmitEvaluation}}
+  - {style: REST, path: "/v1/ml/models/{name}/versions/{version}:approve", methods: {POST: ApproveModelVersion}}
+  - {style: REST, path: "/v1/ml/models/{name}/versions/{version}:promote", methods: {POST: PromoteModelVersion}}
+  - {style: REST, path: "/v1/ml/models/{name}/versions/{version}:deprecate", methods: {POST: DeprecateModelVersion}}
+  - {style: REST, path: "/v1/ml/models/{name}:rollback", methods: {POST: RollbackModel}}
+  - {style: REST, path: "/v1/ml/models/{name}/versions/{version}/card", methods: {GET: GetModelCard}}
+  - {style: REST, path: "/v1/ml/models/{name}/monitoring", methods: {GET: GetMonitoringReport}}
+  - {style: REST, path: "/v1/ml/features", methods: {POST: DefineFeature}}
+  - {style: REST, path: "/v1/ml/features:materialize", methods: {POST: MaterializeFeatures}}
+  - {style: REST, path: "/v1/ml/features:online", methods: {POST: GetOnlineFeatures}}
+  - {style: REST, path: "/v1/ml/features:point-in-time", methods: {POST: GetPointInTimeFeatures}}
+  - {style: REST, path: "/v1/ml:infer", methods: {POST: Infer}}
+  - {style: REST, path: "/v1/ml:batch-infer", methods: {POST: BatchInfer}}
+
+events:
+  - {type: ucos.intelligence.model.registered.v1, payload: "{name, version, useCase}"}
+  - {type: ucos.intelligence.model.evaluated.v1, payload: "{name, version, metricsSummary}"}
+  - {type: ucos.intelligence.model.approved.v1, payload: "{name, version}"}
+  - {type: ucos.intelligence.model.promoted.v1, payload: "{name, version, mode, trafficPct}", consumers: [use-case domains, versioning]}
+  - {type: ucos.intelligence.model.rolled-back.v1, payload: "{name, toVersion, reason}"}
+  - {type: ucos.intelligence.model.deprecated.v1, payload: "{name, version}"}
+  - {type: ucos.intelligence.model.drift-detected.v1, payload: "{name, version, psi, features}", consumers: [operations, risk]}
+  - {type: ucos.intelligence.feature.defined.v1, payload: "{name, entity}"}
+  - {type: ucos.intelligence.features.materialized.v1, payload: "{features, window}"}
+
+stateMachines:
+  - name: ModelVersionLifecycle
+    initial: registered
+    states: [registered, evaluated, approved, shadow, canary, active, deprecated, retired]
+    terminal: [retired]
+    transitions:
+      - {from: registered, to: evaluated, command: SubmitEvaluation}
+      - {from: evaluated, to: approved, command: ApproveModelVersion}
+      - {from: approved, to: shadow, command: PromoteModelVersion, guard: "mode=shadow"}
+      - {from: [approved, shadow], to: canary, command: PromoteModelVersion, guard: "mode=canary"}
+      - {from: [shadow, canary], to: active, command: PromoteModelVersion, guard: "mode=active and canary metrics within guardrails"}
+      - {from: [canary, active], to: deprecated, command: RollbackModel}
+      - {from: active, to: deprecated, command: DeprecateModelVersion}
+      - {from: deprecated, to: retired, trigger: "no DecisionRecords within replay window require it (DOM-VER pins)"}
+
+rules:
+  - {id: RUL-INT-1, statement: "Regulated use cases call Infer with deterministic=true; the InferenceResult references a feature snapshot so DOM-DEC replay reproduces outputs (CR-010-001-02)."}
+  - {id: RUL-INT-2, statement: "Drift or quality breach beyond ml.monitoring thresholds triggers automatic rollback to the previous active version and a Sev-3 alert."}
+  - {id: RUL-INT-3, statement: "External model providers receive data only under purpose binding and sovereignty allow-list (DOM-PRI, DOM-SOV)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:ml.prohibited-features", purpose: "Features prohibited per use case and jurisdiction (protected attributes and proxies)"}
+  - {urn: "urn:ucos:ucos.std:policy:ml.monitoring", purpose: "Drift/quality thresholds and auto-rollback behavior"}
+
+decisions:
+  - {id: DEC-INT-1, question: "Which model version serves request R?", algorithm: "Deployment routing (active/shadow/canary) with deterministic hashing on entity key"}
+
+security:
+  permissions: [ml.read, ml.model.register, ml.model.approve, ml.model.promote, ml.feature.manage, ml.infer]
+  dataClassification: "Features may be personal (hashed/encrypted in store); artifacts confidential."
+  threats: ["Model theft -> artifacts encrypted, access via gateway only", "Training-serving skew/leakage -> point-in-time features", "Poisoned training data -> lineage + evaluation gates"]
+
+governance:
+  changeControl: "Approval and activation via ChangeSet with certification; prohibited features policy constitutional/regulatory layer."
+  evidence: "Model cards, evaluations, fairness reports as Evidence."
+
+runtimeBehavior:
+  consistency: "Online features eventual within freshness; inference stateless."
+  slo: {Infer_tabular_p99_ms: 20, GetOnlineFeatures_p99_ms: 10, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_intelligence (registry) + online feature store (CachePort-backed) + offline store (analytics) + artifact registry (OCI)
+  tables:
+    - {name: model_versions, columns: "scope, name, version, use_case, body jsonb, state, deployment jsonb", pk: "(scope, name, version)"}
+    - {name: feature_definitions, columns: "scope, name, version, body jsonb", pk: "(scope, name, version)"}
+    - {name: monitoring_reports, columns: "scope, name, version, window_end, body jsonb", pk: "(scope, name, version, window_end)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Offline features by entity and date."
+  retention: "Model versions while referenced by decisions in replay window; features per sensitivity retention."
+
+extensionModel:
+  extensionPoints: ["ModelPort adapters (runtimes, external providers)", "Feature transformation libraries", "Fairness/robustness evaluators"]
+  forbidden: ["Serving uncertified models in production decisions"]
+
+certificationCriteria:
+  - {id: CR-INT-01, rule: "Point-in-time feature retrieval has zero leakage on golden temporal datasets.", level: L1}
+  - {id: CR-INT-02, rule: "Models using prohibited features are rejected at registration/approval.", level: L1}
+  - {id: CR-INT-03, rule: "Injected drift triggers rollback within one monitoring window.", level: L2}
+  - {id: CR-INT-04, rule: "Deterministic inference reproduces outputs for 10^4 recorded requests.", level: L1}
+validationRules:
+  - {id: VR-INT-01, rule: "Every active model has model card, evaluation evidence, and certification."}
+  - {id: VR-INT-02, rule: "Every feature declares sensitivity."}

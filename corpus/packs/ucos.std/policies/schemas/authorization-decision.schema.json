@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ucos:ucos.std:schema:authorization-decision@1.0.0",
+  "title": "Authorization decision (CIC-009-001 §1)",
+  "type": "object",
+  "required": ["effect"],
+  "additionalProperties": false,
+  "properties": {
+    "effect": {"enum": ["allow", "deny"]},
+    "obligations": {"type": "array", "items": {"type": "object", "required": ["kind"], "properties": {
+      "kind": {"enum": ["log", "notify", "redact", "require-mfa", "require-approval", "attach-evidence"]},
+      "params": {"type": "object"}}}},
+    "reason": {"type": "string", "pattern": "^R-[A-Z]{2,5}-[A-Z0-9-]+$"}
+  }
+}

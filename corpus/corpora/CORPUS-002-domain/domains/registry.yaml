@@ -1,0 +1,755 @@
+header:
+  id: CIC-002-002
+  title: Domain Registry
+  version: 1.0.0
+  status: normative
+  authority: Chief Architect
+  corpus: CORPUS-002
+  dependencies:
+  - CIC-000-002
+  - CIC-002-001
+  traces:
+  - PRIN-001
+  - PRIN-019
+  certification: []
+  validation:
+  - VR-002-002-01
+  - VR-002-002-02
+tierDefinitions:
+  kernel: Closed-set substrate capability; changes require constitutional amendment.
+  core: Platform-provided bounded context composed from kernel aggregates.
+  pack: Realized purely as ucos.std Type Pack metadata over DOM-COB; no dedicated service.
+  extension: Optional bounded context deployed as a certified plugin (CORPUS-028).
+validationRules:
+  VR-002-002-01: Every domain id is unique and matches ^DOM-[A-Z]{3,5}$.
+  VR-002-002-02: A domain with status 'specified' has a DOM-<CODE>.yaml file validating against schemas/domain-spec.schema.json; a domain with status 'realized' has tier 'pack' and is listed in a pack's pack.yaml 'realizes' map; a domain with status 'subsumed' names subsumedBy, a specified domain whose spec lists it under 'subsumes' with coverage.
+domains:
+- id: DOM-IDN
+  name: Identity
+  boundedContext: identity
+  tier: kernel
+  owningRole: Chief Security Architect
+  status: specified
+  kernelAggregate: identity
+- id: DOM-REF
+  name: Reference
+  boundedContext: identity
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-PTY
+  name: Party
+  boundedContext: party
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+  kernelAggregate: party
+- id: DOM-ORG
+  name: Organization
+  boundedContext: party
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-AUTH
+  name: Authority
+  boundedContext: party
+  tier: kernel
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-TRST
+  name: Trust
+  boundedContext: evidence
+  tier: kernel
+  owningRole: Chief Security Architect
+  status: specified
+- id: DOM-EVD
+  name: Evidence
+  boundedContext: evidence
+  tier: kernel
+  owningRole: Chief Governance Architect
+  status: specified
+  kernelAggregate: evidence
+- id: DOM-RGT
+  name: Rights
+  boundedContext: entitlement
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-SOV
+  name: Sovereignty
+  boundedContext: governance
+  tier: core
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-ONT
+  name: Ontology
+  boundedContext: ontology
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+  kernelAggregate: type
+- id: DOM-TXO
+  name: Taxonomy
+  boundedContext: ontology
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-KNW
+  name: Knowledge
+  boundedContext: ontology
+  tier: kernel
+  owningRole: Chief AI Architect
+  status: specified
+- id: DOM-KLC
+  name: Knowledge Lifecycle
+  boundedContext: ontology
+  tier: kernel
+  owningRole: Chief Governance Architect
+  status: subsumed
+  subsumedBy: DOM-KNW
+- id: DOM-KGR
+  name: Knowledge Graph
+  boundedContext: graph
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-REL
+  name: Relationships
+  boundedContext: graph
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+  kernelAggregate: relationship
+- id: DOM-HIER
+  name: Hierarchy
+  boundedContext: graph
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: subsumed
+  subsumedBy: DOM-REL
+- id: DOM-ATTR
+  name: Attributes
+  boundedContext: ontology
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: subsumed
+  subsumedBy: DOM-ONT
+- id: DOM-CLS
+  name: Classification
+  boundedContext: ontology
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: subsumed
+  subsumedBy: DOM-TXO
+- id: DOM-META
+  name: Metadata
+  boundedContext: ontology
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-COB
+  name: Commercial Objects
+  boundedContext: commercial-object
+  tier: kernel
+  owningRole: Chief Product Architect
+  status: specified
+  kernelAggregate: commercialobject
+- id: DOM-PRD
+  name: Products
+  boundedContext: commercial-object
+  tier: pack
+  owningRole: Chief Product Architect
+  status: realized
+- id: DOM-SVC
+  name: Services
+  boundedContext: commercial-object
+  tier: pack
+  owningRole: Chief Product Architect
+  status: realized
+- id: DOM-SUB
+  name: Subscriptions
+  boundedContext: commercial-object
+  tier: pack
+  owningRole: Chief Product Architect
+  status: realized
+- id: DOM-MBR
+  name: Memberships
+  boundedContext: commercial-object
+  tier: pack
+  owningRole: Chief Product Architect
+  status: realized
+- id: DOM-ENT
+  name: Entitlements
+  boundedContext: entitlement
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-CTR
+  name: Contracts
+  boundedContext: contract
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-LIC
+  name: Licenses
+  boundedContext: entitlement
+  tier: core
+  owningRole: Chief Product Architect
+  status: subsumed
+  subsumedBy: DOM-ENT
+- id: DOM-BDL
+  name: Bundles
+  boundedContext: commercial-object
+  tier: core
+  owningRole: Chief Product Architect
+  status: subsumed
+  subsumedBy: DOM-COB
+- id: DOM-PKG
+  name: Packages
+  boundedContext: commercial-object
+  tier: core
+  owningRole: Chief Product Architect
+  status: subsumed
+  subsumedBy: DOM-COB
+- id: DOM-AST
+  name: Assets
+  boundedContext: commercial-object
+  tier: core
+  owningRole: Chief Product Architect
+  status: subsumed
+  subsumedBy: DOM-COB
+- id: DOM-EXP
+  name: Experiences
+  boundedContext: commercial-object
+  tier: pack
+  owningRole: Chief Product Architect
+  status: realized
+- id: DOM-OFR
+  name: Offers
+  boundedContext: offer
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-CMP
+  name: Campaigns
+  boundedContext: offer
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-PFL
+  name: Portfolios
+  boundedContext: catalog
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-CAP
+  name: Capabilities
+  boundedContext: commercial-object
+  tier: core
+  owningRole: Chief Product Architect
+  status: subsumed
+  subsumedBy: DOM-COB
+- id: DOM-CAT
+  name: Catalogs
+  boundedContext: catalog
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-PRC
+  name: Pricing
+  boundedContext: pricing
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-REV
+  name: Revenue
+  boundedContext: revenue
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-BIL
+  name: Billing
+  boundedContext: billing
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-STL
+  name: Settlement
+  boundedContext: settlement
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-MKT
+  name: Marketplaces
+  boundedContext: marketplace
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-DST
+  name: Distribution
+  boundedContext: marketplace
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-LOC
+  name: Localization
+  boundedContext: context
+  tier: kernel
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-GEO
+  name: Geography
+  boundedContext: context
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-TER
+  name: Territory
+  boundedContext: context
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-CTX
+  name: Context
+  boundedContext: context
+  tier: kernel
+  owningRole: Chief Architect
+  status: specified
+  kernelAggregate: dimension
+- id: DOM-AVL
+  name: Availability
+  boundedContext: supply
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-SUPN
+  name: Supply Networks
+  boundedContext: supply
+  tier: core
+  owningRole: Chief Systems Engineer
+  status: specified
+- id: DOM-MFG
+  name: Manufacturing
+  boundedContext: supply
+  tier: extension
+  owningRole: Chief Systems Engineer
+  status: specified
+- id: DOM-PKGN
+  name: Packaging
+  boundedContext: supply
+  tier: extension
+  owningRole: Chief Systems Engineer
+  status: specified
+- id: DOM-INV
+  name: Inventory
+  boundedContext: supply
+  tier: core
+  owningRole: Chief Systems Engineer
+  status: specified
+- id: DOM-FUL
+  name: Fulfillment
+  boundedContext: fulfillment
+  tier: core
+  owningRole: Chief Systems Engineer
+  status: specified
+- id: DOM-LOG
+  name: Logistics
+  boundedContext: fulfillment
+  tier: core
+  owningRole: Chief Systems Engineer
+  status: specified
+- id: DOM-SDL
+  name: Service Delivery
+  boundedContext: fulfillment
+  tier: core
+  owningRole: Chief Systems Engineer
+  status: specified
+- id: DOM-GOV
+  name: Governance
+  boundedContext: governance
+  tier: core
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-WFL
+  name: Workflow
+  boundedContext: automation
+  tier: core
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-LFC
+  name: Lifecycle
+  boundedContext: lifecycle
+  tier: kernel
+  owningRole: Chief Architect
+  status: specified
+  kernelAggregate: lifecycle
+- id: DOM-RUL
+  name: Rules
+  boundedContext: policy
+  tier: kernel
+  owningRole: Chief Governance Architect
+  status: specified
+  kernelAggregate: rule
+- id: DOM-POL
+  name: Policies
+  boundedContext: policy
+  tier: kernel
+  owningRole: Chief Governance Architect
+  status: specified
+  kernelAggregate: policy
+- id: DOM-DEC
+  name: Decisions
+  boundedContext: policy
+  tier: kernel
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-CRT
+  name: Certification
+  boundedContext: governance
+  tier: core
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-CMPL
+  name: Compliance
+  boundedContext: governance
+  tier: core
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-AUD
+  name: Audit
+  boundedContext: governance
+  tier: core
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-TRC
+  name: Traceability
+  boundedContext: governance
+  tier: core
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-PRV
+  name: Provenance
+  boundedContext: evidence
+  tier: kernel
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-MDM
+  name: Master Data
+  boundedContext: data
+  tier: core
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-DQL
+  name: Data Quality
+  boundedContext: data
+  tier: core
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-DXC
+  name: Data Exchange
+  boundedContext: data
+  tier: core
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-FED
+  name: Federation
+  boundedContext: data
+  tier: core
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-IOP
+  name: Interoperability
+  boundedContext: data
+  tier: core
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-EVT
+  name: Events
+  boundedContext: eventing
+  tier: kernel
+  owningRole: Chief Platform Architect
+  status: specified
+  kernelAggregate: event
+- id: DOM-DOC
+  name: Documents
+  boundedContext: content
+  tier: core
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-MED
+  name: Media
+  boundedContext: content
+  tier: core
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-CST
+  name: Cost
+  boundedContext: finance
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-PRF
+  name: Profitability
+  boundedContext: finance
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-ACC
+  name: Accounting
+  boundedContext: finance
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-TAX
+  name: Taxation
+  boundedContext: finance
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+- id: DOM-FCT
+  name: Financial Controls
+  boundedContext: finance
+  tier: core
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-FRK
+  name: Financial Risk
+  boundedContext: risk
+  tier: core
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-DSC
+  name: Discovery
+  boundedContext: intelligence
+  tier: core
+  owningRole: Chief AI Architect
+  status: subsumed
+  subsumedBy: DOM-SRC
+- id: DOM-SRC
+  name: Search
+  boundedContext: intelligence
+  tier: core
+  owningRole: Chief AI Architect
+  status: specified
+- id: DOM-RCM
+  name: Recommendations
+  boundedContext: intelligence
+  tier: core
+  owningRole: Chief AI Architect
+  status: specified
+- id: DOM-INT
+  name: Intelligence
+  boundedContext: intelligence
+  tier: core
+  owningRole: Chief AI Architect
+  status: specified
+- id: DOM-ANL
+  name: Analytics
+  boundedContext: intelligence
+  tier: core
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-FCS
+  name: Forecasting
+  boundedContext: intelligence
+  tier: core
+  owningRole: Chief AI Architect
+  status: specified
+- id: DOM-SIM
+  name: Simulation
+  boundedContext: intelligence
+  tier: extension
+  owningRole: Chief AI Architect
+  status: specified
+- id: DOM-PLN
+  name: Planning
+  boundedContext: intelligence
+  tier: extension
+  owningRole: Chief AI Architect
+  status: specified
+- id: DOM-OPT
+  name: Optimization
+  boundedContext: intelligence
+  tier: extension
+  owningRole: Chief AI Architect
+  status: specified
+- id: DOM-SUS
+  name: Sustainability
+  boundedContext: sustainability
+  tier: extension
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-SEC
+  name: Security
+  boundedContext: security
+  tier: kernel
+  owningRole: Chief Security Architect
+  status: specified
+- id: DOM-PRI
+  name: Privacy
+  boundedContext: security
+  tier: kernel
+  owningRole: Chief Security Architect
+  status: specified
+- id: DOM-FRD
+  name: Fraud
+  boundedContext: risk
+  tier: core
+  owningRole: Chief Security Architect
+  status: specified
+- id: DOM-CFT
+  name: Counterfeit
+  boundedContext: risk
+  tier: extension
+  owningRole: Chief Security Architect
+  status: specified
+- id: DOM-CYR
+  name: Cyber Risk
+  boundedContext: risk
+  tier: core
+  owningRole: Chief Security Architect
+  status: specified
+- id: DOM-ORK
+  name: Operational Risk
+  boundedContext: risk
+  tier: core
+  owningRole: Chief Governance Architect
+  status: specified
+- id: DOM-AUT
+  name: Automation
+  boundedContext: automation
+  tier: core
+  owningRole: Chief Platform Architect
+  status: subsumed
+  subsumedBy: DOM-WFL
+- id: DOM-ORC
+  name: Orchestration
+  boundedContext: automation
+  tier: core
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-AGT
+  name: Agents
+  boundedContext: automation
+  tier: core
+  owningRole: Chief AI Architect
+  status: specified
+- id: DOM-ACM
+  name: Autonomous Commerce
+  boundedContext: automation
+  tier: extension
+  owningRole: Chief AI Architect
+  status: specified
+- id: DOM-DTW
+  name: Digital Twins
+  boundedContext: digital-twin
+  tier: extension
+  owningRole: Chief Systems Engineer
+  status: specified
+- id: DOM-RTM
+  name: Runtime
+  boundedContext: runtime
+  tier: kernel
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-EXE
+  name: Execution
+  boundedContext: runtime
+  tier: kernel
+  owningRole: Chief Platform Architect
+  status: subsumed
+  subsumedBy: DOM-RTM
+- id: DOM-OBS
+  name: Observability
+  boundedContext: runtime
+  tier: core
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-MON
+  name: Monitoring
+  boundedContext: runtime
+  tier: core
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-RLB
+  name: Reliability
+  boundedContext: runtime
+  tier: core
+  owningRole: Chief Systems Engineer
+  status: specified
+- id: DOM-TIM
+  name: Time
+  boundedContext: context
+  tier: kernel
+  owningRole: Chief Architect
+  status: specified
+- id: DOM-VER
+  name: Versioning
+  boundedContext: lifecycle
+  tier: kernel
+  owningRole: Chief Architect
+  status: specified
+- id: DOM-LIN
+  name: Lineage
+  boundedContext: evidence
+  tier: kernel
+  owningRole: Chief Data Architect
+  status: specified
+- id: DOM-EVO
+  name: Evolution
+  boundedContext: governance
+  tier: core
+  owningRole: Chief Architect
+  status: specified
+- id: DOM-CFG
+  name: Configuration
+  boundedContext: runtime
+  tier: kernel
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-CMPS
+  name: Composition
+  boundedContext: commercial-object
+  tier: kernel
+  owningRole: Chief Product Architect
+  status: subsumed
+  subsumedBy: DOM-COB
+- id: DOM-EXT
+  name: Extension
+  boundedContext: extension
+  tier: kernel
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-CUS
+  name: Customization
+  boundedContext: extension
+  tier: core
+  owningRole: Chief Platform Architect
+  status: specified
+- id: DOM-FUT
+  name: Future Compatibility
+  boundedContext: extension
+  tier: kernel
+  owningRole: Chief Architect
+  status: specified
+- id: DOM-QTE
+  name: Quote
+  boundedContext: transaction
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+  origin: architect-added
+- id: DOM-ORD
+  name: Order
+  boundedContext: transaction
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+  origin: architect-added
+- id: DOM-PAY
+  name: Payment
+  boundedContext: settlement
+  tier: core
+  owningRole: Chief Product Architect
+  status: specified
+  origin: architect-added

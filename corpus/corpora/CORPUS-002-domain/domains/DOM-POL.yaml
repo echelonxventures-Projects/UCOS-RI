@@ -1,0 +1,203 @@
+header:
+  id: DOM-POL
+  title: Policy Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-009-001, CIC-011-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-010, PRIN-011, PRIN-016, CIC-009-001]
+  certification: [CR-POL-01, CR-POL-02, CR-POL-03]
+  validation: [VR-POL-01, VR-POL-02]
+
+purpose: >
+  Own every externally variable behavior of UCOS as versioned, layered, context-scoped policies;
+  provide the Policy Decision Point used by every enforcement point; distribute signed policy bundles.
+
+scope:
+  includes:
+    - Policy definitions (authorization, configuration, constraint, selection)
+    - Layered evaluation and combining (CIC-009-001)
+    - Policy bundles: compilation, signing, distribution
+    - Policy test vectors and simulation
+  excludes:
+    - Business derivation rules (DOM-RUL)
+    - Decision records storage and analytics (DOM-DEC)
+    - Identity/credential verification (DOM-IDN)
+
+responsibilities:
+  - Single source of truth for all policies (PRIN-001, PRIN-005).
+  - Fail-closed decisions (PRIN-010).
+  - Guarantee regulatory/platform denies are never overridden.
+
+principles: [PRIN-005, PRIN-010, PRIN-011, PRIN-016]
+
+boundaries:
+  upstream: [DOM-CTX, DOM-GOV, DOM-IDN, DOM-PTY, DOM-AUTH]
+  downstream: [DOM-COB, DOM-PRC, DOM-CAT, DOM-ONT, DOM-DEC, DOM-SEC, DOM-PRI]
+
+ownership:
+  boundedContext: policy
+  owningRole: Chief Governance Architect
+  service: policy-service
+  schema: ucos_policy
+
+capabilities:
+  - {id: POL-C1, name: Author policy, description: "Draft policy with body, scope, test vectors."}
+  - {id: POL-C2, name: Simulate, description: "Evaluate a draft against recorded decision inputs (shadow mode) and report decision diffs."}
+  - {id: POL-C3, name: Publish & distribute, description: "Compile, sign, and distribute tenant bundles."}
+  - {id: POL-C4, name: Decide, description: "PDP evaluation (embedded and remote)."}
+
+services:
+  - {name: PolicyAuthoringService, kind: application, operations: [DraftPolicy, RevisePolicy, AddTestVector, SubmitPolicy, PublishPolicy, DeprecatePolicy]}
+  - {name: PolicySimulationService, kind: application, operations: [SimulatePolicy]}
+  - {name: BundleService, kind: application, operations: [BuildBundle, GetBundle], contract: "bundle = {tenant, sequence, policies[], compiled artifacts, signature}"}
+  - {name: PolicyDecisionPoint, kind: domain-service, contract: "CIC-009-001 §4 Decide"}
+
+aggregates:
+  - name: Policy
+    kernel: true
+    identity: "urn:ucos:<namespace>:policy:<context>.<name>@<semver>"
+    invariants:
+      - "INV-POL-1: body compiles in its language; outputs of all test vectors validate against outputSchema and equal expected outputs."
+      - "INV-POL-2: layer=constitutional|platform|regulatory may only be authored by holders of the corresponding governance role."
+      - "INV-POL-3: published versions immutable."
+      - "INV-POL-4: authorization policies declare at least one deny test vector and one allow test vector."
+    fields:
+      - {name: urn, type: MetadataUrn}
+      - {name: kind, type: "enum(authorization, configuration, constraint, selection)"}
+      - {name: layer, type: "enum(constitutional, platform, regulatory, tenant, organization, delegated)"}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: priority, type: int}
+      - {name: final, type: boolean}
+      - {name: body, type: PolicyBody}
+      - {name: outputSchema, type: JsonSchema}
+      - {name: combining, type: CombiningAlgorithm}
+      - {name: obligations, type: "Obligation[]"}
+      - {name: testVectors, type: "TestVector[]"}
+      - {name: cacheTtlSeconds, type: int}
+      - {name: audit, type: "enum(deny-only, always, never)"}
+      - {name: state, type: DefinitionState}
+  - name: PolicyBundle
+    identity: "urn:ucos:<tenant>:bundle:<sequence>"
+    invariants: ["INV-POL-5: bundle sequence strictly increasing per tenant; signature verifies with platform key."]
+    fields:
+      - {name: tenant, type: TenantId}
+      - {name: sequence, type: long}
+      - {name: policyRefs, type: "MetadataUrn[]"}
+      - {name: digest, type: Sha256}
+      - {name: signature, type: "Sigstore bundle"}
+
+entities:
+  - {name: TestVector, within: Policy, fields: [name, input, context, expectedOutput]}
+  - {name: Obligation, within: Policy, fields: [id, kind, params]}
+
+valueObjects:
+  - {name: PolicyBody, definition: "{language: cel|rego|static, source}"}
+  - {name: CombiningAlgorithm, definition: "deny-overrides|permit-overrides|first-applicable|only-one-applicable|merge"}
+  - {name: DecisionOutput, definition: "{effect|config|violations|selection, obligations[], advice[]}"}
+
+commands:
+  - {name: DraftPolicy, input: "Policy draft + changeSetRef", emits: [PolicyDrafted]}
+  - {name: RevisePolicy, input: "{urn, expectedRevision, patch}", emits: [PolicyRevised]}
+  - {name: AddTestVector, input: "{urn, TestVector}", emits: [PolicyTestVectorAdded]}
+  - {name: SubmitPolicy, input: "{urn}", emits: [PolicySubmitted], preconditions: ["INV-POL-1, INV-POL-4"]}
+  - {name: PublishPolicy, input: "{urn, approvalRef}", emits: [PolicyPublished, BundleBuilt]}
+  - {name: DeprecatePolicy, input: "{urn, successor?}", emits: [PolicyDeprecated]}
+  - {name: SimulatePolicy, input: "{draftUrn, sample: {from, to, maxDecisions}}", emits: [PolicySimulationCompleted], async: true}
+
+queries:
+  - {name: GetPolicy, input: "{urn}", output: Policy}
+  - {name: FindPolicies, input: "{name?, layer?, kind?, state?, cursor, limit}", output: "page of Policy"}
+  - {name: Decide, input: "{policyName, input, context}", output: DecisionOutput}
+  - {name: GetBundle, input: "{tenant, sinceSequence?}", output: PolicyBundle}
+  - {name: GetSimulationReport, input: "{operationId}", output: "{evaluated, changed, diffs[]}"}
+
+apis:
+  - {style: REST, path: "/v1/policy/policies", methods: {POST: DraftPolicy, GET: FindPolicies}}
+  - {style: REST, path: "/v1/policy/policies/{urn}", methods: {GET: GetPolicy, PATCH: RevisePolicy}}
+  - {style: REST, path: "/v1/policy/policies/{urn}/test-vectors", methods: {POST: AddTestVector}}
+  - {style: REST, path: "/v1/policy/policies/{urn}:submit", methods: {POST: SubmitPolicy}}
+  - {style: REST, path: "/v1/policy/policies/{urn}:publish", methods: {POST: PublishPolicy}}
+  - {style: REST, path: "/v1/policy/policies/{urn}:deprecate", methods: {POST: DeprecatePolicy}}
+  - {style: REST, path: "/v1/policy/policies/{urn}:simulate", methods: {POST: SimulatePolicy}}
+  - {style: REST, path: "/v1/policy/simulations/{operationId}", methods: {GET: GetSimulationReport}}
+  - {style: REST, path: "/v1/policy:decide", methods: {POST: Decide}}
+  - {style: REST, path: "/v1/policy/bundles/{tenant}", methods: {GET: GetBundle}}
+
+events:
+  - {type: ucos.policy.policy.drafted.v1, payload: "{urn, kind, layer}"}
+  - {type: ucos.policy.policy.revised.v1, payload: "{urn, revision}"}
+  - {type: ucos.policy.policy.test-vector-added.v1, payload: "{urn, name}"}
+  - {type: ucos.policy.policy.submitted.v1, payload: "{urn}"}
+  - {type: ucos.policy.policy.published.v1, payload: "{urn, kind, layer, scope}", consumers: [all PEPs]}
+  - {type: ucos.policy.policy.deprecated.v1, payload: "{urn, successor}"}
+  - {type: ucos.policy.bundle.built.v1, payload: "{tenant, sequence, digest}"}
+  - {type: ucos.policy.simulation.completed.v1, payload: "{draftUrn, evaluated, changed}"}
+
+stateMachines:
+  - name: PolicyLifecycle
+    initial: draft
+    states: [draft, in-review, published, deprecated, retired]
+    terminal: [retired]
+    transitions:
+      - {from: draft, to: in-review, command: SubmitPolicy}
+      - {from: in-review, to: draft, command: RevisePolicy}
+      - {from: in-review, to: published, command: PublishPolicy, guard: "approval count per governance.policy-approval; regulatory layer requires Compliance role"}
+      - {from: published, to: deprecated, command: DeprecatePolicy}
+      - {from: deprecated, to: retired, command: retire, guard: "validTo passed or successor published"}
+
+rules:
+  - {id: RUL-POL-1, statement: "Missing authorization policy => deny; missing configuration policy => E-POL-NO-CONFIG (fail closed)."}
+  - {id: RUL-POL-2, statement: "A configuration field marked $locked by a higher layer cannot be overridden by lower layers; attempts are reported as constraint violations at publish time."}
+  - {id: RUL-POL-3, statement: "Policies changing authorization outcomes for > 1% of simulated decisions require an additional approver."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:governance.policy-approval", purpose: "Approval requirements per layer and simulation impact"}
+  - {urn: "urn:ucos:ucos.std:policy:policy.authoring", purpose: "Who may author policies in which layer and namespace"}
+
+decisions:
+  - {id: DEC-POL-1, question: "Is the action permitted / what configuration applies?", algorithm: "CIC-009-001 §4"}
+  - {id: DEC-POL-2, question: "Is a policy change safe to publish?", inputs: ["test vectors", "simulation diff ratio", "approvals"], output: "allow|deny"}
+
+security:
+  permissions: [policy.read, policy.author.tenant, policy.author.regulatory, policy.author.platform, policy.publish, policy.simulate]
+  dataClassification: "Policies internal/confidential; simulation samples contain decision inputs -> processed in-region, never exported, personal fields hashed."
+  threats: ["Bundle tampering -> signature verification (CIC-009-001 CR-009-001-04)", "Privilege escalation via delegated layer -> delegated policies can only narrow (deny) never widen grants of the delegating organization"]
+
+governance:
+  changeControl: "All publications via ChangeSet; regulatory and platform layers require dual control."
+  evidence: "Simulation report + test vector results attached as Evidence."
+
+runtimeBehavior:
+  consistency: "Bundles propagate to embedded PDPs within 10s p99 of publication."
+  slo: {Decide_embedded_p99_ms: 1, Decide_remote_p99_ms: 10, bundle_propagation_p99_s: 10}
+  failureModes: ["Policy service down: embedded PDPs continue on last-good bundle (bounded staleness alert after 15 min)"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_policy + object storage for bundles
+  tables:
+    - {name: policies, columns: "tenant_id uuid, urn text, name text, layer text, kind text, state text, body jsonb, scope jsonb, valid_from timestamptz, valid_to timestamptz, revision bigint", pk: "(tenant_id, urn)", indexes: ["(tenant_id, name, layer, state)"]}
+    - {name: bundles, columns: "tenant_id uuid, sequence bigint, digest bytea, object_key text, signature jsonb, built_at timestamptz", pk: "(tenant_id, sequence)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Policies indefinite; bundles last 100 per tenant + all referenced by DecisionRecords within retention."
+
+extensionModel:
+  extensionPoints:
+    - "New policy names in any context namespace"
+    - "Rego adapter for OPA-compatible ecosystems"
+    - "Custom CEL functions registered by certified plugins (pure, cost-annotated)"
+    - "New obligation kinds handled by plugin-provided obligation handlers"
+  forbidden: ["Policies with I/O in body", "Unsigned bundles"]
+
+certificationCriteria:
+  - {id: CR-POL-01, rule: "PDP passes CIC-009-001 CR-009-001-01..04.", level: L1}
+  - {id: CR-POL-02, rule: "Every test vector of every ucos.std policy passes on every release.", level: L1}
+  - {id: CR-POL-03, rule: "Shadow simulation of 10^6 recorded decisions completes in < 10 minutes.", level: L2}
+validationRules:
+  - {id: VR-POL-01, rule: "Every policy URN referenced in DOM-*.yaml 'policies' sections exists in the ucos.std pack (or is a templated <factKind>.resolution entry)."}
+  - {id: VR-POL-02, rule: "Every authorization policy has >= 1 allow and >= 1 deny test vector."}

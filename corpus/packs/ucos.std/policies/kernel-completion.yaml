@@ -1,0 +1,112 @@
+# Policies for DOM-TRST, KNW, LOC, GEO, TER, TIM, VER, LIN, RTM, CFG, EXT, FUT.
+defaults:
+  auth: &auth
+    kind: authorization
+    layer: platform
+    scope: {}
+    combining: deny-overrides
+    outputSchema: {$ref: authorization-decision}
+  cfg: &cfg
+    kind: configuration
+    layer: platform
+    scope: {}
+
+policies:
+  - <<: *auth
+    name: config.kill-switch
+    body:
+      language: cel
+      source: |
+        resource.capabilityClass == 'agent-class' && ('agent-supervisor' in principal.roles || 'ops-engineer' in principal.roles)
+          ? {'effect': 'allow', 'obligations': [{'kind': 'notify', 'params': {'audience': 'incident-channel'}}]}
+        : resource.capabilityClass in ['plugin', 'provider', 'api'] && 'ops-engineer' in principal.roles
+          ? {'effect': 'allow', 'obligations': [{'kind': 'notify', 'params': {'audience': 'incident-channel'}}]}
+        : {'effect': 'deny'}
+    testVectors:
+      - {name: ops-plugin, input: {principal: {roles: [ops-engineer]}, resource: {capabilityClass: plugin}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: notify, params: {audience: incident-channel}}]}}
+      - {name: supervisor-agent, input: {principal: {roles: [agent-supervisor]}, resource: {capabilityClass: agent-class}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: notify, params: {audience: incident-channel}}]}}
+      - {name: supervisor-plugin, input: {principal: {roles: [agent-supervisor]}, resource: {capabilityClass: plugin}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: sales-rep, input: {principal: {roles: [sales-rep]}, resource: {capabilityClass: api}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *auth
+    name: extensions.activation
+    body:
+      language: cel
+      source: |
+        !('tenant-admin' in principal.roles) ? {'effect': 'deny'}
+        : resource.isolation in ['I1', 'I3'] && resource.certificationLevel in ['L1', 'L2', 'L3']
+          ? {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['tenant-admin']}}]}
+        : resource.isolation in ['I2', 'I4'] && resource.certificationLevel in ['L2', 'L3']
+          ? {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['tenant-admin', 'security-lead']}}]}
+        : {'effect': 'deny'}
+    testVectors:
+      - {name: wasm-l1, input: {principal: {roles: [tenant-admin]}, resource: {isolation: I1, certificationLevel: L1}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [tenant-admin]}}]}}
+      - {name: sidecar-l1-denied, input: {principal: {roles: [tenant-admin]}, resource: {isolation: I2, certificationLevel: L1}}, context: {}, expectedOutput: {effect: deny}}
+      - {name: sidecar-l2, input: {principal: {roles: [tenant-admin]}, resource: {isolation: I2, certificationLevel: L2}}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [tenant-admin, security-lead]}}]}}
+      - {name: non-admin, input: {principal: {roles: [sales-rep]}, resource: {isolation: I1, certificationLevel: L3}}, context: {}, expectedOutput: {effect: deny}}
+
+  - <<: *cfg
+    name: trust.revocation-mode
+    outputSchema: {type: object, required: [strictPurposes, softFailWarn], properties: {strictPurposes: {type: array, items: {type: string}}, softFailWarn: {type: boolean}}}
+    body: {language: static, source: &trstMode {strictPurposes: [evidence-signature, credential, plugin-signing, pack-signing], softFailWarn: true}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *trstMode}]
+
+  - <<: *cfg
+    name: knowledge.review-cadence
+    outputSchema: {type: object, required: [byAudience], properties: {byAudience: {type: object, additionalProperties: {type: string, pattern: "^P"}}}}
+    body: {language: static, source: &knwCadence {byAudience: {customer: P180D, agent: P180D, partner: P270D, internal: P365D}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *knwCadence}]
+
+  - <<: *cfg
+    name: localization.territory-fallbacks
+    outputSchema: {type: object, required: [byTerritory], properties: {byTerritory: {type: object, additionalProperties: {type: array, items: {type: string}}}}}
+    body: {language: static, source: &locFallbacks {byTerritory: {CH: [de-CH, fr-CH, it-CH], BE: [nl-BE, fr-BE, de-BE], CA: [en-CA, fr-CA], IN: [en-IN, hi-IN], SG: [en-SG, zh-Hans-SG, ms-SG, ta-SG]}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *locFallbacks}]
+
+  - <<: *cfg
+    name: localization.mt-auto-approve
+    outputSchema: {type: object, required: [allowedNamespaces, excludedNamespaces], properties: {allowedNamespaces: {type: array}, excludedNamespaces: {type: array}}}
+    body: {language: static, source: &locMt {allowedNamespaces: [ui, catalog.descriptions, knowledge.internal], excludedNamespaces: [legal, contract, billing.invoice, privacy, reason, regulatory]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *locMt}]
+
+  - <<: *cfg
+    name: geography.min-confidence
+    outputSchema: {type: object, required: [authoritative, advisory], properties: {authoritative: {type: number, minimum: 0, maximum: 1}, advisory: {type: number, minimum: 0, maximum: 1}}}
+    body: {language: static, source: &geoConf {authoritative: 0.9, advisory: 0.6}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *geoConf}]
+
+  - <<: *cfg
+    name: territory.realignment-approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &terApproval {measure: accountsMoved, tiers: [{upTo: 100, stages: [{approverRoles: [sales-operations], quorum: 1}]}, {upTo: unbounded, stages: [{approverRoles: [sales-operations], quorum: 1}, {approverRoles: [sales-director], quorum: 1}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *terApproval}]
+
+  - <<: *cfg
+    name: time.default-calendar
+    outputSchema: {type: object, required: [fallback], properties: {fallback: {type: string}, byJurisdiction: {type: object, additionalProperties: {type: string}}}}
+    body: {language: static, source: &timCal {fallback: "urn:ucos:ucos.std:calendar:mon-fri-utc", byJurisdiction: {}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *timCal}]
+
+  - <<: *cfg
+    name: versions.notification-schedule
+    outputSchema: {type: object, required: [daysBeforeSunset, onDeprecation], properties: {daysBeforeSunset: {type: array, items: {type: integer, minimum: 1}}, onDeprecation: {type: boolean}}}
+    body: {language: static, source: &verNotify {daysBeforeSunset: [90, 30, 7], onDeprecation: true}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *verNotify}]
+
+  - <<: *cfg
+    name: lineage.retention
+    outputSchema: {type: object, required: [default, regulated], properties: {default: {type: string, pattern: "^P"}, regulated: {type: string, pattern: "^P"}}}
+    body: {language: static, source: &linRetention {default: P2Y, regulated: P7Y}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *linRetention}]
+
+  - <<: *cfg
+    name: runtime.placement
+    outputSchema: {type: object, required: [maxTenantsPerSharedCell, maxRegionShareRatio, dedicatedThresholds], properties: {maxTenantsPerSharedCell: {type: integer, minimum: 1}, maxRegionShareRatio: {type: number, maximum: 1}, dedicatedThresholds: {type: object}}}
+    body: {language: static, source: &rtmPlacement {maxTenantsPerSharedCell: 2000, maxRegionShareRatio: 0.2, dedicatedThresholds: {writesPerSecond: 2000, storageTb: 2}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *rtmPlacement}]
+
+  - <<: *cfg
+    name: compatibility.feature-negotiation
+    outputSchema: {type: object, required: [unknownFeature], properties: {unknownFeature: {enum: [ignore, reject]}, byPlan: {type: object, additionalProperties: {type: array, items: {type: string}}}}}
+    body: {language: static, source: &futNeg {unknownFeature: ignore, byPlan: {standard: [agent-tools], enterprise: [agent-tools, mcp, twin-simulation, e-invoicing]}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *futNeg}]

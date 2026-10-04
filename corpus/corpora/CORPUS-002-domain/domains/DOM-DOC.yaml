@@ -1,0 +1,185 @@
+header:
+  id: DOM-DOC
+  title: Documents Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-002, CIC-014-001, CIC-003-001, CIC-002-001]
+  traces: [PRIN-014, PRIN-004, PRIN-001]
+  certification: [CR-DOC-01, CR-DOC-02, CR-DOC-03]
+  validation: [VR-DOC-01, VR-DOC-02]
+
+purpose: >
+  Produce and keep the business documents of commerce — quotes, contracts, invoices and credit notes,
+  remittance advice, order confirmations, delivery notes, certificates, terms and conditions, product
+  passports — from governed templates and clause libraries, rendered deterministically per locale and
+  jurisdiction, stored immutably when legally required, and delivered through channels.
+
+scope:
+  includes:
+    - Templates (versioned, localized, jurisdiction-scoped) with data contracts (JSON Schema) and layouts
+    - Clause libraries (approved text blocks with variables; used by contracts and T&Cs)
+    - Rendering (PDF/A-3, HTML, e-invoice attachments) from document data snapshots
+    - Document records (immutable rendered artifacts with digests, linked to subjects)
+    - Delivery (email/portal/API/print) with tracking; e-signature hand-off via DOM-CTR plugins
+  excludes:
+    - Structured e-invoice payload generation (DOM-BIL formats via plugins; DOC attaches renderings)
+    - Media assets (DOM-MED), evidence ledger (DOM-EVD)
+
+responsibilities:
+  - Same template version + same data snapshot -> byte-identical rendering (deterministic).
+  - Legal documents immutable and retained per policy.
+  - No user-facing literal text outside templates and message catalogs (PRIN-014).
+
+principles: [PRIN-001, PRIN-004, PRIN-014]
+
+boundaries:
+  upstream: [DOM-LOC, DOM-MED, DOM-GOV, DOM-TIM]
+  downstream: [DOM-BIL, DOM-CTR, DOM-QTE, DOM-ORD, DOM-STL, DOM-PRV, DOM-EVD]
+
+ownership:
+  boundedContext: content
+  owningRole: Chief Platform Architect
+  service: document-service
+  schema: ucos_content
+
+capabilities:
+  - {id: DOC-C1, name: Templates, description: "Author, version, approve templates with data contracts."}
+  - {id: DOC-C2, name: Clauses, description: "Maintain approved clause libraries."}
+  - {id: DOC-C3, name: Render, description: "Deterministic rendering from data snapshots."}
+  - {id: DOC-C4, name: Store, description: "Immutable document records with digests and retention."}
+  - {id: DOC-C5, name: Deliver, description: "Deliver and track documents per channel."}
+
+services:
+  - {name: DocumentCommandService, kind: application, operations: [DraftTemplate, PublishTemplate, DefineClause, RenderDocument, DeliverDocument, VoidDocument]}
+  - {name: Renderer, kind: domain-service, contract: "render(templateRef@version, dataSnapshot, locale, jurisdiction) -> bytes + digest; sandboxed template engine (logic-less, e.g. Handlebars-compatible subset) + CLDR formatting; fonts and assets pinned by digest; no network access"}
+  - {name: DocumentQueryService, kind: application, operations: [GetTemplate, GetDocument, FindDocuments, GetDeliveryStatus]}
+
+aggregates:
+  - name: Template
+    identity: "urn:ucos:<namespace|tenant>:template:<code>@<semver>"
+    invariants:
+      - "INV-DOC-1: data contract (JSON Schema) present; every variable referenced in layout exists in the contract."
+      - "INV-DOC-2: legal templates (kind invoice, credit-note, contract, terms) require approval with Legal/Finance role."
+    fields:
+      - {name: code, type: string}
+      - {name: kind, type: "quote|contract|invoice|credit-note|debit-note|remittance|order-confirmation|delivery-note|terms|passport|certificate|custom"}
+      - {name: scope, type: "ApplicabilityScope (jurisdiction, locale, channel, brand)"}
+      - {name: dataContract, type: JsonSchema}
+      - {name: layout, type: "template source + assets (digests)"}
+      - {name: outputFormats, type: "pdf-a3|html|txt"}
+      - {name: state, type: DefinitionState}
+  - name: Clause
+    identity: "urn:ucos:<namespace|tenant>:clause:<code>@<semver>"
+    fields:
+      - {name: text, type: "LocalizedText with variables"}
+      - {name: jurisdictions, type: "string[]"}
+      - {name: approvedBy, type: PartyUrn}
+  - name: DocumentRecord
+    identity: "urn:ucos:<tenant>:document:<ulid>"
+    invariants: ["INV-DOC-3: immutable once issued; digest of bytes stored; legal documents captured as Evidence."]
+    fields:
+      - {name: subject, type: "Urn (invoice, contract, order…)"}
+      - {name: templateRef, type: "code@version"}
+      - {name: dataSnapshotDigest, type: Sha256}
+      - {name: locale, type: BCP47}
+      - {name: contentRef, type: "object storage ref"}
+      - {name: digest, type: Sha256}
+      - {name: evidenceRef, type: "InstanceUrn?"}
+      - {name: status, type: "issued|voided"}
+
+entities:
+  - {name: Delivery, within: DocumentRecord, fields: [deliveryId, channel, recipientRef, status, attempts, deliveredAt]}
+
+valueObjects:
+  - {name: DataSnapshot, definition: "Canonical JSON validated against template data contract; digest recorded"}
+
+commands:
+  - {name: DraftTemplate, input: "Template draft", emits: [TemplateDrafted]}
+  - {name: PublishTemplate, input: "{urn, approvalRef}", emits: [TemplatePublished], preconditions: ["INV-DOC-1/2", "test renderings for all scoped locales pass"]}
+  - {name: DefineClause, input: "Clause + changeSetRef", emits: [ClauseDefined]}
+  - {name: RenderDocument, input: "{subject, templateSelector (kind + context) | templateRef, dataSnapshot, locale}", emits: [DocumentRendered], note: "Template resolved via CIC-011-001 (fact kind document-template)"}
+  - {name: DeliverDocument, input: "{documentId, channel, recipients}", emits: [DocumentDelivered, DocumentDeliveryFailed]}
+  - {name: VoidDocument, input: "{documentId, reason}", emits: [DocumentVoided], note: "Only for non-legal documents; legal corrections via new documents (credit notes)"}
+
+queries:
+  - {name: GetTemplate, input: "{urn}", output: Template}
+  - {name: GetDocument, input: "{id}", output: "DocumentRecord + signed download URL"}
+  - {name: FindDocuments, input: "{subject?, kind?, from?, to?, cursor}", output: "page"}
+  - {name: GetDeliveryStatus, input: "{documentId}", output: "Delivery[]"}
+
+apis:
+  - {style: REST, path: "/v1/documents/templates", methods: {POST: DraftTemplate}}
+  - {style: REST, path: "/v1/documents/templates/{urn}", methods: {GET: GetTemplate}}
+  - {style: REST, path: "/v1/documents/templates/{urn}:publish", methods: {POST: PublishTemplate}}
+  - {style: REST, path: "/v1/documents/clauses", methods: {POST: DefineClause}}
+  - {style: REST, path: "/v1/documents", methods: {POST: RenderDocument, GET: FindDocuments}}
+  - {style: REST, path: "/v1/documents/{id}", methods: {GET: GetDocument}}
+  - {style: REST, path: "/v1/documents/{id}/deliveries", methods: {POST: DeliverDocument, GET: GetDeliveryStatus}}
+  - {style: REST, path: "/v1/documents/{id}:void", methods: {POST: VoidDocument}}
+
+events:
+  - {type: ucos.content.template.drafted.v1, payload: "{urn, kind}"}
+  - {type: ucos.content.template.published.v1, payload: "{urn, kind, scope}"}
+  - {type: ucos.content.clause.defined.v1, payload: "{urn}"}
+  - {type: ucos.content.document.rendered.v1, payload: "{id, subject, templateRef, digest}", consumers: [billing, contract, quote, evidence]}
+  - {type: ucos.content.document.delivered.v1, payload: "{id, channel, deliveredAt}"}
+  - {type: ucos.content.document.delivery-failed.v1, payload: "{id, channel, reason}"}
+  - {type: ucos.content.document.voided.v1, payload: "{id, reason}"}
+
+stateMachines:
+  - name: DocumentRecordLifecycle
+    initial: issued
+    states: [issued, voided]
+    terminal: [voided]
+    transitions:
+      - {from: issued, to: voided, command: VoidDocument, guard: "kind not legal"}
+
+rules:
+  - {id: RUL-DOC-1, statement: "Legal documents render once at issue; re-rendering for display uses the stored bytes, never the current template."}
+  - {id: RUL-DOC-2, statement: "Template engines have no I/O, no clock, no randomness; dates/numbers come formatted from the data snapshot or CLDR with explicit zone and locale."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:document-template.resolution", purpose: "ResolutionConfig for template selection"}
+  - {urn: "urn:ucos:ucos.std:policy:documents.retention", purpose: "Retention per document kind and jurisdiction"}
+
+decisions:
+  - {id: DEC-DOC-1, question: "Which template renders document kind K in context C?", algorithm: "CIC-011-001 (fact kind document-template)"}
+
+security:
+  permissions: [documents.read, documents.template.manage, documents.render, documents.deliver, documents.void]
+  dataClassification: "Per document (invoices/contracts confidential, personal)."
+  threats: ["Template injection -> logic-less sandbox, no I/O", "Unauthorized download -> short-lived signed URLs + PDP per subject"]
+
+governance:
+  changeControl: "Templates and clauses via ChangeSet; legal kinds need Legal/Finance approval."
+  evidence: "Legal documents' digests recorded as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per record."
+  slo: {RenderDocument_p95_ms: 800, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_content + WORM-capable object storage for legal documents
+  tables:
+    - {name: templates, columns: "tenant_id, urn, kind, scope jsonb, body jsonb, state", pk: "(tenant_id, urn)"}
+    - {name: clauses, columns: "tenant_id, urn, body jsonb", pk: "(tenant_id, urn)"}
+    - {name: documents, columns: "tenant_id, id, subject, template_ref, digest, content_ref, status, issued_at", pk: "(tenant_id, id)", indexes: ["(tenant_id, subject)"]}
+    - {name: deliveries, columns: "tenant_id, document_id, delivery_id, channel, status, attempts, delivered_at", pk: "(tenant_id, document_id, delivery_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "documents range(issued_at) yearly x hash(tenant_id) 16."
+  retention: "documents.retention (legal kinds >= financial retention)."
+
+extensionModel:
+  extensionPoints: ["Renderers (PDF engines) via certified adapters", "Delivery channels (email/SMS/portal/print) plugins", "Template packs per jurisdiction"]
+  forbidden: ["Hardcoded document text"]
+
+certificationCriteria:
+  - {id: CR-DOC-01, rule: "Rendering determinism: 1,000 re-renders of the same snapshot produce identical digests.", level: L1}
+  - {id: CR-DOC-02, rule: "PDF/A-3 validation (veraPDF) passes for legal document kinds.", level: L1}
+  - {id: CR-DOC-03, rule: "Legal documents cannot be voided or modified (negative tests).", level: L1}
+validationRules:
+  - {id: VR-DOC-01, rule: "Every legal document kind has a published template for each active jurisdiction."}
+  - {id: VR-DOC-02, rule: "Every template variable exists in its data contract."}

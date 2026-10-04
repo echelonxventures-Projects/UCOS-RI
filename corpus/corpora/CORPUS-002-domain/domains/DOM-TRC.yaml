@@ -1,0 +1,151 @@
+header:
+  id: DOM-TRC
+  title: Traceability Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-000-003, CIC-000-004, CIC-001-001, CIC-023-001, CIC-002-001]
+  traces: [PRIN-011, PRIN-012, CIC-000-003]
+  certification: [CR-TRC-01, CR-TRC-02, CR-TRC-03]
+  validation: [VR-TRC-01, VR-TRC-02]
+
+purpose: >
+  Maintain the end-to-end trace graph of CIC-000-003 §2 at runtime: principles -> corpus artifacts ->
+  domains -> rules (CR/VR) -> implementing modules, packs, plugins -> verifying tests -> certification
+  records -> deployments — so any requirement can be followed to running code and evidence, and any
+  running artifact back to the requirements it satisfies.
+
+scope:
+  includes:
+    - Ingestion of corpus releases (artifact headers, rules), module manifests (ucos-module.yaml), plugin/pack manifests, test reports (@Verifies), certification records, deployment records
+    - Trace graph queries (forward, backward, coverage gaps)
+    - Coverage metrics (rules without tests, modules without traces, domains without implementation)
+  excludes:
+    - Data lineage (DOM-LIN), physical provenance (DOM-PRV), certification decisions (DOM-CRT)
+
+responsibilities:
+  - Complete, current trace graph per environment.
+  - Gap reports gating releases (CR-023-001-01).
+
+principles: [PRIN-011, PRIN-012]
+
+boundaries:
+  upstream: [DOM-CRT, DOM-EXT, DOM-META, DOM-RTM]
+  downstream: [DOM-CRT, DOM-GOV, DOM-CMPL]
+
+ownership:
+  boundedContext: governance
+  owningRole: Chief Governance Architect
+  service: traceability-service
+  schema: ucos_governance
+
+capabilities:
+  - {id: TRC-C1, name: Ingest, description: "Load corpus releases, manifests, test reports, certifications, deployments."}
+  - {id: TRC-C2, name: Query, description: "Forward/backward traversal across the trace graph."}
+  - {id: TRC-C3, name: Gaps, description: "Coverage gaps and release gating reports."}
+
+services:
+  - {name: TraceIngestionService, kind: application, operations: [IngestCorpusRelease, IngestModuleManifest, IngestTestReport, IngestDeploymentRecord]}
+  - {name: TraceQueryService, kind: application, operations: [TraceForward, TraceBackward, GetCoverageReport]}
+
+aggregates:
+  - name: TraceNode
+    identity: "urn:ucos:platform:trace:<kind>:<id>@<version>"
+    fields:
+      - {name: kind, type: "principle|artifact|domain|rule|module|pack|plugin|test|certification|deployment"}
+      - {name: id, type: string}
+      - {name: version, type: string}
+      - {name: attributes, type: json}
+  - name: TraceLink
+    identity: "(from, relation, to)"
+    invariants: ["INV-TRC-1: relations from a fixed vocabulary: realizes, specifies, defines, implements, verifies, certifies, deploys, depends-on."]
+    fields:
+      - {name: from, type: TraceNodeRef}
+      - {name: relation, type: string}
+      - {name: to, type: TraceNodeRef}
+      - {name: source, type: "corpus|manifest|test-report|cert|deploy"}
+
+entities: []
+
+valueObjects:
+  - {name: CoverageReport, definition: "{environment, rulesWithoutTests[], modulesWithoutTraces[], domainsWithoutModules[], testsFailing[], certifiedPct}"}
+
+commands:
+  - {name: IngestCorpusRelease, input: "{tag, digest}", emits: [CorpusReleaseIngested]}
+  - {name: IngestModuleManifest, input: "{module, version, digest, manifest}", emits: [ModuleManifestIngested]}
+  - {name: IngestTestReport, input: "{subjectDigest, results[{test, verifies[], outcome}]}", emits: [TestReportIngested]}
+  - {name: IngestDeploymentRecord, input: "{environment, cell, subjectDigests[], at}", emits: [DeploymentRecordIngested]}
+
+queries:
+  - {name: TraceForward, input: "{node, depth<=8}", output: "subgraph"}
+  - {name: TraceBackward, input: "{node, depth<=8}", output: "subgraph"}
+  - {name: GetCoverageReport, input: "{environment, corpusTag}", output: CoverageReport}
+
+apis:
+  - {style: REST, path: "/v1/traceability/corpus-releases", methods: {POST: IngestCorpusRelease}}
+  - {style: REST, path: "/v1/traceability/module-manifests", methods: {POST: IngestModuleManifest}}
+  - {style: REST, path: "/v1/traceability/test-reports", methods: {POST: IngestTestReport}}
+  - {style: REST, path: "/v1/traceability/deployments", methods: {POST: IngestDeploymentRecord}}
+  - {style: REST, path: "/v1/traceability:forward", methods: {GET: TraceForward}}
+  - {style: REST, path: "/v1/traceability:backward", methods: {GET: TraceBackward}}
+  - {style: REST, path: "/v1/traceability/coverage", methods: {GET: GetCoverageReport}}
+
+events:
+  - {type: ucos.governance.trace.corpus-release-ingested.v1, payload: "{tag, artifacts, rules}"}
+  - {type: ucos.governance.trace.module-manifest-ingested.v1, payload: "{module, version, traces}"}
+  - {type: ucos.governance.trace.test-report-ingested.v1, payload: "{subjectDigest, passed, failed}", consumers: [certification]}
+  - {type: ucos.governance.trace.deployment-ingested.v1, payload: "{environment, cell, subjects}"}
+
+stateMachines:
+  - name: TraceNodeState
+    initial: current
+    states: [current, superseded]
+    terminal: []
+    transitions:
+      - {from: current, to: superseded, trigger: "newer version of same node ingested"}
+
+rules:
+  - {id: RUL-TRC-1, statement: "Downward links are derived only (reverse of traces/implements/verifies); hand-maintained downward links are rejected (CIC-000-003 §2)."}
+  - {id: RUL-TRC-2, statement: "A release is blocked when the coverage report shows CR rules of claimed domains without verifying tests (CR-023-001-01)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:traceability.release-gates", purpose: "Coverage thresholds that block promotion per environment"}
+
+decisions:
+  - {id: DEC-TRC-1, question: "Is everything claimed by release R verified?", algorithm: "GetCoverageReport -> thresholds in traceability.release-gates"}
+
+security:
+  permissions: [traceability.read, traceability.ingest]
+  dataClassification: "Internal."
+  threats: ["Fake test reports -> ingestion only from CI identities with signed provenance"]
+
+governance:
+  changeControl: "Release gate thresholds via ChangeSet."
+  evidence: "Coverage reports attached to certification requests."
+
+runtimeBehavior:
+  consistency: "Eventual; graph current within minutes of ingestion."
+  slo: {GetCoverageReport_p95_s: 10, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_governance (separate tables) + graph projection
+  tables:
+    - {name: trace_nodes, columns: "kind, id, version, attributes jsonb, state", pk: "(kind, id, version)", global: true}
+    - {name: trace_links, columns: "from_ref, relation, to_ref, source", pk: "(from_ref, relation, to_ref)", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None."
+  retention: "Indefinite."
+
+extensionModel:
+  extensionPoints: ["Additional node kinds (models, workflows)", "Importers for external requirement tools"]
+  forbidden: ["Manual downward links"]
+
+certificationCriteria:
+  - {id: CR-TRC-01, rule: "Coverage report equals recomputation from raw inputs for the reference release.", level: L1}
+  - {id: CR-TRC-02, rule: "Unsigned test reports are rejected.", level: L1}
+  - {id: CR-TRC-03, rule: "Backward trace from any deployed digest reaches >= 1 principle.", level: L1}
+validationRules:
+  - {id: VR-TRC-01, rule: "Every relation used is in the fixed vocabulary."}
+  - {id: VR-TRC-02, rule: "Every corpus release ingested validates with tools/validate.py."}

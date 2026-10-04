@@ -1,0 +1,163 @@
+header:
+  id: DOM-CUS
+  title: Customization Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-028-001, CIC-029-001, CIC-015-001, CIC-002-001]
+  traces: [PRIN-013, PRIN-016, PRIN-011, CIC-028-001]
+  certification: [CR-CUS-01, CR-CUS-02, CR-CUS-03]
+  validation: [VR-CUS-01, VR-CUS-02]
+
+purpose: >
+  Keep tenant customization safe and upgradable: an inventory of everything a tenant has changed
+  relative to platform and pack baselines (metadata overrides, tenant policies, rules, types, views,
+  workflows, private plugins), enforcement of the customization ladder (CIC-028-001 §5), and
+  upgrade-impact analysis before platform/pack releases reach the tenant.
+
+scope:
+  includes:
+    - Customization inventory (derived from tenant-namespace definitions and tenant-layer policies)
+    - Baseline diffing against platform/pack versions
+    - Upgrade impact analysis (what a new pack/platform version breaks or shadows for this tenant)
+    - Customization health (unused, shadowed, conflicting, deprecated-dependency customizations)
+    - Sandboxes for trying customizations (non-production tenants cloned from metadata)
+  excludes:
+    - Definitions themselves (owning domains), plugin hosting (DOM-EXT), pack installation (DOM-META)
+
+responsibilities:
+  - Every customization is visible, attributable, and governed.
+  - Upgrades never silently break tenant customizations.
+  - No customization path requires forking platform code.
+
+principles: [PRIN-011, PRIN-013, PRIN-016]
+
+boundaries:
+  upstream: [DOM-META, DOM-ONT, DOM-POL, DOM-RUL, DOM-WFL, DOM-EXT, DOM-VER, DOM-KGR]
+  downstream: [DOM-GOV, DOM-EVO, DOM-META]
+
+ownership:
+  boundedContext: extension
+  owningRole: Chief Platform Architect
+  service: customization-service
+  schema: ucos_extension
+
+capabilities:
+  - {id: CUS-C1, name: Inventory, description: "Derive tenant customization inventory."}
+  - {id: CUS-C2, name: Diff, description: "Diff customizations against baselines."}
+  - {id: CUS-C3, name: Upgrade impact, description: "Analyze upgrades per tenant before rollout."}
+  - {id: CUS-C4, name: Health, description: "Detect unused, shadowed, conflicting customizations."}
+  - {id: CUS-C5, name: Sandboxes, description: "Provision metadata-cloned sandbox tenants."}
+
+services:
+  - {name: CustomizationCommandService, kind: application, operations: [RefreshInventory, RunUpgradeImpact, ProvisionSandbox, PromoteFromSandbox]}
+  - {name: UpgradeImpactAnalyzer, kind: domain-service, contract: "analyze(tenant, targetVersions) -> per customization: compatible|shadowed|breaks(reason)|needs-migration; uses CompatibilityClassifier (DOM-ONT), policy layering (CIC-009-001 §3), KG dependencies, and pack diffs"}
+  - {name: CustomizationQueryService, kind: application, operations: [GetInventory, GetCustomizationHealth, GetUpgradeImpact]}
+
+aggregates:
+  - name: CustomizationInventory
+    identity: "urn:ucos:<tenant>:customization-inventory"
+    fields:
+      - {name: items, type: "[{kind, ref, baselineRef?, ladderLevel: metadata|plugin-config|private-plugin|context-plugin, owner, lastUsedAt}]"}
+      - {name: refreshedAt, type: Instant}
+  - name: UpgradeImpactReport
+    identity: "urn:ucos:<tenant>:upgrade-impact:<ulid>"
+    invariants: ["INV-CUS-1: a tenant cannot be upgraded to a MAJOR pack/platform version while the report has unresolved 'breaks' items unless a governance waiver exists."]
+    fields:
+      - {name: targetVersions, type: "{platform?, packs[]}"}
+      - {name: findings, type: "[{customizationRef, status, reason, remediation}]"}
+      - {name: status, type: "open|resolved|waived"}
+  - name: Sandbox
+    identity: "urn:ucos:<tenant>:sandbox:<code>"
+    fields:
+      - {name: sandboxTenant, type: "tenant code (non-production)"}
+      - {name: clonedFrom, type: "tenant + metadata snapshot"}
+      - {name: dataPolicy, type: "metadata-only|synthetic|masked"}
+      - {name: expiresAt, type: Instant}
+
+entities: []
+
+valueObjects:
+  - {name: CustomizationHealth, definition: "{unused[], shadowed[], conflicting[], dependsOnDeprecated[]}"}
+
+commands:
+  - {name: RefreshInventory, input: "{tenant}", emits: [CustomizationInventoryRefreshed]}
+  - {name: RunUpgradeImpact, input: "{tenant, targetVersions}", emits: [UpgradeImpactAnalyzed], async: true}
+  - {name: ProvisionSandbox, input: "{tenant, code, dataPolicy, expiresAt}", emits: [SandboxProvisioned], preconditions: ["dataPolicy never copies production personal data (CR-023-001-04)"]}
+  - {name: PromoteFromSandbox, input: "{sandboxCode, items[]}", emits: [SandboxPromotionProposed], note: "Creates a ChangeSet in the production tenant"}
+
+queries:
+  - {name: GetInventory, input: "{tenant}", output: CustomizationInventory}
+  - {name: GetCustomizationHealth, input: "{tenant}", output: CustomizationHealth}
+  - {name: GetUpgradeImpact, input: "{reportId}", output: UpgradeImpactReport}
+
+apis:
+  - {style: REST, path: "/v1/customization/inventory", methods: {GET: GetInventory}}
+  - {style: REST, path: "/v1/customization/inventory:refresh", methods: {POST: RefreshInventory}}
+  - {style: REST, path: "/v1/customization/health", methods: {GET: GetCustomizationHealth}}
+  - {style: REST, path: "/v1/customization/upgrade-impact", methods: {POST: RunUpgradeImpact}}
+  - {style: REST, path: "/v1/customization/upgrade-impact/{reportId}", methods: {GET: GetUpgradeImpact}}
+  - {style: REST, path: "/v1/customization/sandboxes", methods: {POST: ProvisionSandbox}}
+  - {style: REST, path: "/v1/customization/sandboxes/{code}:promote", methods: {POST: PromoteFromSandbox}}
+
+events:
+  - {type: ucos.extension.customization-inventory.refreshed.v1, payload: "{tenant, items}"}
+  - {type: ucos.extension.upgrade-impact.analyzed.v1, payload: "{reportId, tenant, breaks, shadowed}", consumers: [deployment waves, tenant admins]}
+  - {type: ucos.extension.sandbox.provisioned.v1, payload: "{tenant, sandboxTenant, dataPolicy}"}
+  - {type: ucos.extension.sandbox.promotion-proposed.v1, payload: "{sandboxCode, changeSetRef}"}
+
+stateMachines:
+  - name: UpgradeImpactLifecycle
+    initial: open
+    states: [open, resolved, waived]
+    terminal: [resolved, waived]
+    transitions:
+      - {from: open, to: resolved, trigger: "all breaks remediated (re-analysis clean)"}
+      - {from: open, to: waived, trigger: "governance waiver ChangeSet applied"}
+
+rules:
+  - {id: RUL-CUS-1, statement: "Customizations are only possible at ladder levels of CIC-028-001 §5; inventory flags any tenant artifact outside them as a defect."}
+  - {id: RUL-CUS-2, statement: "Deployment waves include a tenant only after its upgrade impact report has no unresolved breaks (INV-CUS-1)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:customization.sandbox", purpose: "Sandbox limits, data policies, expiry"}
+
+decisions:
+  - {id: DEC-CUS-1, question: "Is tenant T safe to upgrade to version V?", algorithm: "UpgradeImpactAnalyzer findings without unresolved breaks"}
+
+security:
+  permissions: [customization.read, customization.analyze, customization.sandbox.manage]
+  dataClassification: "Metadata; sandboxes contain no production personal data."
+  threats: ["Sandbox data leakage -> metadata-only or synthetic by default; masked requires approval"]
+
+governance:
+  changeControl: "Promotions from sandbox create ChangeSets."
+  evidence: "Upgrade impact reports attached to wave approvals."
+
+runtimeBehavior:
+  consistency: "Inventory refreshed on definition events (eventual, minutes)."
+  slo: {RunUpgradeImpact_p95_min: 10, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_extension (separate tables)
+  tables:
+    - {name: customization_inventory, columns: "tenant_id, item_ref, body jsonb", pk: "(tenant_id, item_ref)"}
+    - {name: upgrade_impact_reports, columns: "tenant_id, id, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: sandboxes, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Reports 2 years."
+
+extensionModel:
+  extensionPoints: ["Impact analyzers per artifact kind"]
+  forbidden: ["Code forks as customization"]
+
+certificationCriteria:
+  - {id: CR-CUS-01, rule: "Seeded breaking pack changes are detected for affected tenant customizations (golden scenarios).", level: L1}
+  - {id: CR-CUS-02, rule: "Sandboxes never contain production personal data (DLP).", level: L1}
+  - {id: CR-CUS-03, rule: "Deployment wave planner excludes tenants with unresolved breaks.", level: L1}
+validationRules:
+  - {id: VR-CUS-01, rule: "Every customization kind maps to a ladder level."}
+  - {id: VR-CUS-02, rule: "Every sandbox has expiry and data policy."}

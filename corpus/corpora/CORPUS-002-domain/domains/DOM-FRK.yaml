@@ -1,0 +1,164 @@
+header:
+  id: DOM-FRK
+  title: Financial Risk Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-016-001, CIC-010-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-011, CIC-016-001]
+  certification: [CR-FRK-01, CR-FRK-02, CR-FRK-03]
+  validation: [VR-FRK-01, VR-FRK-02]
+
+purpose: >
+  Control financial exposure arising from commerce: customer credit limits and exposure (open orders
+  + receivables + unbilled), partner/seller settlement exposure, FX exposure from multi-currency
+  pricing and settlement, and revenue-at-risk — producing credit and exposure RiskAssessments used by
+  order validation, payment terms, settlement holds, and treasury reporting.
+
+scope:
+  includes:
+    - Credit profiles per party (limit, terms eligibility, rating source, review dates)
+    - Exposure aggregation (orders accepted not billed, AR open, unbilled usage, disputes)
+    - Credit checks (order/quote checkpoints) and credit holds/releases
+    - Counterparty exposure for sellers/partners (negative balances, reserves adequacy)
+    - FX exposure reporting by currency and horizon; revenue-at-risk (churn, dunning)
+  excludes:
+    - Fraud (DOM-FRD), collections execution (DOM-BIL dunning), treasury hedging execution (external)
+
+responsibilities:
+  - Exposure accurate and current for credit decisions.
+  - Credit decisions explainable and recorded.
+  - Limits governed by authority (DOM-AUTH limits) and policy.
+
+principles: [PRIN-005, PRIN-011]
+
+boundaries:
+  upstream: [DOM-ORD, DOM-BIL, DOM-STL, DOM-PAY, DOM-PTY, DOM-ACC, DOM-INT, DOM-FCS]
+  downstream: [DOM-ORD, DOM-QTE, DOM-STL, DOM-BIL, DOM-DEC, DOM-ORK]
+
+ownership:
+  boundedContext: risk
+  owningRole: Chief Governance Architect
+  service: financial-risk-service
+  schema: ucos_risk
+
+capabilities:
+  - {id: FRK-C1, name: Credit profiles, description: "Maintain credit limits and ratings."}
+  - {id: FRK-C2, name: Exposure, description: "Aggregate exposure in real time."}
+  - {id: FRK-C3, name: Credit check, description: "Assess orders/quotes against available credit."}
+  - {id: FRK-C4, name: Holds, description: "Place and release credit holds."}
+  - {id: FRK-C5, name: Reporting, description: "Counterparty, FX, and revenue-at-risk reports."}
+
+services:
+  - {name: FinancialRiskCommandService, kind: application, operations: [SetCreditLimit, RequestCreditReview, PlaceCreditHold, ReleaseCreditHold, ImportCreditRating]}
+  - {name: ExposureAggregator, kind: domain-service, contract: "exposure(party) = Σ accepted-unbilled orders + open AR + unbilled usage estimates - unapplied cash, in credit currency at daily-close FX; maintained incrementally from events"}
+  - {name: FinancialRiskQueryService, kind: application, operations: [CheckCredit, GetExposure, GetCounterpartyExposure, GetFxExposure, GetRevenueAtRisk]}
+
+aggregates:
+  - name: CreditProfile
+    identity: "urn:ucos:<tenant>:credit-profile:<party>"
+    invariants: ["INV-FRK-1: limit changes above the setter's authority limit (DOM-AUTH approve-credit) require approval."]
+    fields:
+      - {name: party, type: PartyUrn}
+      - {name: limit, type: Money}
+      - {name: currency, type: CurrencyCode}
+      - {name: rating, type: "{source, score, at}"}
+      - {name: paymentTermsEligible, type: "PaymentTerms[]"}
+      - {name: reviewDue, type: Date}
+      - {name: hold, type: "{active, reason, since}?"}
+
+entities: []
+
+valueObjects:
+  - {name: Exposure, definition: "{party, unbilledOrders, openAr, unbilledUsage, unappliedCash, total, limit, available, currency, asOf}"}
+  - {name: CreditDecision, definition: "RiskAssessment (riskType credit) + {available, requested, action}"}
+
+commands:
+  - {name: SetCreditLimit, input: "{party, limit, currency, reason, approvalRef?}", emits: [CreditLimitSet]}
+  - {name: RequestCreditReview, input: "{party, requestedLimit, justification}", emits: [CreditReviewRequested]}
+  - {name: PlaceCreditHold, input: "{party, reason}", emits: [CreditHoldPlaced]}
+  - {name: ReleaseCreditHold, input: "{party, reason}", emits: [CreditHoldReleased]}
+  - {name: ImportCreditRating, input: "{party, source, score}", emits: [CreditRatingImported]}
+
+queries:
+  - {name: CheckCredit, input: "{party, amount, context}", output: CreditDecision}
+  - {name: GetExposure, input: "{party}", output: Exposure}
+  - {name: GetCounterpartyExposure, input: "{counterparty}", output: "{negativeBalance, reserves, pendingPayouts, exposure}"}
+  - {name: GetFxExposure, input: "{legalEntity, horizon}", output: "by currency: receivables, payables, settlements"}
+  - {name: GetRevenueAtRisk, input: "{period}", output: "{churnRisk, dunningRisk, total}"}
+
+apis:
+  - {style: REST, path: "/v1/financial-risk/credit-profiles/{party}", methods: {PUT: SetCreditLimit}}
+  - {style: REST, path: "/v1/financial-risk/credit-profiles/{party}/reviews", methods: {POST: RequestCreditReview}}
+  - {style: REST, path: "/v1/financial-risk/credit-profiles/{party}/hold", methods: {POST: PlaceCreditHold, DELETE: ReleaseCreditHold}}
+  - {style: REST, path: "/v1/financial-risk/credit-profiles/{party}/ratings", methods: {POST: ImportCreditRating}}
+  - {style: REST, path: "/v1/financial-risk:check-credit", methods: {POST: CheckCredit}}
+  - {style: REST, path: "/v1/financial-risk/exposure/{party}", methods: {GET: GetExposure}}
+  - {style: REST, path: "/v1/financial-risk/counterparty-exposure/{counterparty}", methods: {GET: GetCounterpartyExposure}}
+  - {style: REST, path: "/v1/financial-risk/fx-exposure", methods: {GET: GetFxExposure}}
+  - {style: REST, path: "/v1/financial-risk/revenue-at-risk", methods: {GET: GetRevenueAtRisk}}
+
+events:
+  - {type: ucos.risk.credit-limit.set.v1, payload: "{party, limit, currency}"}
+  - {type: ucos.risk.credit-review.requested.v1, payload: "{party, requestedLimit}"}
+  - {type: ucos.risk.credit-hold.placed.v1, payload: "{party, reason}", consumers: [order validation, quote approval]}
+  - {type: ucos.risk.credit-hold.released.v1, payload: "{party}"}
+  - {type: ucos.risk.credit-rating.imported.v1, payload: "{party, source, score}"}
+  - {type: ucos.risk.credit.assessed.v1, payload: "{decisionRef, party, action}"}
+
+stateMachines:
+  - name: CreditHoldState
+    initial: none
+    states: [none, held]
+    terminal: []
+    transitions:
+      - {from: none, to: held, command: PlaceCreditHold}
+      - {from: none, to: held, trigger: "exposure > limit and policy auto-hold"}
+      - {from: held, to: none, command: ReleaseCreditHold}
+
+rules:
+  - {id: RUL-FRK-1, statement: "CheckCredit returns review (not block) when requested amount exceeds available by less than policy tolerance; above tolerance -> block unless prepaid payment terms."}
+  - {id: RUL-FRK-2, statement: "Exposure updates are incremental from events with daily full recomputation reconciliation (CR-016-001-04)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:risk.credit.bands", purpose: "Credit score bands"}
+  - {urn: "urn:ucos:ucos.std:policy:financial-risk.credit-tolerance", purpose: "Over-limit tolerance and auto-hold behavior"}
+
+decisions:
+  - {id: DEC-FRK-1, question: "Can party P take on amount A on credit?", algorithm: "available = limit - exposure; RUL-FRK-1; DecisionRecord risk-score (credit)"}
+
+security:
+  permissions: [financial-risk.read, financial-risk.credit.manage, financial-risk.hold.manage, financial-risk.check]
+  dataClassification: "Confidential (credit data may be personal for consumers)."
+  threats: ["Unauthorized limit increases -> authority limits + approvals"]
+
+governance:
+  changeControl: "Credit policies via ChangeSet; limit changes via approval plan."
+  evidence: "Credit reviews and rating imports captured."
+
+runtimeBehavior:
+  consistency: "Exposure eventual (p99 5s); checks use latest exposure + pending in-flight orders."
+  slo: {CheckCredit_p99_ms: 30, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_risk (separate tables)
+  tables:
+    - {name: credit_profiles, columns: "tenant_id, party, limit_minor, currency, body jsonb, hold_active bool", pk: "(tenant_id, party)"}
+    - {name: exposure, columns: "tenant_id, party, unbilled_minor, open_ar_minor, unbilled_usage_minor, unapplied_minor, currency, as_of", pk: "(tenant_id, party)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Credit history 7 years."
+
+extensionModel:
+  extensionPoints: ["Credit bureau plugins", "Exposure components for new commercial models"]
+  forbidden: ["Credit logic in order code"]
+
+certificationCriteria:
+  - {id: CR-FRK-01, rule: "Passes CR-016-001-04 exposure reconciliation.", level: L1}
+  - {id: CR-FRK-02, rule: "Concurrent orders cannot jointly exceed available credit beyond tolerance (race test).", level: L1}
+  - {id: CR-FRK-03, rule: "Limit changes above authority require approval (negative tests).", level: L1}
+validationRules:
+  - {id: VR-FRK-01, rule: "Every B2B party with payment terms has a credit profile."}
+  - {id: VR-FRK-02, rule: "Credit bands policy exists (VR-016-001-01)."}

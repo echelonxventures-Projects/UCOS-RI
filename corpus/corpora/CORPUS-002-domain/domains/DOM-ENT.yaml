@@ -1,0 +1,218 @@
+header:
+  id: DOM-ENT
+  title: Entitlement Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-007-001, CIC-011-001, CIC-009-001, CIC-002-001]
+  traces: [PRIN-002, PRIN-005, PRIN-008, PRIN-013]
+  certification: [CR-ENT-01, CR-ENT-02, CR-ENT-03, CR-ENT-04]
+  validation: [VR-ENT-01]
+
+
+# Licenses (DOM-LIC) are Entitling commercial objects (ucos.std type License) whose grants, licence
+# keys, activations, seats, and metering are entitlement behaviour specified here.
+subsumes:
+  - domain: DOM-LIC
+    coverage: "Entitlement aggregate for License-typed subjects, licence keys/activation tokens (scope), SeatAssignment, MeterAllowance, Transferable facet handling, CheckEntitlement/ConsumeEntitlement"
+
+purpose: >
+  Record and enforce what a party is entitled to — access, usage, seats, quotas, features, service
+  levels, benefits, licences — as a result of orders, contracts, memberships, grants, or policies,
+  and answer high-volume "may X use Y now, and how much remains?" checks.
+
+scope:
+  includes:
+    - Entitlement grants (who, what capability/object, quantity/quota, period, scope, source)
+    - Quota and balance accounting (consumption, reservation, reset, rollover, overage)
+    - Seat assignment within organizational entitlements
+    - Entitlement checks (authorization-like, sub-10ms)
+    - Licence keys and activation tokens (DOM-LIC subtype behavior)
+  excludes:
+    - Rating/charging of consumption (DOM-BIL / DOM-PRC usage rating)
+    - Contract terms (DOM-CTR) — contract is a source of entitlements
+    - Party authorization to administer (DOM-POL/DOM-AUTH)
+
+responsibilities:
+  - Source-of-truth for entitlement state and remaining balances.
+  - Exactly-once consumption accounting under concurrency.
+  - Emit metering facts for billing.
+
+principles: [PRIN-002, PRIN-005, PRIN-008, PRIN-015]
+
+boundaries:
+  upstream: [DOM-ORD, DOM-CTR, DOM-OFR, DOM-COB, DOM-PTY, DOM-POL, DOM-LFC]
+  downstream: [DOM-BIL, DOM-SDL, DOM-OFR, DOM-ANL, DOM-AGT]
+
+ownership:
+  boundedContext: entitlement
+  owningRole: Chief Product Architect
+  service: entitlement-service
+  schema: ucos_entitlement
+
+capabilities:
+  - {id: ENT-C1, name: Grant, description: "Create entitlements from orders, contracts, promotions, manual grants."}
+  - {id: ENT-C2, name: Check, description: "Decide access and return remaining quota."}
+  - {id: ENT-C3, name: Consume, description: "Record consumption idempotently; reservations for long operations."}
+  - {id: ENT-C4, name: Assign seats, description: "Assign/unassign seats of an organizational entitlement to member parties."}
+  - {id: ENT-C5, name: Lifecycle, description: "Activate, suspend (e.g. non-payment), renew, expire, revoke."}
+
+services:
+  - {name: EntitlementCommandService, kind: application, operations: [GrantEntitlement, AmendEntitlement, SuspendEntitlement, ResumeEntitlement, RevokeEntitlement, RenewEntitlement, AssignSeat, UnassignSeat, ConsumeEntitlement, ReserveEntitlement, CommitReservation, ReleaseReservation]}
+  - {name: BalanceLedger, kind: domain-service, contract: "Per (entitlement, meter, period) append-only ledger of grant/consume/reserve/release/reset/rollover entries; balance = sum; idempotency on (entitlement, idempotencyKey)"}
+  - {name: EntitlementChecker, kind: domain-service, contract: "check(party, capability|objectRef, qty, ctx) -> {allowed, entitlementRefs[], remaining, reasons[]}; resolves via party, organization seat assignments, and household/group relations"}
+  - {name: EntitlementQueryService, kind: application, operations: [CheckEntitlement, GetEntitlement, FindEntitlements, GetBalance, GetSeatAssignments]}
+
+aggregates:
+  - name: Entitlement
+    identity: "urn:ucos:<tenant>:entitlement:<ulid>"
+    invariants:
+      - "INV-ENT-1: holder is a Party; seat-based entitlements have holder = organization and assignments to members of that organization (DOM-REL membership edge valid)."
+      - "INV-ENT-2: for hard quotas, balance >= 0 at all times (consumption beyond requires overage policy = allow)."
+      - "INV-ENT-3: assigned seats <= seat quantity."
+      - "INV-ENT-4: source reference is immutable; amendments are recorded as events with source refs."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: holder, type: PartyUrn}
+      - {name: subject, type: "{objectRef | capabilityRef | offerRef@version}"}
+      - {name: quantity, type: "Quantity? (seats/units)"}
+      - {name: meters, type: "MeterAllowance[]"}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: source, type: "{kind: order|contract|subscription|membership|promotion|manual|policy, ref}"}
+      - {name: lifecycleState, type: string}
+      - {name: transferable, type: boolean}
+      - {name: revision, type: long}
+
+entities:
+  - {name: MeterAllowance, within: Entitlement, fields: [meterRef, allowance, "period (P1M, P1D, lifetime)", "resetAlignment (anniversary|calendar)", "rollover {maxCarry, expiresAfter}?", "overage (deny|allow|allow-and-rate)", "hardLimit?"]}
+  - {name: SeatAssignment, within: Entitlement, fields: [assignmentId, assignee (PartyUrn), assignedAt, unassignedAt]}
+  - {name: Reservation, within: "BalanceLedger", fields: [reservationId, meterRef, quantity, expiresAt, status]}
+
+valueObjects:
+  - {name: CheckResult, definition: "{allowed, entitlementRefs[], remaining: map<meter, Quantity>, reasons[], ttlSeconds}"}
+  - {name: ConsumptionRecord, definition: "{entitlementRef, meterRef, quantity, occurredAt, idempotencyKey, sourceRef}"}
+
+commands:
+  - {name: GrantEntitlement, input: "{holder, subject, quantity?, meters[], scope, validFrom, validTo?, source, idempotencyKey}", emits: [EntitlementGranted]}
+  - {name: AmendEntitlement, input: "{id, expectedRevision, changes (quantity, meters, validTo), sourceRef}", emits: [EntitlementAmended]}
+  - {name: SuspendEntitlement, input: "{id, reason (non-payment|fraud|admin|policy)}", emits: [EntitlementSuspended]}
+  - {name: ResumeEntitlement, input: "{id}", emits: [EntitlementResumed]}
+  - {name: RevokeEntitlement, input: "{id, reason, effectiveAt}", emits: [EntitlementRevoked]}
+  - {name: RenewEntitlement, input: "{id, newValidTo, sourceRef}", emits: [EntitlementRenewed]}
+  - {name: AssignSeat, input: "{id, assignee}", emits: [SeatAssigned], preconditions: ["INV-ENT-1,3"]}
+  - {name: UnassignSeat, input: "{id, assignmentId}", emits: [SeatUnassigned]}
+  - {name: ConsumeEntitlement, input: "ConsumptionRecord", emits: [EntitlementConsumed], note: "Idempotent on idempotencyKey; emits metering fact for billing"}
+  - {name: ReserveEntitlement, input: "{id, meterRef, quantity, ttl}", emits: [EntitlementReserved]}
+  - {name: CommitReservation, input: "{reservationId, actualQuantity}", emits: [EntitlementConsumed]}
+  - {name: ReleaseReservation, input: "{reservationId}", emits: [ReservationReleased]}
+
+queries:
+  - {name: CheckEntitlement, input: "{party, capability|objectRef, meterRef?, quantity?, context}", output: CheckResult}
+  - {name: GetEntitlement, input: "{id}", output: Entitlement}
+  - {name: FindEntitlements, input: "{holder?, subject?, state?, source?, cursor, limit}", output: "page"}
+  - {name: GetBalance, input: "{id, meterRef, period?}", output: "{allowance, consumed, reserved, remaining, resetsAt}"}
+  - {name: GetSeatAssignments, input: "{id}", output: "SeatAssignment[]"}
+
+apis:
+  - {style: REST, path: "/v1/entitlement/entitlements", methods: {POST: GrantEntitlement, GET: FindEntitlements}}
+  - {style: REST, path: "/v1/entitlement/entitlements/{id}", methods: {GET: GetEntitlement, PATCH: AmendEntitlement}}
+  - {style: REST, path: "/v1/entitlement/entitlements/{id}:suspend", methods: {POST: SuspendEntitlement}}
+  - {style: REST, path: "/v1/entitlement/entitlements/{id}:resume", methods: {POST: ResumeEntitlement}}
+  - {style: REST, path: "/v1/entitlement/entitlements/{id}:revoke", methods: {POST: RevokeEntitlement}}
+  - {style: REST, path: "/v1/entitlement/entitlements/{id}:renew", methods: {POST: RenewEntitlement}}
+  - {style: REST, path: "/v1/entitlement/entitlements/{id}/seats", methods: {POST: AssignSeat, GET: GetSeatAssignments}}
+  - {style: REST, path: "/v1/entitlement/entitlements/{id}/seats/{assignmentId}", methods: {DELETE: UnassignSeat}}
+  - {style: REST, path: "/v1/entitlement/entitlements/{id}/balance", methods: {GET: GetBalance}}
+  - {style: REST, path: "/v1/entitlement:check", methods: {POST: CheckEntitlement}}
+  - {style: REST, path: "/v1/entitlement:consume", methods: {POST: ConsumeEntitlement}}
+  - {style: REST, path: "/v1/entitlement/reservations", methods: {POST: ReserveEntitlement}}
+  - {style: REST, path: "/v1/entitlement/reservations/{id}:commit", methods: {POST: CommitReservation}}
+  - {style: REST, path: "/v1/entitlement/reservations/{id}:release", methods: {POST: ReleaseReservation}}
+  - {style: gRPC, service: "ucos.entitlement.v1.CheckService", rpcs: [CheckEntitlement, ConsumeEntitlement], note: "Low-latency path for service-delivery systems"}
+
+events:
+  - {type: ucos.entitlement.entitlement.granted.v1, payload: "{id, holder, subject, quantity, meters, validFrom, validTo, source}"}
+  - {type: ucos.entitlement.entitlement.amended.v1, payload: "{id, changes, sourceRef}"}
+  - {type: ucos.entitlement.entitlement.suspended.v1, payload: "{id, reason}"}
+  - {type: ucos.entitlement.entitlement.resumed.v1, payload: "{id}"}
+  - {type: ucos.entitlement.entitlement.revoked.v1, payload: "{id, reason, effectiveAt}"}
+  - {type: ucos.entitlement.entitlement.renewed.v1, payload: "{id, newValidTo}"}
+  - {type: ucos.entitlement.entitlement.expired.v1, payload: "{id}"}
+  - {type: ucos.entitlement.seat.assigned.v1, payload: "{id, assignmentId, assignee}"}
+  - {type: ucos.entitlement.seat.unassigned.v1, payload: "{id, assignmentId}"}
+  - {type: ucos.entitlement.entitlement.consumed.v1, payload: "{id, meterRef, quantity, occurredAt, idempotencyKey, remaining}", consumers: [billing usage rating, analytics]}
+  - {type: ucos.entitlement.reservation.created.v1, payload: "{reservationId, id, meterRef, quantity, expiresAt}"}
+  - {type: ucos.entitlement.reservation.released.v1, payload: "{reservationId}"}
+  - {type: ucos.entitlement.balance.threshold-crossed.v1, payload: "{id, meterRef, threshold (e.g. 80%, 100%), remaining}"}
+
+stateMachines:
+  - name: EntitlementLifecycle
+    definition: "Interpreted ucos.std:lifecycle:entitlement"
+    initial: pending
+    states: [pending, active, suspended, expired, revoked]
+    terminal: [expired, revoked]
+    transitions:
+      - {from: pending, to: active, trigger: "validFrom reached (timer) or immediate", category: active}
+      - {from: active, to: suspended, command: SuspendEntitlement}
+      - {from: suspended, to: active, command: ResumeEntitlement}
+      - {from: [active, suspended], to: expired, trigger: "validTo reached (timer)"}
+      - {from: [pending, active, suspended], to: revoked, command: RevokeEntitlement}
+      - {from: active, to: active, command: RenewEntitlement, note: "self-transition extends validTo"}
+
+rules:
+  - {id: RUL-ENT-1, statement: "Check resolution order: direct holder entitlements, then seat assignments, then group/household/organization inherited entitlements via DOM-REL edges flagged entitlementInheritance."}
+  - {id: RUL-ENT-2, statement: "Multiple applicable entitlements are consumed in order: earliest validTo first, then promotional before paid (policy entitlement.consumption-order)."}
+  - {id: RUL-ENT-3, statement: "Suspended entitlements fail checks with reason R-ENT-SUSPENDED except capabilities whitelisted by policy entitlement.suspension-grace (e.g. data export)."}
+  - {id: RUL-ENT-4, statement: "Reservations expire automatically at TTL and release quantity."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:entitlement.consumption-order", purpose: "Ordering among multiple entitlements"}
+  - {urn: "urn:ucos:ucos.std:policy:entitlement.suspension-grace", purpose: "Capabilities available while suspended"}
+  - {urn: "urn:ucos:ucos.std:policy:entitlement.manual-grant", purpose: "Who may grant manually and limits"}
+  - {urn: "urn:ucos:ucos.std:policy:entitlement.thresholds", purpose: "Balance thresholds for notifications"}
+
+decisions:
+  - {id: DEC-ENT-1, question: "May party P use capability C now (qty q)?", algorithm: "EntitlementChecker per RUL-ENT-1..3"}
+  - {id: DEC-ENT-2, question: "Which entitlement absorbs consumption?", algorithm: "RUL-ENT-2"}
+
+security:
+  permissions: [entitlement.read, entitlement.check, entitlement.consume, entitlement.grant, entitlement.grant.manual, entitlement.admin, entitlement.seat.assign]
+  dataClassification: "Internal; holder references personal for persons."
+  threats: ["Double-spend of quota -> per-(entitlement, meter) serialized ledger appends with idempotency keys", "Check endpoint abuse -> service identities only for CheckService gRPC; per-client quotas"]
+
+governance:
+  changeControl: "Manual grants above policy limits require approval; entitlement TypeDefinitions governed."
+  evidence: "Manual grants and revocations capture reason + approver Evidence."
+
+runtimeBehavior:
+  consistency: "Consume/reserve strongly consistent per (entitlement, meter); checks may use cached results with TTL <= 5s for soft quotas, strong reads for hard quotas when remaining < 10% of allowance."
+  slo: {CheckEntitlement_p99_ms: 8, ConsumeEntitlement_p99_ms: 25, availability: "99.99%"}
+  scale: "10^9 entitlements; 100,000 checks/s and 50,000 consumptions/s per region."
+  failureModes: ["Entitlement service down: delivery systems apply policy entitlement.offline-mode (cached last check, fail-open only for capabilities flagged failOpen)"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_entitlement (event-sourced entitlements) + balance ledger + check cache
+  tables:
+    - {name: entitlements, columns: "tenant_id uuid, id char(26), holder text, subject text, quantity jsonb, meters jsonb, scope jsonb, valid_from timestamptz, valid_to timestamptz, source_kind text, source_ref text, state text, revision bigint", pk: "(tenant_id, id)", indexes: ["(tenant_id, holder, state)", "(tenant_id, subject, state)", "(tenant_id, source_ref)"]}
+    - {name: seat_assignments, columns: "tenant_id, entitlement_id, assignment_id, assignee, assigned_at, unassigned_at", pk: "(tenant_id, entitlement_id, assignment_id)", indexes: ["(tenant_id, assignee) WHERE unassigned_at IS NULL"]}
+    - {name: balance_ledger, columns: "tenant_id, entitlement_id, meter, period_start timestamptz, seq bigint, kind text, quantity numeric(38,9), idempotency_key text, occurred_at timestamptz", pk: "(tenant_id, entitlement_id, meter, period_start, seq)", indexes: ["unique(tenant_id, entitlement_id, idempotency_key)"]}
+    - {name: balances, columns: "tenant_id, entitlement_id, meter, period_start, allowance, consumed, reserved, version bigint", pk: "(tenant_id, entitlement_id, meter, period_start)", note: "Updated in same tx as ledger append (conditional on version)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "balance_ledger range(period_start) monthly x hash(tenant_id) 16."
+  retention: "Ledger retained per financial retention when consumption is billable; otherwise 24 months."
+
+extensionModel:
+  extensionPoints: ["New meter definitions (DOM-ONT attributes of facet Metered)", "Licence key formats and activation protocols via plugins", "Inheritance relation types"]
+  forbidden: ["Entitlement logic in delivery systems beyond calling Check/Consume"]
+
+certificationCriteria:
+  - {id: CR-ENT-01, rule: "Concurrency test: 10,000 concurrent consumes against allowance 1,000 with hard limit never drive balance below zero; idempotent replays never double count.", level: L1}
+  - {id: CR-ENT-02, rule: "Ledger sum equals balances table for 10^6 random operation sequences.", level: L1}
+  - {id: CR-ENT-03, rule: "CheckEntitlement p99 <= 8ms at 100,000 rps.", level: L2}
+  - {id: CR-ENT-04, rule: "Rollover and reset across anniversary/calendar alignments match golden files across DST and leap-day boundaries.", level: L1}
+validationRules:
+  - {id: VR-ENT-01, rule: "Every meterRef used in ucos.std offers is defined as a meter attribute in DOM-ONT."}

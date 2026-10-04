@@ -1,0 +1,173 @@
+header:
+  id: DOM-RCM
+  title: Recommendations Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief AI Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-017-001, CIC-010-001, CIC-011-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-006, PRIN-010]
+  certification: [CR-RCM-01, CR-RCM-02, CR-RCM-03]
+  validation: [VR-RCM-01, VR-RCM-02]
+
+purpose: >
+  Recommend what to offer next — cross-sell, upsell, substitutes, bundles, next-best-offer,
+  next-best-action for retention, renewal and upgrade suggestions — combining models (DOM-INT),
+  knowledge-graph relations (compatibility, accessories), eligibility, and business rules, with
+  privacy-aware personalization and measured outcomes.
+
+scope:
+  includes:
+    - Recommendation placements (where recommendations appear: PDP, cart, checkout, account, agent, sales console)
+    - Strategies per placement (model + graph + rules blend) as metadata
+    - Candidate generation, eligibility filtering (DOM-OFR), availability/rights filtering, ranking, diversity
+    - Next-best-action for service/retention (offer transitions, DOM-OFR)
+    - Experimentation (A/B and bandits) and outcome attribution
+  excludes:
+    - Model training/serving infrastructure (DOM-INT), pricing (DOM-PRC), search (DOM-SRC)
+
+responsibilities:
+  - Only eligible, sellable, rights-cleared items recommended.
+  - Personalization respects consent and purpose (marketing-personalization).
+  - Every impression and outcome measurable.
+
+principles: [PRIN-005, PRIN-006, PRIN-010]
+
+boundaries:
+  upstream: [DOM-INT, DOM-KGR, DOM-OFR, DOM-CAT, DOM-AVL, DOM-PTY, DOM-PRI, DOM-ENT, DOM-CMP]
+  downstream: [DOM-SRC, DOM-AGT, DOM-ANL, DOM-ORD]
+
+ownership:
+  boundedContext: intelligence
+  owningRole: Chief AI Architect
+  service: recommendation-service
+  schema: ucos_intelligence
+
+capabilities:
+  - {id: RCM-C1, name: Placements & strategies, description: "Configure where and how recommendations are produced."}
+  - {id: RCM-C2, name: Recommend, description: "Generate filtered, ranked recommendations with reasons."}
+  - {id: RCM-C3, name: Next-best-action, description: "Retention/upgrade actions for existing customers."}
+  - {id: RCM-C4, name: Experiment, description: "A/B and bandit experiments with guardrails."}
+  - {id: RCM-C5, name: Attribute, description: "Link impressions to clicks, carts, orders."}
+
+services:
+  - {name: RecommendationCommandService, kind: application, operations: [DefinePlacement, DefineStrategy, StartExperiment, StopExperiment, RecordFeedback]}
+  - {name: Recommender, kind: domain-service, contract: "recommend(placement, subject?, party?, ctx) -> candidates (models via DOM-INT inference, KG relations, rules) -> filter (eligibility, availability, rights, consent) -> rank (strategy blend) -> diversify -> top-k with reasons"}
+  - {name: RecommendationQueryService, kind: application, operations: [GetRecommendations, GetNextBestActions, GetExperimentResults]}
+
+aggregates:
+  - name: Placement
+    identity: "urn:ucos:<tenant>:rec-placement:<code>"
+    fields:
+      - {name: code, type: string}
+      - {name: surface, type: "product-detail|cart|checkout|account|agent|sales-console|email"}
+      - {name: strategyRef, type: string}
+      - {name: maxItems, type: int}
+  - name: Strategy
+    identity: "urn:ucos:<tenant>:rec-strategy:<code>@<semver>"
+    invariants: ["INV-RCM-1: candidate sources reference active models (DOM-INT) or registered KG named queries; blend weights sum to 1."]
+    fields:
+      - {name: sources, type: "[{kind: model|graph|rule|popular, ref, weight}]"}
+      - {name: filters, type: "[eligibility, availability, rights, consent, exclude-owned]"}
+      - {name: diversity, type: "{maxPerCategory, minNovelty}"}
+      - {name: fallback, type: "popular-in-context"}
+  - name: Experiment
+    identity: "urn:ucos:<tenant>:rec-experiment:<ulid>"
+    fields:
+      - {name: placement, type: string}
+      - {name: variants, type: "[{strategyRef, allocation}]"}
+      - {name: method, type: "ab|thompson-sampling"}
+      - {name: guardrails, type: "{minConversionRatioVsControl, maxMarginDrop}"}
+      - {name: status, type: "running|stopped|concluded"}
+
+entities: []
+
+valueObjects:
+  - {name: Recommendation, definition: "{objectRef|offerRef|action, score, reasons[R codes], source, experimentVariant?, impressionId}"}
+
+commands:
+  - {name: DefinePlacement, input: "Placement", emits: [PlacementDefined]}
+  - {name: DefineStrategy, input: "Strategy + changeSetRef", emits: [StrategyDefined]}
+  - {name: StartExperiment, input: "Experiment", emits: [ExperimentStarted]}
+  - {name: StopExperiment, input: "{id, reason}", emits: [ExperimentStopped]}
+  - {name: RecordFeedback, input: "{impressionId, kind: click|add-to-cart|purchase|dismiss, at}", emits: [RecommendationFeedbackRecorded]}
+
+queries:
+  - {name: GetRecommendations, input: "{placement, subject?, context}", output: "Recommendation[]"}
+  - {name: GetNextBestActions, input: "{party, context}", output: "Recommendation[] (actions: upgrade, renew, add-on, retention offer)"}
+  - {name: GetExperimentResults, input: "{id}", output: "{variants: [{impressions, ctr, conversion, revenuePerImpression, marginPerImpression, ci}]}"}
+
+apis:
+  - {style: REST, path: "/v1/recommendations:get", methods: {POST: GetRecommendations}}
+  - {style: REST, path: "/v1/recommendations:next-best-actions", methods: {POST: GetNextBestActions}}
+  - {style: REST, path: "/v1/recommendations/feedback", methods: {POST: RecordFeedback}}
+  - {style: REST, path: "/v1/recommendations/placements", methods: {POST: DefinePlacement}}
+  - {style: REST, path: "/v1/recommendations/strategies", methods: {POST: DefineStrategy}}
+  - {style: REST, path: "/v1/recommendations/experiments", methods: {POST: StartExperiment}}
+  - {style: REST, path: "/v1/recommendations/experiments/{id}", methods: {GET: GetExperimentResults}}
+  - {style: REST, path: "/v1/recommendations/experiments/{id}:stop", methods: {POST: StopExperiment}}
+
+events:
+  - {type: ucos.intelligence.recommendation.placement-defined.v1, payload: "{code, surface}"}
+  - {type: ucos.intelligence.recommendation.strategy-defined.v1, payload: "{code, version}"}
+  - {type: ucos.intelligence.recommendation.experiment-started.v1, payload: "{id, placement, variants}"}
+  - {type: ucos.intelligence.recommendation.experiment-stopped.v1, payload: "{id, reason}"}
+  - {type: ucos.intelligence.recommendation.served.v1, payload: "{impressionId, placement, items, variant}", note: "Aggregate/sampled; party referenced only by keyed hash"}
+  - {type: ucos.intelligence.recommendation.feedback-recorded.v1, payload: "{impressionId, kind}"}
+
+stateMachines:
+  - name: ExperimentLifecycle
+    initial: running
+    states: [running, stopped, concluded]
+    terminal: [stopped, concluded]
+    transitions:
+      - {from: running, to: stopped, command: StopExperiment}
+      - {from: running, to: stopped, trigger: "guardrail breached"}
+      - {from: running, to: concluded, trigger: "significance reached or max duration"}
+
+rules:
+  - {id: RUL-RCM-1, statement: "Personalized candidates require consent for marketing-personalization in the party's jurisdiction; otherwise non-personalized strategies apply."}
+  - {id: RUL-RCM-2, statement: "Recommendations exclude items the party already holds active entitlements for unless strategy declares upgrade/renewal intent."}
+  - {id: RUL-RCM-3, statement: "Experiments auto-stop on guardrail breach (conversion or margin) evaluated hourly."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:recommendations.guardrails", purpose: "Default experiment guardrails and max personalization depth"}
+
+decisions:
+  - {id: DEC-RCM-1, question: "What should be recommended to P at placement X in context C?", algorithm: "Recommender pipeline; DecisionRecord type recommendation (aggregated impressions)"}
+
+security:
+  permissions: [recommendations.read, recommendations.manage, recommendations.experiment]
+  dataClassification: "Signals personal (hashed); outputs public."
+  threats: ["Inference of sensitive attributes -> excluded features list (DOM-INT) and consent gating"]
+
+governance:
+  changeControl: "Strategies via ChangeSet; experiments via PDP with guardrails."
+  evidence: "Experiment results stored."
+
+runtimeBehavior:
+  consistency: "Candidates from near-real-time features (p95 freshness 5 min)."
+  slo: {GetRecommendations_p99_ms: 80, availability: "99.9% (fallback to popular)"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_intelligence (definitions) + feature store (DOM-INT) + analytics store (impressions)
+  tables:
+    - {name: placements, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: strategies, columns: "tenant_id, code, version, body jsonb", pk: "(tenant_id, code, version)"}
+    - {name: experiments, columns: "tenant_id, id, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Impressions in analytics store partitioned by day."
+  retention: "Impressions 13 months (aggregated beyond)."
+
+extensionModel:
+  extensionPoints: ["Candidate sources (model plugins, graph queries)", "Rankers"]
+  forbidden: ["Recommending ineligible or unsellable items"]
+
+certificationCriteria:
+  - {id: CR-RCM-01, rule: "No recommended item fails eligibility/availability/rights checks in 10^5 sampled requests.", level: L1}
+  - {id: CR-RCM-02, rule: "Without consent, no personalized source contributes (feature attribution test).", level: L1}
+  - {id: CR-RCM-03, rule: "Guardrail breach stops experiments within 1 hour.", level: L1}
+validationRules:
+  - {id: VR-RCM-01, rule: "Every strategy source references an active model or registered named query."}
+  - {id: VR-RCM-02, rule: "Every placement references an existing strategy."}

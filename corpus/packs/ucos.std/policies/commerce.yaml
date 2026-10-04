@@ -1,0 +1,169 @@
+# Commerce configuration policies (platform-layer defaults; tenants override in tenant layer).
+# Static bodies: the default test vector asserts the effective platform configuration.
+defaults: &cfg
+  kind: configuration
+  layer: platform
+  scope: {}
+
+policies:
+  # ---------------- Availability (DOM-AVL) ----------------
+  - <<: *cfg
+    name: availability.backorder
+    outputSchema: {type: object, required: [allowed, maxBackorderDays], properties: {allowed: {type: boolean}, maxBackorderDays: {type: integer, minimum: 0}, requiresInbound: {type: boolean}}}
+    body: {language: static, source: &avlBackorder {allowed: true, maxBackorderDays: 30, requiresInbound: true}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *avlBackorder}]
+
+  - <<: *cfg
+    name: availability.preorder
+    outputSchema: {type: object, required: [allowed, maxDaysBeforeLaunch], properties: {allowed: {type: boolean}, maxDaysBeforeLaunch: {type: integer, minimum: 0}, captureMode: {enum: [authorize-at-order, authorize-at-ship]}}}
+    body: {language: static, source: &avlPreorder {allowed: true, maxDaysBeforeLaunch: 90, captureMode: authorize-at-ship}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *avlPreorder}]
+
+  - <<: *cfg
+    name: availability.sourcing-objective
+    outputSchema: {type: object, required: [weights, splitPolicy], properties: {weights: {type: object, required: [cost, time, splits], properties: {cost: {type: integer, minimum: 0}, time: {type: integer, minimum: 0}, splits: {type: integer, minimum: 0}}}, splitPolicy: {enum: [allow, deny, allow-with-penalty]}}}
+    body: {language: static, source: &avlSourcing {weights: {cost: 50, time: 35, splits: 15}, splitPolicy: allow-with-penalty}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *avlSourcing}]
+
+  # ---------------- Offer / Quote / Order ----------------
+  - <<: *cfg
+    name: offer.publish-approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &ofrApproval {measure: maxDiscountVsListPercent, tiers: [{upTo: 0, stages: [{approverRoles: [product-manager], quorum: 1}]}, {upTo: 20, stages: [{approverRoles: [product-manager, pricing-manager], quorum: 2}]}, {upTo: unbounded, stages: [{approverRoles: [product-manager, pricing-manager], quorum: 2}, {approverRoles: [commercial-director], quorum: 1}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ofrApproval}]
+
+  - <<: *cfg
+    name: quote.approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &qteApproval {measure: discountPercent, tiers: [{upTo: 10, stages: []}, {upTo: 25, stages: [{approverRoles: [sales-manager], quorum: 1}]}, {upTo: 40, stages: [{approverRoles: [sales-manager], quorum: 1}, {approverRoles: [sales-director], quorum: 1}]}, {upTo: unbounded, stages: [{approverRoles: [sales-director], quorum: 1}, {approverRoles: [cfo-office], quorum: 1}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *qteApproval}]
+
+  - <<: *cfg
+    name: quote.validity
+    outputSchema: {type: object, required: [defaultValidity, maxValidity], properties: {defaultValidity: {type: string, pattern: "^P"}, maxValidity: {type: string, pattern: "^P"}}}
+    body: {language: static, source: &qteValidity {defaultValidity: P30D, maxValidity: P90D}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *qteValidity}]
+
+  - <<: *cfg
+    name: order.amendment-approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &ordAmend {measure: priceIncreasePercent, tiers: [{upTo: 0, stages: []}, {upTo: 10, stages: [{approverRoles: [order-desk-lead], quorum: 1}]}, {upTo: unbounded, stages: [{approverRoles: [order-desk-lead], quorum: 1}, {approverRoles: [sales-manager], quorum: 1}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ordAmend}]
+
+  - <<: *cfg
+    name: order.cart-ttl
+    outputSchema: {type: object, required: [anonymous, authenticated], properties: {anonymous: {type: string, pattern: "^P"}, authenticated: {type: string, pattern: "^P"}}}
+    body: {language: static, source: &ordCartTtl {anonymous: P7D, authenticated: P30D}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ordCartTtl}]
+
+  - <<: *cfg
+    name: order.numbering
+    outputSchema: {type: object, required: [format, checkDigit], properties: {format: {type: string}, checkDigit: {enum: [none, luhn, iso7064-mod97]}, resetPolicy: {enum: [never, yearly]}}}
+    body: {language: static, source: &ordNumbering {format: "{YYYY}-{SEQ:9}", checkDigit: luhn, resetPolicy: never}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ordNumbering}]
+
+  - <<: *cfg
+    name: order.returns
+    outputSchema: {type: object, required: [windowDays, resolution, restockingFeePercent], properties: {windowDays: {type: integer, minimum: 0}, resolution: {type: array, items: {enum: [refund, exchange, store-credit]}}, restockingFeePercent: {type: integer, minimum: 0, maximum: 100}, excludedFacets: {type: array, items: {type: string}}}}
+    body: {language: static, source: &ordReturns {windowDays: 30, resolution: [refund, exchange, store-credit], restockingFeePercent: 0, excludedFacets: [Entitling]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ordReturns}]
+
+  - <<: *cfg
+    name: order.validation-steps
+    outputSchema: {type: object, required: [steps], properties: {steps: {type: array, items: {enum: [catalog-membership, configuration, eligibility, availability, quantity-limits, fraud-risk, credit-check, export-control]}}}}
+    body: {language: static, source: &ordValidation {steps: [catalog-membership, configuration, eligibility, availability, quantity-limits, fraud-risk]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ordValidation}]
+
+  # ---------------- Pricing ----------------
+  - <<: *cfg
+    name: pricing.approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &prcApproval {measure: maxEntryChangePercent, tiers: [{upTo: 5, stages: [{approverRoles: [pricing-manager], quorum: 1}]}, {upTo: 15, stages: [{approverRoles: [pricing-manager], quorum: 1}, {approverRoles: [commercial-director], quorum: 1}]}, {upTo: unbounded, stages: [{approverRoles: [pricing-manager], quorum: 1}, {approverRoles: [commercial-director, cfo-office], quorum: 2}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *prcApproval}]
+
+  - <<: *cfg
+    name: pricing.conversion.allowed
+    outputSchema: {type: object, required: [allowed, rateType], properties: {allowed: {type: boolean}, rateType: {enum: [spot, daily-close, contract]}, markupBasisPoints: {type: integer, minimum: 0}}}
+    body: {language: static, source: &prcConversion {allowed: false, rateType: daily-close, markupBasisPoints: 0}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *prcConversion}]
+
+  - <<: *cfg
+    name: pricing.floor
+    outputSchema: {type: object, required: [lineSubtotalFloorMinor], properties: {lineSubtotalFloorMinor: {type: integer, minimum: 0}, belowCostAction: {enum: [warn, require-approval, block]}}}
+    body: {language: static, source: &prcFloor {lineSubtotalFloorMinor: 0, belowCostAction: require-approval}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *prcFloor}]
+
+  - <<: *cfg
+    name: pricing.manual-discount-threshold
+    outputSchema: {type: object, required: [percentWithoutApproval], properties: {percentWithoutApproval: {type: integer, minimum: 0, maximum: 100}}}
+    body: {language: static, source: &prcManual {percentWithoutApproval: 5}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *prcManual}]
+
+  # ---------------- Contract ----------------
+  - <<: *cfg
+    name: contract.approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &ctrApproval {measure: deviationScore, tiers: [{upTo: 0, stages: [{approverRoles: [contract-manager], quorum: 1}]}, {upTo: 50, stages: [{approverRoles: [contract-manager], quorum: 1}, {approverRoles: [legal-counsel], quorum: 1}]}, {upTo: unbounded, stages: [{approverRoles: [contract-manager], quorum: 1}, {approverRoles: [legal-counsel], quorum: 1}, {approverRoles: [cfo-office], quorum: 1}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ctrApproval}]
+
+  - <<: *cfg
+    name: contract.signing-authority
+    outputSchema: {type: object, required: [rules], properties: {rules: {type: array, items: {type: object, required: [partyType, upToMinor, requiredRoles], properties: {partyType: {type: string}, upToMinor: {oneOf: [{type: integer}, {const: unbounded}]}, requiredRoles: {type: array, minItems: 1}, signatories: {type: integer, minimum: 1}}}}}}
+    body: {language: static, source: &ctrSigning {rules: [{partyType: Person, upToMinor: unbounded, requiredRoles: [self], signatories: 1}, {partyType: Organization, upToMinor: 10000000, requiredRoles: [authorized-signatory], signatories: 1}, {partyType: Organization, upToMinor: unbounded, requiredRoles: [authorized-signatory, executive-officer], signatories: 2}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ctrSigning}]
+
+  - <<: *cfg
+    name: contract.term-schemas
+    outputSchema: {type: object, required: [termKinds], properties: {termKinds: {type: object, additionalProperties: {type: object, required: [requiredParams], properties: {requiredParams: {type: array, items: {type: string}}, compilesTo: {type: string}}}}}}
+    body:
+      language: static
+      source: &ctrTerms
+        termKinds:
+          price: {requiredParams: [subject, priceModel, currency], compilesTo: pricing.price-list}
+          discount: {requiredParams: [selector, effect, value], compilesTo: rules.price-adjustment}
+          commitment: {requiredParams: [kind, amount, period], compilesTo: contract.commitment-tracker}
+          payment: {requiredParams: [netDays, currency], compilesTo: billing.account-terms}
+          sla: {requiredParams: [metricRef, objective, window, creditScheduleRef], compilesTo: service-delivery.sla-monitor}
+          renewal: {requiredParams: [mode, period, noticePeriod], compilesTo: lifecycle.timer}
+          termination: {requiredParams: [noticePeriod, feeModel], compilesTo: pricing.formula}
+          entitlement: {requiredParams: [subject, meters], compilesTo: entitlement.grant}
+          liability: {requiredParams: [capMinor, currency], compilesTo: none}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *ctrTerms}]
+
+  # ---------------- Entitlement ----------------
+  - <<: *cfg
+    name: entitlement.suspension-grace
+    outputSchema: {type: object, required: [capabilitiesAvailableWhileSuspended], properties: {capabilitiesAvailableWhileSuspended: {type: array, items: {type: string}}}}
+    body: {language: static, source: &entGrace {capabilitiesAvailableWhileSuspended: [account.read, data.export, billing.pay, support.contact]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *entGrace}]
+
+  - <<: *cfg
+    name: entitlement.thresholds
+    outputSchema: {type: object, required: [percentConsumed], properties: {percentConsumed: {type: array, items: {type: integer, minimum: 1, maximum: 100}}}}
+    body: {language: static, source: &entThresholds {percentConsumed: [50, 80, 100]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *entThresholds}]
+
+  # ---------------- Inventory ----------------
+  - <<: *cfg
+    name: inventory.adjustment-approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &invAdjust {measure: adjustmentValueMinor, tiers: [{upTo: 50000, stages: []}, {upTo: 500000, stages: [{approverRoles: [inventory-controller], quorum: 1}]}, {upTo: unbounded, stages: [{approverRoles: [inventory-controller], quorum: 1}, {approverRoles: [finance-controller], quorum: 1}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *invAdjust}]
+
+  - <<: *cfg
+    name: inventory.oversell
+    outputSchema: {type: object, required: [byNodeKind], properties: {byNodeKind: {type: object, additionalProperties: {type: integer, minimum: 0}}}}
+    body: {language: static, source: &invOversell {byNodeKind: {warehouse: 0, store: 0, distribution-center: 0, virtual: 0, drop-ship: 0, service-hub: 0}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *invOversell}]
+
+  - <<: *cfg
+    name: inventory.partial-reservation
+    outputSchema: {type: object, required: [mode], properties: {mode: {enum: [all-or-nothing, partial-per-line, partial-allowed]}}}
+    body: {language: static, source: &invPartial {mode: all-or-nothing}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *invPartial}]
+
+  - <<: *cfg
+    name: inventory.reservation-ttl
+    outputSchema: {type: object, required: [soft, hard], properties: {soft: {type: string, pattern: "^P"}, hard: {type: string, pattern: "^P"}}}
+    body: {language: static, source: &invTtl {soft: PT30M, hard: P14D}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *invTtl}]

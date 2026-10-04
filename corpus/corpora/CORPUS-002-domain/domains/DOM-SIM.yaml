@@ -1,0 +1,162 @@
+header:
+  id: DOM-SIM
+  title: Simulation Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief AI Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-019-001, CIC-015-001, CIC-028-001, CIC-002-001]
+  traces: [PRIN-011, PRIN-012, PRIN-006, CIC-019-001]
+  certification: [CR-SIM-01, CR-SIM-02, CR-SIM-03]
+  validation: [VR-SIM-01, VR-SIM-02]
+
+plugin:
+  id: ucos.ext.simulation
+  isolation: I4
+  consumesPorts: [EventBusPort, AnalyticsStorePort]
+  providesApis: ["/v1/simulations/*"]
+  requiredPacks: ["ucos.std@^1.0"]
+
+purpose: >
+  Run what-if scenarios on commercial twins before changes reach production: apply candidate
+  ChangeSets or parameter sweeps to a twin, replay recorded or synthetic demand through the real
+  resolvers, compare KPIs against a baseline twin, and attach results as Evidence to the governed change.
+
+scope:
+  includes:
+    - Scenario definitions (twin ref, candidate changes, demand model, KPIs, seeds)
+    - Demand models (replay of anonymized recorded requests, synthetic generators, forecast-driven)
+    - Scenario runs and KPI comparison (revenue, margin, conversion proxies, failures, eligibility shifts)
+    - Sensitivity sweeps over parameters
+  excludes:
+    - Twin provisioning (DOM-DTW), optimization search (DOM-OPT), plan management (DOM-PLN)
+
+responsibilities:
+  - Deterministic, reproducible scenario results.
+  - Evidence attached to the ChangeSets they inform.
+
+principles: [PRIN-006, PRIN-011, PRIN-012]
+
+boundaries:
+  upstream: [DOM-DTW, DOM-GOV, DOM-FCS, DOM-ANL]
+  downstream: [DOM-GOV, DOM-OPT, DOM-PLN, DOM-EVD]
+
+ownership:
+  boundedContext: intelligence
+  owningRole: Chief AI Architect
+  service: simulation-service
+  schema: ucos_intelligence
+
+capabilities:
+  - {id: SIM-C1, name: Scenarios, description: "Define scenarios against twins."}
+  - {id: SIM-C2, name: Demand models, description: "Replay, synthetic, forecast-driven demand."}
+  - {id: SIM-C3, name: Run & compare, description: "Execute and compare KPIs vs baseline."}
+  - {id: SIM-C4, name: Sweeps, description: "Parameter sensitivity analysis."}
+
+services:
+  - {name: SimulationCommandService, kind: application, operations: [DefineScenario, RunScenario, RunSweep, AttachResultsToChangeSet]}
+  - {name: DemandGenerator, kind: domain-service, contract: "generate(model, seed) -> request stream (price, cart, order, usage events) with pseudonymous parties; deterministic per seed"}
+  - {name: SimulationQueryService, kind: application, operations: [GetScenarioRun, CompareRuns]}
+
+aggregates:
+  - name: Scenario
+    identity: "urn:ucos:<tenant>:scenario:<ulid>"
+    invariants: ["INV-SIM-1: references a ready commercial twin; candidate changes are ChangeSet refs or parameter overrides valid for the twin's metadata versions."]
+    fields:
+      - {name: twinRef, type: InstanceUrn}
+      - {name: candidate, type: "{changeSetRef? , parameterOverrides?}"}
+      - {name: demandModel, type: "{kind: replay|synthetic|forecast, ref, window, scale}"}
+      - {name: kpis, type: "metric URNs"}
+      - {name: seed, type: long}
+  - name: ScenarioRun
+    identity: "urn:ucos:<tenant>:scenario-run:<ulid>"
+    fields:
+      - {name: scenarioRef, type: InstanceUrn}
+      - {name: baselineRunRef, type: "InstanceUrn?"}
+      - {name: kpiResults, type: "map<metric, value>"}
+      - {name: deltas, type: "map<metric, {abs, pct, ci}>"}
+      - {name: reportDigest, type: Sha256}
+      - {name: status, type: "running|completed|failed"}
+
+entities: []
+
+valueObjects:
+  - {name: SweepResult, definition: "{parameter, values[], kpiCurves}"}
+
+commands:
+  - {name: DefineScenario, input: "Scenario", emits: [ScenarioDefined]}
+  - {name: RunScenario, input: "{scenarioId, baseline: bool}", emits: [ScenarioRunCompleted], async: true}
+  - {name: RunSweep, input: "{scenarioId, parameter, values[]}", emits: [SweepCompleted], async: true}
+  - {name: AttachResultsToChangeSet, input: "{runId, changeSetRef}", emits: [SimulationEvidenceAttached]}
+
+queries:
+  - {name: GetScenarioRun, input: "{runId}", output: ScenarioRun}
+  - {name: CompareRuns, input: "{runIds[]}", output: "KPI comparison table"}
+
+apis:
+  - {style: REST, path: "/v1/simulations/scenarios", methods: {POST: DefineScenario}}
+  - {style: REST, path: "/v1/simulations/scenarios/{id}:run", methods: {POST: RunScenario}}
+  - {style: REST, path: "/v1/simulations/scenarios/{id}:sweep", methods: {POST: RunSweep}}
+  - {style: REST, path: "/v1/simulations/runs/{runId}", methods: {GET: GetScenarioRun}}
+  - {style: REST, path: "/v1/simulations/runs:compare", methods: {POST: CompareRuns}}
+  - {style: REST, path: "/v1/simulations/runs/{runId}:attach", methods: {POST: AttachResultsToChangeSet}}
+
+events:
+  - {type: ucos.intelligence.scenario.defined.v1, payload: "{id, twinRef}"}
+  - {type: ucos.intelligence.scenario-run.completed.v1, payload: "{runId, scenarioId, deltas}"}
+  - {type: ucos.intelligence.scenario-sweep.completed.v1, payload: "{scenarioId, parameter}"}
+  - {type: ucos.intelligence.simulation-evidence.attached.v1, payload: "{runId, changeSetRef, evidenceRef}", consumers: [governance impact panel]}
+
+stateMachines:
+  - name: ScenarioRunLifecycle
+    initial: running
+    states: [running, completed, failed]
+    terminal: [completed, failed]
+    transitions:
+      - {from: running, to: completed, trigger: "demand stream exhausted, KPIs computed"}
+      - {from: running, to: failed, trigger: "twin error or timeout"}
+
+rules:
+  - {id: RUL-SIM-1, statement: "Baseline and candidate runs use the same twin snapshot, demand model, and seed; only the candidate change differs."}
+  - {id: RUL-SIM-2, statement: "Results report confidence intervals from repeated seeds (policy simulation.repetitions)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:simulation.repetitions", purpose: "Number of seeded repetitions for confidence intervals"}
+
+decisions:
+  - {id: DEC-SIM-1, question: "What is the KPI impact of change C?", algorithm: "Candidate vs baseline runs per RUL-SIM-1"}
+
+security:
+  permissions: [simulation.read, simulation.run, simulation.attach]
+  dataClassification: "Pseudonymized; internal."
+  threats: ["Scenario misuse to infer personal behavior -> twins pseudonymized, aggregates only"]
+
+governance:
+  changeControl: "Scenarios are not governed; attachment to ChangeSets is audited."
+  evidence: "Run reports sealed as Evidence."
+
+runtimeBehavior:
+  consistency: "Batch; deterministic per seed."
+  slo: {RunScenario_1M_requests_p95_min: 30, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_intelligence (separate tables) + analytics store for run data
+  tables:
+    - {name: scenarios, columns: "tenant_id, id, body jsonb", pk: "(tenant_id, id)"}
+    - {name: scenario_runs, columns: "tenant_id, id, scenario_id, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None."
+  retention: "Runs attached to ChangeSets retained with evidence; others 180 days."
+
+extensionModel:
+  extensionPoints: ["Demand generators", "KPI calculators"]
+  forbidden: ["Running scenarios against production tenants"]
+
+certificationCriteria:
+  - {id: CR-SIM-01, rule: "Same seed and inputs reproduce identical KPI reports (CR-019-001-01).", level: L1}
+  - {id: CR-SIM-02, rule: "Baseline vs identical candidate yields zero deltas (sanity test).", level: L1}
+  - {id: CR-SIM-03, rule: "Plugin deploys as I4 with only declared ports.", level: L2}
+validationRules:
+  - {id: VR-SIM-01, rule: "Every scenario KPI references a certified metric."}
+  - {id: VR-SIM-02, rule: "Every scenario references a ready twin."}

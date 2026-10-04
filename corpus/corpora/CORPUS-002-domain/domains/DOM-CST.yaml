@@ -1,0 +1,184 @@
+header:
+  id: DOM-CST
+  title: Cost Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-011-004, CIC-008-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-006, PRIN-016]
+  certification: [CR-CST-01, CR-CST-02, CR-CST-03]
+  validation: [VR-CST-01, VR-CST-02]
+
+purpose: >
+  Own the cost of serving commerce: standard and actual unit costs of commercial objects
+  (purchase, landed, manufactured, service delivery, cloud/usage cost), inventory valuation layers
+  (FIFO, weighted average, standard), and cost-to-serve drivers — contextual like prices — so that
+  pricing floors, margin checks, profitability, and COGS postings use one cost truth.
+
+scope:
+  includes:
+    - CostEntry facts (scoped like price entries: object/type, node, supplier, context, validity)
+    - Cost models (flat, per-unit, tiered, formula, rolled-up from BOM/composition)
+    - Inventory valuation (cost layers per object/node/lot) and COGS on issue
+    - Cost-to-serve drivers and allocation rules (fulfilment, payment fees, support, cloud usage)
+    - Standard cost updates and variance computation
+  excludes:
+    - Prices (DOM-PRC), profitability reporting (DOM-PRF), GL posting (DOM-ACC)
+
+responsibilities:
+  - Resolvable cost for any object in any context (same resolution algorithm as prices).
+  - Correct inventory valuation and COGS per method.
+  - Variance capture between standard and actual.
+
+principles: [PRIN-001, PRIN-006, PRIN-016]
+
+boundaries:
+  upstream: [DOM-COB, DOM-INV, DOM-SUPN, DOM-MFG, DOM-PAY, DOM-LOG, DOM-CTX]
+  downstream: [DOM-PRC, DOM-PRF, DOM-ACC, DOM-QTE, DOM-OFR, DOM-OPT]
+
+ownership:
+  boundedContext: finance
+  owningRole: Chief Product Architect
+  service: cost-service
+  schema: ucos_finance
+
+capabilities:
+  - {id: CST-C1, name: Cost facts, description: "Maintain contextual cost entries and models."}
+  - {id: CST-C2, name: Roll-up, description: "Compute composite costs from composition/BOM."}
+  - {id: CST-C3, name: Valuation, description: "Maintain cost layers and compute COGS on inventory issues."}
+  - {id: CST-C4, name: Cost-to-serve, description: "Allocate driver-based costs to orders/customers/products."}
+  - {id: CST-C5, name: Variances, description: "Standard vs actual variance computation."}
+
+services:
+  - {name: CostCommandService, kind: application, operations: [AddCostEntries, EndCostEntry, RunCostRollup, DefineCostDriver, UpdateStandardCosts]}
+  - {name: CostResolver, kind: domain-service, contract: "ResolveCost(objectRef, quantity, ctx) via CIC-011-001 (fact kind cost-entry, conflict error) + model evaluation; composite roll-up when no direct entry"}
+  - {name: ValuationEngine, kind: domain-service, contract: "On inventory movements: receipts create layers at landed cost; issues consume layers per method (fifo|weighted-average|standard) producing COGS; idempotent on movementId"}
+  - {name: CostQueryService, kind: application, operations: [ResolveCost, GetCostLayers, GetCostToServe, GetVariances]}
+
+aggregates:
+  - name: CostEntry
+    identity: "urn:ucos:<tenant>:cost-entry:<ulid>"
+    invariants: ["INV-CST-1: no overlapping validity for identical (subject, costType, scope digest) — exclusion constraint."]
+    fields:
+      - {name: subject, type: "objectRef | typeRef"}
+      - {name: costType, type: "purchase|landed|manufactured|service-delivery|usage|fee|standard"}
+      - {name: model, type: PriceModel}
+      - {name: currency, type: CurrencyCode}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: source, type: "{kind: supplier-price|calculation|import|manual, ref}"}
+  - name: CostLayer
+    identity: "urn:ucos:<tenant>:cost-layer:<ulid>"
+    invariants: ["INV-CST-2: remainingQty >= 0; layers consumed in method order; Σ COGS = Σ consumed qty x layer unit cost exactly."]
+    fields:
+      - {name: objectRef, type: InstanceUrn}
+      - {name: nodeRef, type: InstanceUrn}
+      - {name: lotRef, type: "string?"}
+      - {name: receivedAt, type: Instant}
+      - {name: unitCost, type: Money}
+      - {name: originalQty, type: Quantity}
+      - {name: remainingQty, type: Quantity}
+  - name: CostDriver
+    identity: "urn:ucos:<tenant>:cost-driver:<code>"
+    fields:
+      - {name: code, type: string}
+      - {name: costPool, type: "{accountKeys[], period}"}
+      - {name: driverMetric, type: "event-count|quantity|weight|duration|amount"}
+      - {name: allocationTarget, type: "order|order-line|customer|product|channel"}
+      - {name: rule, type: "CEL selecting events and measure"}
+
+entities: []
+
+valueObjects:
+  - {name: CostResult, definition: "{unitCost, totalCost, currency, components[], matchedEntry, rolledUp: bool, trace}"}
+  - {name: Variance, definition: "{subject, period, standard, actual, priceVariance, quantityVariance}"}
+
+commands:
+  - {name: AddCostEntries, input: "{entries[] <= 10000}", emits: [CostEntriesAdded]}
+  - {name: EndCostEntry, input: "{id, validTo}", emits: [CostEntryEnded]}
+  - {name: RunCostRollup, input: "{subjects?, asOf}", emits: [CostRollupCompleted], async: true}
+  - {name: DefineCostDriver, input: "CostDriver + changeSetRef", emits: [CostDriverDefined]}
+  - {name: UpdateStandardCosts, input: "{effectiveFrom, entries[], approvalRef}", emits: [StandardCostsUpdated], note: "Revalues on-hand inventory under standard method; emits revaluation for posting"}
+
+queries:
+  - {name: ResolveCost, input: "{objectRef, quantity, context}", output: CostResult}
+  - {name: GetCostLayers, input: "{objectRef, nodeRef?}", output: "CostLayer[]"}
+  - {name: GetCostToServe, input: "{target, targetRef, period}", output: "{total, byDriver[]}"}
+  - {name: GetVariances, input: "{period, subject?}", output: "Variance[]"}
+
+apis:
+  - {style: REST, path: "/v1/cost/entries", methods: {POST: AddCostEntries}}
+  - {style: REST, path: "/v1/cost/entries/{id}:end", methods: {POST: EndCostEntry}}
+  - {style: REST, path: "/v1/cost:resolve", methods: {POST: ResolveCost}}
+  - {style: REST, path: "/v1/cost/rollups", methods: {POST: RunCostRollup}}
+  - {style: REST, path: "/v1/cost/drivers", methods: {POST: DefineCostDriver}}
+  - {style: REST, path: "/v1/cost/standard-costs", methods: {POST: UpdateStandardCosts}}
+  - {style: REST, path: "/v1/cost/layers", methods: {GET: GetCostLayers}}
+  - {style: REST, path: "/v1/cost/cost-to-serve", methods: {GET: GetCostToServe}}
+  - {style: REST, path: "/v1/cost/variances", methods: {GET: GetVariances}}
+
+events:
+  - {type: ucos.finance.cost-entry.added.v1, payload: "{ids, subjects}", consumers: [pricing floor checks, profitability]}
+  - {type: ucos.finance.cost-entry.ended.v1, payload: "{id, validTo}"}
+  - {type: ucos.finance.cost-rollup.completed.v1, payload: "{asOf, subjects}"}
+  - {type: ucos.finance.cost-driver.defined.v1, payload: "{code}"}
+  - {type: ucos.finance.standard-costs.updated.v1, payload: "{effectiveFrom, revaluationAmount}"}
+  - {type: ucos.finance.cogs.recognized.v1, payload: "{movementId, objectRef, nodeRef, quantity, cogs, layers}", consumers: [accounting, profitability]}
+
+stateMachines:
+  - name: CostLayerState
+    initial: open
+    states: [open, depleted]
+    terminal: [depleted]
+    transitions:
+      - {from: open, to: depleted, trigger: "remainingQty reaches 0"}
+
+rules:
+  - {id: RUL-CST-1, statement: "Valuation method per (legal entity, object type) from policy cost.valuation-method; method changes require governance and a revaluation run."}
+  - {id: RUL-CST-2, statement: "Pricing floor checks (RUL-PRC-4) use ResolveCost with costType landed (goods) or service-delivery (services) in the pricing context."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:cost-entry.resolution", purpose: "ResolutionConfig for cost entries"}
+  - {urn: "urn:ucos:ucos.std:policy:cost.valuation-method", purpose: "Valuation method per legal entity and type"}
+
+decisions:
+  - {id: DEC-CST-1, question: "What does X cost in context C?", algorithm: "CostResolver"}
+
+security:
+  permissions: [cost.read, cost.manage, cost.rollup, cost.driver.manage, cost.standard.update]
+  dataClassification: "Confidential (supplier costs and margins)."
+  threats: ["Margin leakage to customers/partners -> cost APIs never exposed to customer/partner audiences; explain traces redact cost"]
+
+governance:
+  changeControl: "Standard cost updates and valuation method changes via ChangeSet with Controller approval."
+  evidence: "Revaluation reports captured."
+
+runtimeBehavior:
+  consistency: "Layer consumption serialized per (object, node) aligned with inventory movements."
+  slo: {ResolveCost_p99_ms: 15, cogs_lag_p99_s: 30, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_finance (separate tables)
+  tables:
+    - {name: cost_entries, columns: "tenant_id, id, subject, cost_type, model jsonb, currency, scope jsonb, scope_digest bytea, valid_from, valid_to", pk: "(tenant_id, id)", indexes: ["EXCLUDE USING gist (tenant_id WITH =, subject WITH =, cost_type WITH =, scope_digest WITH =, tstzrange(valid_from, valid_to) WITH &&)"]}
+    - {name: cost_layers, columns: "tenant_id, id, object_ref, node_ref, lot_ref, received_at, unit_cost_minor, currency, original_qty, remaining_qty", pk: "(tenant_id, id)", indexes: ["(tenant_id, object_ref, node_ref, received_at) WHERE remaining_qty > 0"]}
+    - {name: cogs_records, columns: "tenant_id, movement_id, layers jsonb, cogs_minor, currency", pk: "(tenant_id, movement_id)"}
+    - {name: cost_drivers, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "cost_layers hash(tenant_id, object_ref) 64."
+  retention: "Financial retention for layers and COGS records."
+
+extensionModel:
+  extensionPoints: ["Cost models via PriceModel plugins", "Cloud cost import connectors", "Activity-based costing driver packs"]
+  forbidden: ["Cost logic in pricing code"]
+
+certificationCriteria:
+  - {id: CR-CST-01, rule: "FIFO, weighted-average, and standard valuation golden suites match expected COGS and layer states exactly.", level: L1}
+  - {id: CR-CST-02, rule: "Composite roll-up equals sum of component costs x quantities for 10^4 random BOMs.", level: L1}
+  - {id: CR-CST-03, rule: "Cost never appears in customer- or partner-audience API responses (contract scan + DLP).", level: L1}
+validationRules:
+  - {id: VR-CST-01, rule: "Every Stockable type in reference fixtures has a valuation method configured."}
+  - {id: VR-CST-02, rule: "Every cost driver references existing account keys."}

@@ -1,0 +1,235 @@
+header:
+  id: DOM-RTM
+  title: Runtime Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-020-001, CIC-021-001, CIC-025-001, CIC-002-001]
+  traces: [PRIN-015, PRIN-022, CIC-020-001]
+  certification: [CR-RTM-01, CR-RTM-02, CR-RTM-03, CR-RTM-04]
+  validation: [VR-RTM-01, VR-RTM-02]
+
+# Execution (DOM-EXE) — resumable jobs and schedules — is runtime machinery specified here.
+subsumes:
+  - domain: DOM-EXE
+    coverage: "Job and Schedule aggregates, job lease/checkpoint semantics (RUL-RTM-2), JobLifecycle, StartJob/PauseJob/ResumeJob/AbortJob, CR-RTM-03 (CIC-020-001 §5)"
+
+purpose: >
+  Operate the runtime topology and execution substrate: the tenant directory (tenant -> region/cell),
+  cell registry and capacity, tenant placement and relocation, and the execution of resumable jobs
+  and schedules — implementing CIC-020-001 as a control-plane service.
+
+scope:
+  includes:
+    - Region and Cell registry (status, capacity, versions)
+    - Tenant directory and placement (shared/dedicated cells, residency constraints)
+    - Tenant relocation orchestration (with CIC-025-001 §5)
+    - Job definitions, job runs (leases, checkpoints), schedules (cron metadata)
+  excludes:
+    - Infrastructure provisioning (IaC, CIC-021-001)
+    - Lifecycle timers (DOM-LFC), workflows (DOM-WFL)
+    - Feature flags (DOM-CFG)
+
+responsibilities:
+  - Correct, low-latency tenant routing.
+  - Residency-respecting placement.
+  - Exactly-once-effect job execution with resumability.
+
+principles: [PRIN-015, PRIN-022]
+
+boundaries:
+  upstream: [DOM-ORG, DOM-PRI, DOM-OBS, DOM-CFG]
+  downstream: [DOM-EVT, DOM-LIN, DOM-MON, DOM-RLB, DOM-BIL, DOM-CAT]
+
+ownership:
+  boundedContext: runtime
+  owningRole: Chief Platform Architect
+  service: runtime-control-plane
+  schema: ucos_runtime
+
+capabilities:
+  - {id: RTM-C1, name: Topology, description: "Register regions and cells; track health and capacity."}
+  - {id: RTM-C2, name: Directory, description: "Tenant -> cell routing with caching and invalidation."}
+  - {id: RTM-C3, name: Placement, description: "Place and relocate tenants respecting residency and capacity."}
+  - {id: RTM-C4, name: Jobs, description: "Run resumable jobs with leases and checkpoints."}
+  - {id: RTM-C5, name: Schedules, description: "Cron schedules as metadata, leader-elected per cell."}
+
+services:
+  - {name: TopologyService, kind: application, operations: [RegisterCell, UpdateCellStatus, DrainCell]}
+  - {name: TenantDirectoryService, kind: application, operations: [PlaceTenant, RelocateTenant, ResolveTenant]}
+  - {name: JobService, kind: application, operations: [DefineJob, StartJob, PauseJob, ResumeJob, AbortJob, CheckpointJob, DefineSchedule]}
+  - {name: PlacementAdvisor, kind: domain-service, contract: "advise(tenant profile, residency) -> candidate cells ranked by headroom, residency match, blast-radius balance (<= 20% of region tenants per cell)"}
+  - {name: RuntimeQueryService, kind: application, operations: [GetCell, ListCells, GetTenantPlacement, GetJobRun, FindJobRuns]}
+
+aggregates:
+  - name: Cell
+    identity: "urn:ucos:global:cell:<region>/<cell>"
+    fields:
+      - {name: region, type: string}
+      - {name: kind, type: "shared|dedicated|simulation|canary"}
+      - {name: status, type: "provisioning|active|draining|drained|decommissioned"}
+      - {name: capacity, type: "{tenants, writesPerSecond, storageTb, utilization}"}
+      - {name: platformVersion, type: string}
+  - name: TenantPlacement
+    identity: "urn:ucos:global:placement:<tenant>"
+    invariants:
+      - "INV-RTM-1: cell region satisfies tenant residency (DOM-PRI privacy.residency)."
+      - "INV-RTM-2: exactly one home cell per tenant at any instant; relocation uses a write-freeze window."
+    fields:
+      - {name: tenant, type: string}
+      - {name: homeCell, type: CellUrn}
+      - {name: standbyCell, type: "CellUrn?"}
+      - {name: status, type: "active|relocating|frozen"}
+      - {name: version, type: long}
+  - name: JobRun
+    identity: "urn:ucos:<tenant|platform>:job-run:<ulid>"
+    invariants:
+      - "INV-RTM-3: at most one lease holder; lease renewed every 10s; takeover after 30s without renewal."
+      - "INV-RTM-4: checkpoint cursor monotonic; side effects keyed by (jobRun, itemKey) for idempotency."
+    fields:
+      - {name: jobKind, type: string}
+      - {name: input, type: json}
+      - {name: cursor, type: string}
+      - {name: progress, type: "{total?, processed, failed}"}
+      - {name: lease, type: "{holder, expiresAt}"}
+      - {name: status, type: string}
+  - name: Schedule
+    identity: "urn:ucos:<tenant|platform>:schedule:<code>"
+    fields:
+      - {name: cron, type: "string (5-field, zone)"}
+      - {name: jobKind, type: string}
+      - {name: input, type: json}
+      - {name: overlap, type: "skip|queue|allow"}
+      - {name: enabled, type: boolean}
+
+entities: []
+
+valueObjects:
+  - {name: RouteResolution, definition: "{tenant, region, cell, gatewayUrl, directoryVersion, ttlSeconds}"}
+
+commands:
+  - {name: RegisterCell, input: "Cell", emits: [CellRegistered]}
+  - {name: UpdateCellStatus, input: "{cell, status}", emits: [CellStatusChanged]}
+  - {name: DrainCell, input: "{cell, targetCells[]}", emits: [CellDrainStarted], async: true}
+  - {name: PlaceTenant, input: "{tenant, residency, plan, preferredCell?}", emits: [TenantPlaced], preconditions: ["INV-RTM-1"]}
+  - {name: RelocateTenant, input: "{tenant, targetCell, approvalRef}", emits: [TenantRelocationStarted, TenantRelocated], async: true}
+  - {name: DefineJob, input: "{jobKind, handler (context/operation), checkpointEvery, maxConcurrency}", emits: [JobDefined]}
+  - {name: StartJob, input: "{jobKind, input, idempotencyKey}", emits: [JobRunStarted]}
+  - {name: PauseJob, input: "{runId}", emits: [JobRunPaused]}
+  - {name: ResumeJob, input: "{runId}", emits: [JobRunResumed]}
+  - {name: AbortJob, input: "{runId, reason}", emits: [JobRunAborted]}
+  - {name: CheckpointJob, input: "{runId, cursor, progress, leaseHolder}", emits: [JobRunCheckpointed], note: "High-frequency; events sampled to 1 per minute per run"}
+  - {name: DefineSchedule, input: "Schedule + changeSetRef", emits: [ScheduleDefined]}
+
+queries:
+  - {name: ResolveTenant, input: "{tenant}", output: RouteResolution}
+  - {name: GetCell, input: "{cell}", output: Cell}
+  - {name: ListCells, input: "{region?, status?}", output: "Cell[]"}
+  - {name: GetTenantPlacement, input: "{tenant}", output: TenantPlacement}
+  - {name: GetJobRun, input: "{runId}", output: JobRun}
+  - {name: FindJobRuns, input: "{jobKind?, status?, from?, cursor}", output: "page"}
+
+apis:
+  - {style: REST, path: "/ops/v1/runtime/cells", methods: {POST: RegisterCell, GET: ListCells}}
+  - {style: REST, path: "/ops/v1/runtime/cells/{cell}", methods: {GET: GetCell, PATCH: UpdateCellStatus}}
+  - {style: REST, path: "/ops/v1/runtime/cells/{cell}:drain", methods: {POST: DrainCell}}
+  - {style: REST, path: "/ops/v1/runtime/tenants", methods: {POST: PlaceTenant}}
+  - {style: REST, path: "/ops/v1/runtime/tenants/{tenant}", methods: {GET: GetTenantPlacement}}
+  - {style: REST, path: "/ops/v1/runtime/tenants/{tenant}:relocate", methods: {POST: RelocateTenant}}
+  - {style: REST, path: "/internal/v1/runtime/route/{tenant}", methods: {GET: ResolveTenant}, note: "Edge-only; cached 60s"}
+  - {style: REST, path: "/v1/runtime/jobs", methods: {POST: StartJob, GET: FindJobRuns}}
+  - {style: REST, path: "/v1/runtime/jobs/{runId}", methods: {GET: GetJobRun}}
+  - {style: REST, path: "/v1/runtime/jobs/{runId}:pause", methods: {POST: PauseJob}}
+  - {style: REST, path: "/v1/runtime/jobs/{runId}:resume", methods: {POST: ResumeJob}}
+  - {style: REST, path: "/v1/runtime/jobs/{runId}:abort", methods: {POST: AbortJob}}
+  - {style: REST, path: "/v1/runtime/job-kinds", methods: {POST: DefineJob}}
+  - {style: REST, path: "/v1/runtime/schedules", methods: {POST: DefineSchedule}}
+  - {style: gRPC, service: "ucos.runtime.v1.JobLease (internal)", rpcs: [CheckpointJob]}
+
+events:
+  - {type: ucos.runtime.cell.registered.v1, payload: "{cell, region, kind}"}
+  - {type: ucos.runtime.cell.status-changed.v1, payload: "{cell, status}"}
+  - {type: ucos.runtime.cell.drain-started.v1, payload: "{cell, tenants}"}
+  - {type: ucos.runtime.tenant.placed.v1, payload: "{tenant, homeCell}"}
+  - {type: ucos.runtime.tenant.relocation-started.v1, payload: "{tenant, from, to}"}
+  - {type: ucos.runtime.tenant.relocated.v1, payload: "{tenant, from, to, freezeDuration}", consumers: [edge directory cache, all services]}
+  - {type: ucos.runtime.aggregate.rehomed.v1, payload: "{tenant, aggregateType, aggregateId, fromRegion, toRegion}", note: "Referenced by CIC-006-001 §6"}
+  - {type: ucos.runtime.job-kind.defined.v1, payload: "{jobKind}"}
+  - {type: ucos.runtime.job-run.started.v1, payload: "{runId, jobKind}"}
+  - {type: ucos.runtime.job-run.paused.v1, payload: "{runId}"}
+  - {type: ucos.runtime.job-run.resumed.v1, payload: "{runId}"}
+  - {type: ucos.runtime.job-run.aborted.v1, payload: "{runId, reason}"}
+  - {type: ucos.runtime.job-run.checkpointed.v1, payload: "{runId, processed, failed}"}
+  - {type: ucos.runtime.job-run.completed.v1, payload: "{runId, processed, failed}"}
+  - {type: ucos.runtime.schedule.defined.v1, payload: "{code, cron, jobKind}"}
+
+stateMachines:
+  - name: JobLifecycle
+    initial: queued
+    states: [queued, running, paused, completed, failed, aborted]
+    terminal: [completed, failed, aborted]
+    transitions:
+      - {from: queued, to: running, trigger: "worker acquires lease"}
+      - {from: running, to: paused, command: PauseJob}
+      - {from: paused, to: running, command: ResumeJob}
+      - {from: running, to: completed, trigger: "cursor exhausted"}
+      - {from: running, to: failed, trigger: "failure ratio > job policy or non-retryable error"}
+      - {from: [queued, running, paused], to: aborted, command: AbortJob}
+  - name: TenantPlacementState
+    initial: active
+    states: [active, frozen, relocating]
+    terminal: []
+    transitions:
+      - {from: active, to: relocating, command: RelocateTenant}
+      - {from: relocating, to: frozen, trigger: "final event catch-up begins (write freeze)"}
+      - {from: frozen, to: active, trigger: "directory switched to target cell"}
+
+rules:
+  - {id: RUL-RTM-1, statement: "Edge directory caches invalidate on tenant.relocated; requests during freeze receive 503 with Retry-After (writes) while reads continue from source."}
+  - {id: RUL-RTM-2, statement: "Job handlers must be idempotent per (runId, itemKey) and checkpoint at least every checkpointEvery items; on lease takeover processing resumes from the last checkpoint."}
+  - {id: RUL-RTM-3, statement: "Schedules with overlap=skip never start a run while a previous run of the same schedule is non-terminal."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:runtime.placement", purpose: "Placement rules (shared vs dedicated thresholds, blast-radius limit)"}
+
+decisions:
+  - {id: DEC-RTM-1, question: "Where should tenant T live?", algorithm: "PlacementAdvisor + runtime.placement + residency"}
+
+security:
+  permissions: [runtime.read, runtime.cell.manage, runtime.tenant.place, runtime.tenant.relocate, runtime.job.run, runtime.job.manage, runtime.schedule.define]
+  dataClassification: "Internal (topology); tenant placement confidential."
+  threats: ["Directory poisoning -> signed directory snapshots at edge; ops-only writes with approvals"]
+
+governance:
+  changeControl: "Relocations, drains, schedules via ChangeSet / ops runbooks (CIC-025-001)."
+  evidence: "Relocation reports (freeze duration, event counts) captured."
+
+runtimeBehavior:
+  consistency: "Directory strongly consistent in control plane; edge caches 60s TTL + push invalidation."
+  slo: {ResolveTenant_p99_ms: 2, directory_propagation_p99_s: 5, availability: "99.995% (control plane multi-region)"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_runtime (global control plane, multi-region replicated) + per-cell job tables
+  tables:
+    - {name: cells, columns: "id text pk, region, kind, status, body jsonb", global: true}
+    - {name: tenant_placements, columns: "tenant text pk, home_cell, standby_cell, status, version bigint", global: true}
+    - {name: job_runs, columns: "tenant_id, run_id, job_kind, status, cursor, progress jsonb, lease_holder, lease_expires_at", pk: "(tenant_id, run_id)", indexes: ["(status, lease_expires_at)"]}
+    - {name: schedules, columns: "tenant_id, code, body jsonb, enabled", pk: "(tenant_id, code)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "job_runs hash(tenant_id) 16."
+  retention: "Job runs 90 days; placements history indefinite."
+
+extensionModel:
+  extensionPoints: ["Job kinds registered by contexts and plugins", "Placement strategies"]
+  forbidden: ["Tenant routing logic outside the directory"]
+
+certificationCriteria:
+  - {id: CR-RTM-01, rule: "Passes CIC-020-001 CR-020-001-01 and CR-020-001-05.", level: L2}
+  - {id: CR-RTM-02, rule: "Residency: placement into a non-compliant region is rejected for all reference jurisdictions.", level: L1}
+  - {id: CR-RTM-03, rule: "Lease takeover test: killing a worker mid-run resumes from checkpoint with zero duplicate item effects.", level: L1}
+  - {id: CR-RTM-04, rule: "ResolveTenant p99 <= 2ms at edge with cache; propagation of relocation <= 5s p99.", level: L2}
+validationRules:
+  - {id: VR-RTM-01, rule: "Every resumable job referenced in specs (bill runs, migrations, rebuilds, materialization) has a registered job kind in reference deployments."}
+  - {id: VR-RTM-02, rule: "Every region declares residency zones consistent with privacy.residency."}

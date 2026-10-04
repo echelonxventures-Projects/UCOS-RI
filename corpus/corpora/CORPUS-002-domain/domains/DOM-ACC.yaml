@@ -1,0 +1,223 @@
+header:
+  id: DOM-ACC
+  title: Accounting Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-003-001, CIC-006-001, CIC-015-001, CIC-008-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-008, PRIN-011, PRIN-016, PRIN-022]
+  certification: [CR-ACC-01, CR-ACC-02, CR-ACC-03, CR-ACC-04]
+  validation: [VR-ACC-01, VR-ACC-02]
+
+purpose: >
+  Turn commercial and financial events into balanced, multi-currency accounting entries (a
+  commerce sub-ledger) with rule-driven posting, period control, FX revaluation, and reconciliation
+  — and own the currency registry and FX rates — so that every UCOS money movement is traceable to
+  the general ledger, whether UCOS posts natively or feeds an external ERP.
+
+scope:
+  includes:
+    - Currency registry (ISO 4217 + registered non-ISO units: loyalty points, tokens, credits) with minor units
+    - FX rate store (rate types: spot, daily-close, contract, budget) with sources and as-of
+    - Chart of accounts mapping (UCOS account keys -> tenant GL accounts per legal entity)
+    - Posting rules (fact kind posting-rule) mapping event types to journal templates
+    - Sub-ledger journal entries (double-entry, multi-currency: transaction, functional, reporting)
+    - Period control per legal entity fiscal calendar; FX revaluation runs; GL export to ERP
+  excludes:
+    - Revenue recognition schedules (DOM-REV produces events posted here)
+    - Cost computation (DOM-CST), invoicing (DOM-BIL), tax determination (DOM-TAX)
+
+responsibilities:
+  - Every posted entry balances in transaction and functional currency.
+  - Every financial event produces exactly one posting (or a recorded no-posting decision).
+  - Closed periods are immutable; corrections post to open periods.
+
+principles: [PRIN-001, PRIN-008, PRIN-011, PRIN-016, PRIN-022]
+
+boundaries:
+  upstream: [DOM-BIL, DOM-PAY, DOM-STL, DOM-REV, DOM-TAX, DOM-INV, DOM-CST, DOM-ORG, DOM-RUL]
+  downstream: [DOM-PRF, DOM-FCT, DOM-ANL, DOM-CMPL, DOM-PRC, DOM-DXC]
+  antiCorruption: "ERP export via DOM-DXC connectors; ERP account codes live only in chart-of-accounts mappings."
+
+ownership:
+  boundedContext: finance
+  owningRole: Chief Product Architect
+  service: accounting-service
+  schema: ucos_finance
+
+capabilities:
+  - {id: ACC-C1, name: Currencies & FX, description: "Currency registry and FX rates with lookup by asOf and rate type."}
+  - {id: ACC-C2, name: Posting, description: "Event -> journal entries via posting rules."}
+  - {id: ACC-C3, name: Periods, description: "Open/close periods per legal entity; enforce period locks."}
+  - {id: ACC-C4, name: Revaluation, description: "Periodic FX revaluation of open monetary balances."}
+  - {id: ACC-C5, name: GL export, description: "Summarized or detailed export to ERP with acknowledgements."}
+
+services:
+  - {name: CurrencyService, kind: application, operations: [RegisterCurrency, ImportFxRates, GetFxRate]}
+  - {name: PostingEngine, kind: domain-service, contract: "post(event) -> JournalEntry[] via posting rules (CIC-008-001 evaluation, fact kind posting-rule, hitPolicy unique); balances verified before persist; idempotent on (eventId, ruleRef)"}
+  - {name: LedgerCommandService, kind: application, operations: [DefineAccountMapping, PostManualEntry, ReverseEntry, OpenPeriod, ClosePeriod, StartRevaluation, ExportToGl]}
+  - {name: LedgerQueryService, kind: application, operations: [GetJournalEntry, FindJournalEntries, GetTrialBalance, GetAccountActivity, GetPeriodStatus]}
+
+aggregates:
+  - name: Currency
+    identity: "urn:ucos:global:currency:<code>"
+    invariants: ["INV-ACC-1: minor units 0..8 for ISO; non-ISO codes prefixed X- or tenant namespace; immutable minor units once used."]
+    fields:
+      - {name: code, type: string}
+      - {name: minorUnits, type: int}
+      - {name: kind, type: "fiat|points|token|credit"}
+      - {name: label, type: LocalizedText}
+  - name: FxRate
+    identity: "urn:ucos:<tenant|global>:fx:<from>-<to>:<rateType>:<asOf>"
+    invariants: ["INV-ACC-2: rates positive with 10 significant digits; inverse derived not stored unless sourced."]
+    fields:
+      - {name: from, type: CurrencyCode}
+      - {name: to, type: CurrencyCode}
+      - {name: rateType, type: "spot|daily-close|contract|budget"}
+      - {name: rate, type: "decimal(20,10)"}
+      - {name: asOf, type: Instant}
+      - {name: source, type: string}
+  - name: JournalEntry
+    identity: "urn:ucos:<tenant>:journal-entry:<ulid>"
+    invariants:
+      - "INV-ACC-3: Σ debits = Σ credits in transaction currency and in functional currency (rounding difference posted to a designated rounding account)."
+      - "INV-ACC-4: posting date falls in an open period of the legal entity."
+      - "INV-ACC-5: immutable once posted; reversal creates a mirrored entry."
+    fields:
+      - {name: legalEntity, type: InstanceUrn}
+      - {name: postingDate, type: Date}
+      - {name: sourceEventId, type: ULID}
+      - {name: ruleRef, type: MetadataUrn}
+      - {name: lines, type: "JournalLine[]"}
+      - {name: status, type: "posted|reversed"}
+      - {name: reversalOf, type: "InstanceUrn?"}
+  - name: AccountingPeriod
+    identity: "urn:ucos:<tenant>:period:<legalEntity>/<code>"
+    fields:
+      - {name: start, type: Date}
+      - {name: end, type: Date}
+      - {name: status, type: "open|closing|closed|reopened"}
+  - name: AccountMapping
+    identity: "urn:ucos:<tenant>:account-mapping:<legalEntity>/<accountKey>"
+    fields:
+      - {name: accountKey, type: "UCOS key (e.g. ar.trade, revenue.recurring, tax.output.vat, deferred-revenue, cash.clearing.psp, inventory.asset, cogs)"}
+      - {name: glAccount, type: string}
+      - {name: dimensions, type: "map (cost center, segment)"}
+
+entities:
+  - {name: JournalLine, within: JournalEntry, fields: [accountKey, "debit|credit", amountTxn (Money), amountFunctional (Money), fxRateRef, "dimensions {legalEntity, costCenter?, product?, market?, channel?}", sourceRef]}
+
+valueObjects:
+  - {name: TrialBalance, definition: "{legalEntity, period, accounts: [{accountKey, debit, credit, balance}], currency}"}
+
+commands:
+  - {name: RegisterCurrency, input: "Currency + changeSetRef", emits: [CurrencyRegistered]}
+  - {name: ImportFxRates, input: "{source, rateType, asOf, rates[]}", emits: [FxRatesImported]}
+  - {name: DefineAccountMapping, input: "AccountMapping + changeSetRef", emits: [AccountMappingDefined]}
+  - {name: PostManualEntry, input: "{legalEntity, postingDate, lines, reason, approvalRef}", emits: [JournalEntryPosted], preconditions: ["PDP accounting.manual-entry with SoD"]}
+  - {name: ReverseEntry, input: "{entryId, postingDate, reason}", emits: [JournalEntryReversed]}
+  - {name: OpenPeriod, input: "{legalEntity, code}", emits: [PeriodOpened]}
+  - {name: ClosePeriod, input: "{legalEntity, code, checklistEvidenceRef}", emits: [PeriodClosed], preconditions: ["no unposted financial events older than period end", "reconciliations green (CIC-025-001 §7)"]}
+  - {name: StartRevaluation, input: "{legalEntity, period, rateType}", emits: [RevaluationPosted], async: true}
+  - {name: ExportToGl, input: "{legalEntity, period, mode: summary|detail}", emits: [GlExportCompleted], async: true}
+
+queries:
+  - {name: GetFxRate, input: "{from, to, rateType, asOf}", output: "FxRate (nearest preceding asOf within staleness policy)"}
+  - {name: GetJournalEntry, input: "{id}", output: JournalEntry}
+  - {name: FindJournalEntries, input: "{legalEntity, period?, accountKey?, sourceEventId?, cursor}", output: "page"}
+  - {name: GetTrialBalance, input: "{legalEntity, period, currency: functional|reporting}", output: TrialBalance}
+  - {name: GetAccountActivity, input: "{legalEntity, accountKey, from, to}", output: "lines page"}
+  - {name: GetPeriodStatus, input: "{legalEntity, date}", output: AccountingPeriod}
+
+apis:
+  - {style: REST, path: "/v1/accounting/currencies", methods: {POST: RegisterCurrency}}
+  - {style: REST, path: "/v1/accounting/fx-rates", methods: {POST: ImportFxRates, GET: GetFxRate}}
+  - {style: REST, path: "/v1/accounting/account-mappings", methods: {POST: DefineAccountMapping}}
+  - {style: REST, path: "/v1/accounting/journal-entries", methods: {POST: PostManualEntry, GET: FindJournalEntries}}
+  - {style: REST, path: "/v1/accounting/journal-entries/{id}", methods: {GET: GetJournalEntry}}
+  - {style: REST, path: "/v1/accounting/journal-entries/{id}:reverse", methods: {POST: ReverseEntry}}
+  - {style: REST, path: "/v1/accounting/periods/{legalEntity}/{code}:open", methods: {POST: OpenPeriod}}
+  - {style: REST, path: "/v1/accounting/periods/{legalEntity}/{code}:close", methods: {POST: ClosePeriod}}
+  - {style: REST, path: "/v1/accounting/periods/{legalEntity}", methods: {GET: GetPeriodStatus}}
+  - {style: REST, path: "/v1/accounting/revaluations", methods: {POST: StartRevaluation}}
+  - {style: REST, path: "/v1/accounting/trial-balance", methods: {GET: GetTrialBalance}}
+  - {style: REST, path: "/v1/accounting/accounts/{accountKey}/activity", methods: {GET: GetAccountActivity}}
+  - {style: REST, path: "/v1/accounting/gl-exports", methods: {POST: ExportToGl}}
+
+events:
+  - {type: ucos.finance.currency.registered.v1, payload: "{code, minorUnits, kind}"}
+  - {type: ucos.finance.fx-rates.imported.v1, payload: "{source, rateType, asOf, count}", consumers: [pricing (conversion), billing]}
+  - {type: ucos.finance.account-mapping.defined.v1, payload: "{legalEntity, accountKey, glAccount}"}
+  - {type: ucos.finance.journal-entry.posted.v1, payload: "{id, legalEntity, postingDate, sourceEventId, totals}"}
+  - {type: ucos.finance.journal-entry.reversed.v1, payload: "{id, reversalId}"}
+  - {type: ucos.finance.period.opened.v1, payload: "{legalEntity, code}"}
+  - {type: ucos.finance.period.closed.v1, payload: "{legalEntity, code}", consumers: [billing, revenue, tax (lock checks)]}
+  - {type: ucos.finance.revaluation.posted.v1, payload: "{legalEntity, period, entries}"}
+  - {type: ucos.finance.gl-export.completed.v1, payload: "{legalEntity, period, entries, acknowledgementRef}"}
+
+stateMachines:
+  - name: PeriodLifecycle
+    initial: open
+    states: [open, closing, closed, reopened]
+    terminal: []
+    transitions:
+      - {from: open, to: closing, command: startClose}
+      - {from: closing, to: closed, command: ClosePeriod}
+      - {from: closing, to: open, command: cancelClose}
+      - {from: closed, to: reopened, command: reopen, guard: "Controller approval + evidence (SOX)"}
+      - {from: reopened, to: closed, command: ClosePeriod}
+
+rules:
+  - {id: RUL-ACC-1, statement: "Every financial event type (billing, payment, settlement, revenue, tax, inventory valuation) has exactly one applicable posting rule per legal entity context, or an explicit no-posting rule; missing rule -> event parked in posting-exception queue (Sev-3) and blocks period close."}
+  - {id: RUL-ACC-2, statement: "Functional amounts use FX rate type per posting rule (default daily-close at transaction date); rate staleness beyond policy accounting.fx-staleness fails posting."}
+  - {id: RUL-ACC-3, statement: "Events dated in closed periods post on the first day of the next open period with original date as reference."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:posting-rule.resolution", purpose: "ResolutionConfig for posting rules (unique hit, legal-entity precedence)"}
+  - {urn: "urn:ucos:ucos.std:policy:accounting.fx-staleness", purpose: "Maximum age of FX rates by rate type"}
+  - {urn: "urn:ucos:ucos.std:policy:accounting.manual-entry", purpose: "Manual journal authorization with SoD and thresholds"}
+
+decisions:
+  - {id: DEC-ACC-1, question: "How is event E posted?", algorithm: "PostingEngine with posting-rule resolution in context {legalEntity, jurisdiction, eventType}"}
+
+security:
+  permissions: [accounting.read, accounting.currency.manage, accounting.fx.import, accounting.mapping.manage, accounting.entry.manual, accounting.period.close, accounting.period.reopen, accounting.export]
+  dataClassification: "Confidential financial."
+  threats: ["Unauthorized manual entries -> SoD + approvals + audit (SOX ITGC)", "Backdated postings -> period locks"]
+
+governance:
+  changeControl: "Posting rules, account mappings, currency registry via ChangeSet with Finance Controller approval."
+  evidence: "Period close checklists, revaluation reports, GL export acknowledgements captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Postings idempotent and strongly consistent per entry; trial balance from incremental balances table."
+  slo: {posting_lag_p99_s: 30, GetTrialBalance_p99_ms: 500, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_finance (event-sourced; financial)
+  tables:
+    - {name: currencies, columns: "code text pk, minor_units int, kind text, body jsonb", global: true}
+    - {name: fx_rates, columns: "tenant_id, from_ccy, to_ccy, rate_type, as_of, rate numeric(20,10), source", pk: "(tenant_id, from_ccy, to_ccy, rate_type, as_of)"}
+    - {name: journal_entries, columns: "tenant_id, id, legal_entity, posting_date, source_event_id, rule_ref, status, reversal_of", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, source_event_id, rule_ref)", "(tenant_id, legal_entity, posting_date)"]}
+    - {name: journal_lines, columns: "tenant_id, entry_id, line_no, account_key, side, amount_txn_minor, txn_ccy, amount_fn_minor, fn_ccy, dimensions jsonb", pk: "(tenant_id, entry_id, line_no)"}
+    - {name: account_balances, columns: "tenant_id, legal_entity, period, account_key, debit_fn, credit_fn", pk: "(tenant_id, legal_entity, period, account_key)"}
+    - {name: periods, columns: "tenant_id, legal_entity, code, start_date, end_date, status", pk: "(tenant_id, legal_entity, code)"}
+    - {name: account_mappings, columns: "tenant_id, legal_entity, account_key, gl_account, dimensions jsonb", pk: "(tenant_id, legal_entity, account_key)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "journal_lines range(posting_date) monthly x hash(tenant_id) 16."
+  retention: "Financial retention (min 10 years)."
+
+extensionModel:
+  extensionPoints: ["Posting rules in packs (industry/jurisdiction)", "ERP connectors (DOM-DXC)", "FX rate source plugins"]
+  forbidden: ["Account codes in code", "Editing posted entries"]
+
+certificationCriteria:
+  - {id: CR-ACC-01, rule: "Every posted entry balances (property test over 10^6 random financial event sequences incl. multi-currency rounding).", level: L1}
+  - {id: CR-ACC-02, rule: "Completeness: every financial event in a period has a posting or explicit no-posting record before close.", level: L1}
+  - {id: CR-ACC-03, rule: "Closed periods reject postings (negative tests); reopen requires approval evidence.", level: L1}
+  - {id: CR-ACC-04, rule: "Posting lag p99 <= 30s at 10,000 financial events/s.", level: L2}
+validationRules:
+  - {id: VR-ACC-01, rule: "Every financial event type declared by BIL, PAY, STL, REV, TAX, INV has a posting rule in ucos.std or an explicit no-posting rule."}
+  - {id: VR-ACC-02, rule: "Every currency used in price lists and billing accounts is registered."}

@@ -1,0 +1,225 @@
+header:
+  id: DOM-MKT
+  title: Marketplaces Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-016-001, CIC-007-001, CIC-002-001]
+  traces: [PRIN-002, PRIN-007, PRIN-005, PRIN-016]
+  certification: [CR-MKT-01, CR-MKT-02, CR-MKT-03]
+  validation: [VR-MKT-01, VR-MKT-02]
+
+purpose: >
+  Let a tenant operate multi-seller commerce: onboard and verify sellers, let sellers list their
+  commercial objects and offers against shared or seller-owned catalog entries, govern listing
+  quality and policy compliance, route orders to sellers, and measure seller performance — with
+  settlement handled by DOM-STL and cross-tenant sharing via governed delegation.
+
+scope:
+  includes:
+    - Marketplace definition (operator tenant, participation model, policies, fee agreement templates)
+    - Seller accounts (seller party + KYB status + settlement agreement + storefront settings)
+    - Listings (seller offer of a commercial object: price list, stock source, condition, fulfillment mode)
+    - Listing moderation (policy checks, counterfeit/prohibited checks via DOM-CFT/DOM-RUL)
+    - Buy-box / offer selection among competing listings (policy-driven, explainable)
+    - Seller performance metrics and enforcement actions
+    - Cross-tenant participation (seller is another UCOS tenant) via delegation grants
+  excludes:
+    - Settlement and payouts (DOM-STL), payments (DOM-PAY), catalog structure (DOM-CAT), seller's own commercial objects (DOM-COB)
+
+responsibilities:
+  - Only verified sellers in good standing sell.
+  - Listings comply with marketplace policies before going live.
+  - Transparent, explainable selection among competing listings.
+
+principles: [PRIN-002, PRIN-005, PRIN-007, PRIN-016]
+
+boundaries:
+  upstream: [DOM-PTY, DOM-AUTH, DOM-COB, DOM-PRC, DOM-INV, DOM-CFT, DOM-FRD, DOM-RUL, DOM-TRST]
+  downstream: [DOM-CAT, DOM-ORD, DOM-STL, DOM-SRC, DOM-DST, DOM-REV]
+
+ownership:
+  boundedContext: marketplace
+  owningRole: Chief Product Architect
+  service: marketplace-service
+  schema: ucos_marketplace
+
+capabilities:
+  - {id: MKT-C1, name: Seller onboarding, description: "Application, KYB, agreement, activation."}
+  - {id: MKT-C2, name: Listings, description: "Create and maintain listings; map to catalog objects (match or create)."}
+  - {id: MKT-C3, name: Moderation, description: "Automated and manual listing compliance review."}
+  - {id: MKT-C4, name: Offer selection, description: "Choose featured listing per object and context (buy box)."}
+  - {id: MKT-C5, name: Seller performance, description: "Metrics, thresholds, enforcement."}
+
+services:
+  - {name: MarketplaceCommandService, kind: application, operations: [DefineMarketplace, ApplyAsSeller, ApproveSeller, SuspendSeller, ReinstateSeller, CreateListing, UpdateListing, SubmitListing, ModerateListing, PauseListing, EndListing]}
+  - {name: ListingMatcher, kind: domain-service, contract: "match(listing attributes, external IDs) -> existing catalog object | new object proposal; uses DOM-REF identifiers first, then similarity (plugin) with confidence"}
+  - {name: OfferSelector, kind: domain-service, contract: "select(objectRef, ctx, listings) -> featured listing + ranked alternatives; scoring policy marketplace.offer-selection (landed price, delivery promise, seller rating, stock); DecisionRecord sampled"}
+  - {name: MarketplaceQueryService, kind: application, operations: [GetMarketplace, GetSeller, FindListings, SelectOffer, GetSellerPerformance]}
+
+aggregates:
+  - name: Marketplace
+    identity: "urn:ucos:<tenant>:marketplace:<code>"
+    fields:
+      - {name: code, type: string}
+      - {name: participation, type: "invite-only|application|open"}
+      - {name: catalogModel, type: "shared-catalog|seller-catalog|hybrid"}
+      - {name: agreementTemplate, type: "SettlementAgreement template ref"}
+      - {name: policies, type: "policy URNs (listing rules, prohibited categories, performance thresholds)"}
+  - name: SellerAccount
+    identity: "urn:ucos:<tenant>:seller:<ulid>"
+    invariants: ["INV-MKT-1: active sellers have verified KYB (DOM-TRST/EVD evidence), an active settlement agreement (DOM-STL), and a payout method (DOM-PAY)."]
+    fields:
+      - {name: party, type: PartyUrn}
+      - {name: sellerTenant, type: "tenant code? (cross-tenant participation)"}
+      - {name: delegationRef, type: "DOM-AUTH delegation?"}
+      - {name: kybStatus, type: "pending|verified|failed"}
+      - {name: settlementAgreementRef, type: InstanceUrn}
+      - {name: storefront, type: "{name: LocalizedText, policies (returns, shipping) as LocalizedText}"}
+      - {name: lifecycleState, type: string}
+  - name: Listing
+    identity: "urn:ucos:<tenant>:listing:<ulid>"
+    invariants:
+      - "INV-MKT-2: listing references one catalog object (matched or newly created through governed COB create); seller active; price resolvable from the seller's price list in listing contexts."
+      - "INV-MKT-3: one active listing per (seller, object, condition)."
+    fields:
+      - {name: seller, type: InstanceUrn}
+      - {name: objectRef, type: InstanceUrn}
+      - {name: condition, type: "new|refurbished|used-like-new|used-good"}
+      - {name: priceListRef, type: InstanceUrn}
+      - {name: stockSource, type: "seller inventory node | marketplace-fulfilled node"}
+      - {name: fulfillmentMode, type: "seller-fulfilled|marketplace-fulfilled"}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: moderation, type: "{status, findings[]}"}
+      - {name: lifecycleState, type: string}
+
+entities: []
+
+valueObjects:
+  - {name: OfferSelection, definition: "{objectRef, featuredListing, alternatives[{listing, score}], reasons[], decisionRef?}"}
+  - {name: SellerPerformance, definition: "{seller, period, orderDefectRate, lateShipmentRate, cancellationRate, returnRate, rating}"}
+
+commands:
+  - {name: DefineMarketplace, input: "Marketplace + changeSetRef", emits: [MarketplaceDefined]}
+  - {name: ApplyAsSeller, input: "{marketplace, party, kybEvidenceRefs}", emits: [SellerApplied]}
+  - {name: ApproveSeller, input: "{sellerId, approvalRef}", emits: [SellerApproved], preconditions: ["INV-MKT-1"]}
+  - {name: SuspendSeller, input: "{sellerId, reason}", emits: [SellerSuspended], note: "Pauses all listings; settlement hold per policy"}
+  - {name: ReinstateSeller, input: "{sellerId}", emits: [SellerReinstated]}
+  - {name: CreateListing, input: "{seller, attributes|objectRef, condition, priceListRef, stockSource, fulfillmentMode, scope}", emits: [ListingCreated]}
+  - {name: UpdateListing, input: "{id, expectedRevision, patch}", emits: [ListingUpdated]}
+  - {name: SubmitListing, input: "{id}", emits: [ListingSubmitted]}
+  - {name: ModerateListing, input: "{id, outcome, findings}", emits: [ListingApproved, ListingRejected]}
+  - {name: PauseListing, input: "{id, reason}", emits: [ListingPaused]}
+  - {name: EndListing, input: "{id}", emits: [ListingEnded]}
+
+queries:
+  - {name: GetMarketplace, input: "{code}", output: Marketplace}
+  - {name: GetSeller, input: "{id}", output: SellerAccount}
+  - {name: FindListings, input: "{objectRef?, seller?, state?, cursor}", output: "page"}
+  - {name: SelectOffer, input: "{objectRef, context}", output: OfferSelection}
+  - {name: GetSellerPerformance, input: "{seller, period}", output: SellerPerformance}
+
+apis:
+  - {style: REST, path: "/v1/marketplace/marketplaces", methods: {POST: DefineMarketplace}}
+  - {style: REST, path: "/v1/marketplace/marketplaces/{code}", methods: {GET: GetMarketplace}}
+  - {style: REST, path: "/v1/marketplace/sellers", methods: {POST: ApplyAsSeller}}
+  - {style: REST, path: "/v1/marketplace/sellers/{id}", methods: {GET: GetSeller}}
+  - {style: REST, path: "/v1/marketplace/sellers/{id}:approve", methods: {POST: ApproveSeller}}
+  - {style: REST, path: "/v1/marketplace/sellers/{id}:suspend", methods: {POST: SuspendSeller}}
+  - {style: REST, path: "/v1/marketplace/sellers/{id}:reinstate", methods: {POST: ReinstateSeller}}
+  - {style: REST, path: "/v1/marketplace/sellers/{id}/performance", methods: {GET: GetSellerPerformance}}
+  - {style: REST, path: "/v1/marketplace/listings", methods: {POST: CreateListing, GET: FindListings}}
+  - {style: REST, path: "/v1/marketplace/listings/{id}", methods: {PATCH: UpdateListing}}
+  - {style: REST, path: "/v1/marketplace/listings/{id}:submit", methods: {POST: SubmitListing}}
+  - {style: REST, path: "/v1/marketplace/listings/{id}:moderate", methods: {POST: ModerateListing}}
+  - {style: REST, path: "/v1/marketplace/listings/{id}:pause", methods: {POST: PauseListing}}
+  - {style: REST, path: "/v1/marketplace/listings/{id}:end", methods: {POST: EndListing}}
+  - {style: REST, path: "/v1/marketplace:select-offer", methods: {POST: SelectOffer}}
+
+events:
+  - {type: ucos.marketplace.marketplace.defined.v1, payload: "{code, participation, catalogModel}"}
+  - {type: ucos.marketplace.seller.applied.v1, payload: "{id, party}"}
+  - {type: ucos.marketplace.seller.approved.v1, payload: "{id, settlementAgreementRef}"}
+  - {type: ucos.marketplace.seller.suspended.v1, payload: "{id, reason}", consumers: [settlement (holds), catalog]}
+  - {type: ucos.marketplace.seller.reinstated.v1, payload: "{id}"}
+  - {type: ucos.marketplace.listing.created.v1, payload: "{id, seller, objectRef}"}
+  - {type: ucos.marketplace.listing.updated.v1, payload: "{id, revision}"}
+  - {type: ucos.marketplace.listing.submitted.v1, payload: "{id}"}
+  - {type: ucos.marketplace.listing.approved.v1, payload: "{id, objectRef, scope}", consumers: [catalog membership, search]}
+  - {type: ucos.marketplace.listing.rejected.v1, payload: "{id, findings}"}
+  - {type: ucos.marketplace.listing.paused.v1, payload: "{id, reason}"}
+  - {type: ucos.marketplace.listing.ended.v1, payload: "{id}"}
+
+stateMachines:
+  - name: SellerLifecycle
+    initial: applied
+    states: [applied, under-review, active, suspended, terminated]
+    terminal: [terminated]
+    transitions:
+      - {from: applied, to: under-review, kind: automatic}
+      - {from: under-review, to: active, command: ApproveSeller}
+      - {from: under-review, to: terminated, command: reject}
+      - {from: active, to: suspended, command: SuspendSeller}
+      - {from: suspended, to: active, command: ReinstateSeller}
+      - {from: [active, suspended], to: terminated, command: terminate}
+  - name: ListingLifecycle
+    initial: draft
+    states: [draft, in-moderation, live, rejected, paused, ended]
+    terminal: [ended]
+    transitions:
+      - {from: draft, to: in-moderation, command: SubmitListing}
+      - {from: in-moderation, to: live, command: ModerateListing, guard: "approved"}
+      - {from: in-moderation, to: rejected, command: ModerateListing, guard: "rejected"}
+      - {from: rejected, to: draft, command: UpdateListing}
+      - {from: live, to: paused, command: PauseListing}
+      - {from: paused, to: live, command: resume}
+      - {from: [draft, live, paused, rejected], to: ended, command: EndListing}
+
+rules:
+  - {id: RUL-MKT-1, statement: "Order lines for marketplace listings carry seller in context (party role seller) so pricing uses the seller's price list, settlement accrues per agreement, and revenue applies principal/agent rules."}
+  - {id: RUL-MKT-2, statement: "Seller performance below policy thresholds triggers enforcement workflow (warning -> listing suppression -> suspension)."}
+  - {id: RUL-MKT-3, statement: "Cross-tenant sellers act via delegation; their data stays in their tenant; the operator receives only listing projections and order-fulfillment data needed under declared purposes."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:marketplace.offer-selection", purpose: "Buy-box scoring weights and eligibility"}
+  - {urn: "urn:ucos:ucos.std:policy:marketplace.seller-performance", purpose: "Performance thresholds and enforcement steps"}
+
+decisions:
+  - {id: DEC-MKT-1, question: "Which listing is featured for object X in context C?", algorithm: "OfferSelector with policy marketplace.offer-selection"}
+
+security:
+  permissions: [marketplace.read, marketplace.manage, marketplace.seller.apply, marketplace.seller.approve, marketplace.listing.manage, marketplace.listing.moderate]
+  dataClassification: "Seller commercial data confidential; buyer data shared with seller only for fulfillment purposes."
+  threats: ["Counterfeit listings -> moderation + DOM-CFT checks", "Seller account takeover -> payout method change controls (DOM-PAY) and risk holds (DOM-STL)"]
+
+governance:
+  changeControl: "Marketplace policies and selection weights via ChangeSet."
+  evidence: "KYB and moderation decisions captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per listing/seller; selection cached version-keyed by listing, price, stock events."
+  slo: {SelectOffer_p99_ms: 30, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_marketplace
+  tables:
+    - {name: marketplaces, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: sellers, columns: "tenant_id, id, party, seller_tenant, body jsonb, state", pk: "(tenant_id, id)"}
+    - {name: listings, columns: "tenant_id, id, seller_id, object_ref, condition, body jsonb, state, revision", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, seller_id, object_ref, condition) WHERE state <> 'ended'", "(tenant_id, object_ref, state)"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "listings hash(tenant_id) 64."
+  retention: "Listings history 3 years; sellers per legal retention."
+
+extensionModel:
+  extensionPoints: ["Listing matcher plugins", "Moderation plugins (image/text classifiers)", "Selection policies"]
+  forbidden: ["Seller-specific code"]
+
+certificationCriteria:
+  - {id: CR-MKT-01, rule: "Inactive or unverified sellers cannot have live listings (negative tests).", level: L1}
+  - {id: CR-MKT-02, rule: "OfferSelector deterministic for identical inputs and explains reasons.", level: L1}
+  - {id: CR-MKT-03, rule: "End-to-end marketplace order: seller pricing, settlement accrual, and agent revenue recognition consistent (scenario test).", level: L1}
+validationRules:
+  - {id: VR-MKT-01, rule: "Every marketplace references a settlement agreement template."}
+  - {id: VR-MKT-02, rule: "Every live listing's object is in a catalog of the marketplace."}

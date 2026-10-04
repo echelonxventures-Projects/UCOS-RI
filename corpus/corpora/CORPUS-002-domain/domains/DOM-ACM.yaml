@@ -1,0 +1,178 @@
+header:
+  id: DOM-ACM
+  title: Autonomous Commerce Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief AI Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-017-001, CIC-009-001, CIC-010-001, CIC-028-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-010, PRIN-011, CIC-017-001]
+  certification: [CR-ACM-01, CR-ACM-02, CR-ACM-03]
+  validation: [VR-ACM-01, VR-ACM-02]
+
+plugin:
+  id: ucos.ext.autonomous-commerce
+  isolation: I4
+  consumesPorts: [EventBusPort]
+  providesApis: ["/v1/autonomous-commerce/*"]
+  requiredPacks: ["ucos.std@^1.0"]
+
+purpose: >
+  Let agents transact with agents (CIC-017-001 §4): seller negotiation envelopes, structured
+  negotiation sessions expressed as Quote versions, verification of buyer agents' mandates,
+  settlement safety (holds/escrow), cooling-off windows, and dispute hooks — so machine-to-machine
+  commerce stays within human-set bounds and remains auditable.
+
+scope:
+  includes:
+    - Negotiation envelopes per offer/segment (price floor, max discount, allowed terms, max rounds)
+    - Negotiation sessions between a buyer agent and seller agent over DOM-QTE quote versions
+    - Mandate verification (DOM-AUTH mandates + DOM-TRST signatures) at offer, counter, and acceptance
+    - Settlement safety rules (payment holds/escrow via DOM-PAY for amounts above thresholds)
+    - Cooling-off and cancellation windows per jurisdiction
+  excludes:
+    - Agent runtime and tool execution (DOM-AGT), quote/order mechanics (DOM-QTE/DOM-ORD), pricing (DOM-PRC)
+
+responsibilities:
+  - No agreement outside the seller's envelope or the buyer's mandate.
+  - Every move priced by DOM-PRC and recorded as a DecisionRecord.
+
+principles: [PRIN-005, PRIN-010, PRIN-011]
+
+boundaries:
+  upstream: [DOM-AGT, DOM-QTE, DOM-PRC, DOM-AUTH, DOM-TRST, DOM-OFR, DOM-FRD]
+  downstream: [DOM-QTE, DOM-ORD, DOM-PAY, DOM-DEC]
+
+ownership:
+  boundedContext: automation
+  owningRole: Chief AI Architect
+  service: autonomous-commerce-service
+  schema: ucos_automation
+
+capabilities:
+  - {id: ACM-C1, name: Envelopes, description: "Seller-defined negotiation bounds."}
+  - {id: ACM-C2, name: Negotiate, description: "Structured offer/counter-offer sessions."}
+  - {id: ACM-C3, name: Mandates, description: "Verify buyer agent authority at each step."}
+  - {id: ACM-C4, name: Safety, description: "Holds, cooling-off, cancellation."}
+
+services:
+  - {name: NegotiationCommandService, kind: application, operations: [DefineEnvelope, OpenNegotiation, ProposeTerms, CounterTerms, AcceptTerms, WithdrawNegotiation]}
+  - {name: EnvelopeGuard, kind: domain-service, contract: "check(proposal, envelope, mandate) -> within|outside(reasons); proposal priced by DOM-PRC with manual adjustment phase constrained by envelope"}
+  - {name: NegotiationQueryService, kind: application, operations: [GetNegotiation, GetEnvelope]}
+
+aggregates:
+  - name: NegotiationEnvelope
+    identity: "urn:ucos:<tenant>:negotiation-envelope:<ulid>"
+    invariants: ["INV-ACM-1: floor >= cost floor (pricing.floor); maxDiscount <= seller agent's authority limit."]
+    fields:
+      - {name: scope, type: "offers/segments ApplicabilityScope"}
+      - {name: priceFloorPct, type: "decimal (of list)"}
+      - {name: maxDiscountPct, type: decimal}
+      - {name: allowedTerms, type: "[payment terms, delivery windows, commitment lengths]"}
+      - {name: maxRounds, type: int}
+      - {name: sellerAgentRef, type: InstanceUrn}
+  - name: Negotiation
+    identity: "urn:ucos:<tenant>:negotiation:<ulid>"
+    invariants:
+      - "INV-ACM-2: every proposal is a Quote version priced by DOM-PRC and checked by EnvelopeGuard and buyer mandate before being presented."
+      - "INV-ACM-3: acceptance requires valid, unexhausted buyer mandate covering amount and counterparty."
+    fields:
+      - {name: buyerAgent, type: PartyUrn}
+      - {name: sellerAgent, type: PartyUrn}
+      - {name: quoteRef, type: InstanceUrn}
+      - {name: rounds, type: "[{by, quoteVersion, decisionRef, at}]"}
+      - {name: mandateRef, type: InstanceUrn}
+      - {name: status, type: string}
+
+entities: []
+
+valueObjects:
+  - {name: Terms, definition: "{lines (offers+configs), price (from quote version), paymentTerms, deliveryWindow, commitment}"}
+
+commands:
+  - {name: DefineEnvelope, input: "NegotiationEnvelope + changeSetRef", emits: [NegotiationEnvelopeDefined]}
+  - {name: OpenNegotiation, input: "{buyerAgent, sellerAgent, offers, mandateRef}", emits: [NegotiationOpened]}
+  - {name: ProposeTerms, input: "{negotiationId, terms}", emits: [TermsProposed]}
+  - {name: CounterTerms, input: "{negotiationId, terms}", emits: [TermsCountered]}
+  - {name: AcceptTerms, input: "{negotiationId, round}", emits: [NegotiationAgreed], note: "Converts quote (DOM-QTE) to order with payment hold per policy"}
+  - {name: WithdrawNegotiation, input: "{negotiationId, reason}", emits: [NegotiationWithdrawn]}
+
+queries:
+  - {name: GetNegotiation, input: "{id}", output: Negotiation}
+  - {name: GetEnvelope, input: "{id}", output: NegotiationEnvelope}
+
+apis:
+  - {style: REST, path: "/v1/autonomous-commerce/envelopes", methods: {POST: DefineEnvelope}}
+  - {style: REST, path: "/v1/autonomous-commerce/envelopes/{id}", methods: {GET: GetEnvelope}}
+  - {style: REST, path: "/v1/autonomous-commerce/negotiations", methods: {POST: OpenNegotiation}}
+  - {style: REST, path: "/v1/autonomous-commerce/negotiations/{id}", methods: {GET: GetNegotiation}}
+  - {style: REST, path: "/v1/autonomous-commerce/negotiations/{id}/proposals", methods: {POST: ProposeTerms}}
+  - {style: REST, path: "/v1/autonomous-commerce/negotiations/{id}/counters", methods: {POST: CounterTerms}}
+  - {style: REST, path: "/v1/autonomous-commerce/negotiations/{id}:accept", methods: {POST: AcceptTerms}}
+  - {style: REST, path: "/v1/autonomous-commerce/negotiations/{id}:withdraw", methods: {POST: WithdrawNegotiation}}
+
+events:
+  - {type: ucos.automation.negotiation-envelope.defined.v1, payload: "{id, scope}"}
+  - {type: ucos.automation.negotiation.opened.v1, payload: "{id, buyerAgent, sellerAgent}"}
+  - {type: ucos.automation.negotiation.terms-proposed.v1, payload: "{id, round, quoteVersion}"}
+  - {type: ucos.automation.negotiation.terms-countered.v1, payload: "{id, round, quoteVersion}"}
+  - {type: ucos.automation.negotiation.agreed.v1, payload: "{id, quoteRef, orderRef}", consumers: [orders, payments (hold), decisions]}
+  - {type: ucos.automation.negotiation.withdrawn.v1, payload: "{id, reason}"}
+
+stateMachines:
+  - name: NegotiationLifecycle
+    initial: open
+    states: [open, proposed, countered, agreed, withdrawn, expired]
+    terminal: [agreed, withdrawn, expired]
+    transitions:
+      - {from: [open, countered], to: proposed, command: ProposeTerms}
+      - {from: proposed, to: countered, command: CounterTerms, guard: "rounds < envelope.maxRounds"}
+      - {from: [proposed, countered], to: agreed, command: AcceptTerms, guard: "INV-ACM-2/3"}
+      - {from: [open, proposed, countered], to: withdrawn, command: WithdrawNegotiation}
+      - {from: [open, proposed, countered], to: expired, trigger: "quote validUntil or max rounds reached"}
+
+rules:
+  - {id: RUL-ACM-1, statement: "Agent-agreed orders above policy acm.settlement-safety thresholds create payment holds/escrow and respect jurisdictional cooling-off cancellation windows."}
+  - {id: RUL-ACM-2, statement: "All moves record DecisionRecords (agent-action) linking both agents' act chains."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:acm.negotiation-envelope", purpose: "Default envelope bounds per offer class (CIC-017-001 §4)"}
+  - {urn: "urn:ucos:ucos.std:policy:acm.settlement-safety", purpose: "Hold thresholds and cooling-off windows"}
+
+decisions:
+  - {id: DEC-ACM-1, question: "May these terms be offered/accepted?", algorithm: "EnvelopeGuard + mandate check + PDP"}
+
+security:
+  permissions: [acm.read, acm.envelope.manage, acm.negotiate]
+  dataClassification: "Confidential (negotiated terms)."
+  threats: ["Collusive agents -> envelopes and mandates bound by humans; anomaly detection (DOM-CYR)", "Mandate replay -> mandate usage ledger (exhaustion)"]
+
+governance:
+  changeControl: "Envelopes via ChangeSet."
+  evidence: "Mandates and agreed terms as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per negotiation."
+  slo: {ProposeTerms_p99_ms: 500, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_automation (separate tables)
+  tables:
+    - {name: negotiation_envelopes, columns: "tenant_id, id, body jsonb", pk: "(tenant_id, id)"}
+    - {name: negotiations, columns: "tenant_id, id, buyer_agent, seller_agent, quote_ref, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Agreed negotiations with contract retention."
+
+extensionModel:
+  extensionPoints: ["Negotiation strategies (agent-side)", "Inter-platform agent protocols via DOM-FED"]
+  forbidden: ["Agreements outside envelopes or mandates"]
+
+certificationCriteria:
+  - {id: CR-ACM-01, rule: "Proposals outside envelope or mandate are rejected in 100% of fuzzed negotiations.", level: L1}
+  - {id: CR-ACM-02, rule: "Agreed terms equal the accepted quote version priced by DOM-PRC (replay).", level: L1}
+  - {id: CR-ACM-03, rule: "Plugin deploys as I4 with only declared ports.", level: L2}
+validationRules:
+  - {id: VR-ACM-01, rule: "Every envelope floor respects pricing.floor."}
+  - {id: VR-ACM-02, rule: "Every seller agent referenced is provisioned in DOM-AGT."}

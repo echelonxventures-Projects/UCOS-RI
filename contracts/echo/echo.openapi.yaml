@@ -1,0 +1,112 @@
+# Hand-authored S0 contract (CIC-030-001 §3, slice S0 exit: "echo context with event round-trip").
+# `echo` is a platform demonstration context, not a corpus domain; it exercises every S0 mechanism:
+# security filter, idempotent commands, RLS-scoped persistence, event store + outbox, relay, idempotent consumer.
+openapi: 3.1.0
+info:
+  title: Echo (S0 platform demonstration) — API
+  version: 1.0.0
+  description: >
+    AcceptMessage stores a message and emits ucos.echo.message.accepted.v1 through the transactional outbox.
+    The relay publishes it on the event bus; the echo consumer receives it and records
+    ucos.echo.message.echoed.v1, moving the message to status `echoed`. Polling GetMessage therefore
+    demonstrates a full command → outbox → bus → consumer → event round-trip.
+x-ucos-source: {id: S0-ECHO, version: 1.0.0, boundedContext: echo, service: echo-service, traces: [CIC-030-001, CIC-006-001, CIC-003-001, CIC-005-001]}
+servers: [{url: /}]
+paths:
+  /v1/echo/messages:
+    post:
+      operationId: AcceptMessage
+      summary: Accept a message for echo
+      x-ucos-kind: command
+      x-ucos-permission: echo.write
+      x-ucos-emits: [MessageAccepted]
+      parameters:
+        - $ref: '#/components/parameters/UcosTenant'
+        - $ref: '#/components/parameters/Traceparent'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AcceptMessageRequest'}
+      responses:
+        '201':
+          description: Message accepted (replays of the same Idempotency-Key return this response unchanged)
+          headers:
+            ETag: {schema: {type: string}, description: '"<revision>"'}
+            Location: {schema: {type: string}}
+            UCOS-Correlation-Id: {schema: {$ref: ../kernel/ulid.schema.json}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Message'}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/echo/messages/{id}:
+    get:
+      operationId: GetMessage
+      summary: Get a message
+      x-ucos-kind: query
+      x-ucos-permission: echo.read
+      parameters:
+        - {name: id, in: path, required: true, schema: {$ref: ../kernel/ulid.schema.json}}
+        - $ref: '#/components/parameters/UcosTenant'
+        - $ref: '#/components/parameters/Traceparent'
+      responses:
+        '200':
+          description: The message
+          headers:
+            ETag: {schema: {type: string}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Message'}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/echo/events:
+    get:
+      operationId: ReplayEvents
+      summary: Event replay for one aggregate (CIC-006-001 §4 gap recovery)
+      x-ucos-kind: query
+      x-ucos-permission: echo.read
+      parameters:
+        - {name: aggregateId, in: query, required: true, schema: {$ref: ../kernel/ulid.schema.json}}
+        - {name: fromSequence, in: query, required: false, schema: {type: integer, minimum: 1, default: 1}}
+        - $ref: '#/components/parameters/UcosTenant'
+        - $ref: '#/components/parameters/Traceparent'
+      responses:
+        '200':
+          description: Events of the aggregate in sequence order, as CloudEvents
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: {type: array, items: {$ref: ../kernel/cloudevent.schema.json}}
+        default: {$ref: '#/components/responses/Problem'}
+components:
+  schemas:
+    AcceptMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text: {type: string, minLength: 1, maxLength: 280}
+    Message:
+      type: object
+      required: [id, urn, text, status, revision, acceptedAt]
+      properties:
+        id: {$ref: ../kernel/ulid.schema.json}
+        urn: {$ref: ../kernel/urn.schema.json}
+        text: {type: string}
+        status: {type: string, enum: [accepted, echoed]}
+        revision: {type: integer, minimum: 1}
+        acceptedAt: {type: string, format: date-time}
+        echoedAt: {type: [string, 'null'], format: date-time}
+  parameters:
+    UcosTenant: {name: UCOS-Tenant, in: header, required: true, schema: {type: string, pattern: '^[a-z][a-z0-9-]{1,62}$'}}
+    Traceparent: {name: traceparent, in: header, required: false, schema: {type: string}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 128}}
+  responses:
+    Problem:
+      description: RFC 9457 problem
+      content:
+        application/problem+json:
+          schema: {$ref: ../kernel/problem.schema.json}

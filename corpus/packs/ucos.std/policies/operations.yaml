@@ -1,0 +1,84 @@
+# Policies for DOM-FUL, LOG, SDL, SUPN, MKT, DST, CMP, PFL, RGT.
+defaults: &cfg
+  kind: configuration
+  layer: platform
+  scope: {}
+
+policies:
+  - <<: *cfg
+    name: fulfillment.substitution
+    outputSchema: {type: object, required: [allowed, requiresConsent], properties: {allowed: {type: boolean}, requiresConsent: {type: boolean}, maxPriceIncreasePercent: {type: integer, minimum: 0}}}
+    body: {language: static, source: &fulSub {allowed: false, requiresConsent: true, maxPriceIncreasePercent: 0}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *fulSub}]
+
+  - <<: *cfg
+    name: fulfillment.short-pick
+    outputSchema: {type: object, required: [actions], properties: {actions: {type: array, items: {enum: [re-source, backorder, cancel-line, notify-customer]}}}}
+    body: {language: static, source: &fulShort {actions: [re-source, backorder, notify-customer]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *fulShort}]
+
+  - <<: *cfg
+    name: logistics.carrier-selection
+    outputSchema: {type: object, required: [weights], properties: {weights: {type: object, required: [cost, promiseFit, carbon], properties: {cost: {type: integer, minimum: 0}, promiseFit: {type: integer, minimum: 0}, carbon: {type: integer, minimum: 0}}}, excludeServicesMissingPromiseBy: {type: string}}}
+    body: {language: static, source: &logSel {weights: {cost: 50, promiseFit: 40, carbon: 10}, excludeServicesMissingPromiseBy: P0D}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *logSel}]
+
+  - <<: *cfg
+    name: service-delivery.retry
+    outputSchema: {type: object, required: [maxAttempts, backoff], properties: {maxAttempts: {type: integer, minimum: 1, maximum: 20}, backoff: {type: object, required: [initial, max], properties: {initial: {type: string, pattern: "^PT"}, max: {type: string, pattern: "^PT"}}}}}
+    body: {language: static, source: &sdlRetry {maxAttempts: 5, backoff: {initial: PT30S, max: PT30M}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *sdlRetry}]
+
+  - <<: *cfg
+    name: supply.replenishment
+    outputSchema: {type: object, required: [defaultMethod, params], properties: {defaultMethod: {enum: [min-max, reorder-point, forecast-cover]}, params: {type: object}, approvalAboveMinor: {type: integer, minimum: 0}}}
+    body: {language: static, source: &supnRepl {defaultMethod: reorder-point, params: {serviceLevel: 0.95, reviewPeriodDays: 7, forecastCoverDays: 21}, approvalAboveMinor: 2500000}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *supnRepl}]
+
+  - <<: *cfg
+    name: supply.receipt-tolerance
+    outputSchema: {type: object, required: [overReceiptPercent, underReceiptPercent, priceVariancePercent], properties: {overReceiptPercent: {type: number, minimum: 0}, underReceiptPercent: {type: number, minimum: 0}, priceVariancePercent: {type: number, minimum: 0}}}
+    body: {language: static, source: &supnTol {overReceiptPercent: 2, underReceiptPercent: 5, priceVariancePercent: 1}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *supnTol}]
+
+  - <<: *cfg
+    name: marketplace.offer-selection
+    outputSchema: {type: object, required: [weights, eligibility], properties: {weights: {type: object}, eligibility: {type: object}}}
+    body: {language: static, source: &mktSel {weights: {landedPrice: 45, deliveryPromise: 25, sellerRating: 20, stockConfidence: 10}, eligibility: {minSellerRating: 3.5, maxOrderDefectRate: 0.01, requireInStock: true}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *mktSel}]
+
+  - <<: *cfg
+    name: marketplace.seller-performance
+    outputSchema: {type: object, required: [thresholds, enforcementSteps], properties: {thresholds: {type: object}, enforcementSteps: {type: array, items: {enum: [warning, listing-suppression, suspension]}}}}
+    body: {language: static, source: &mktPerf {thresholds: {orderDefectRate: 0.01, lateShipmentRate: 0.04, cancellationRate: 0.025}, enforcementSteps: [warning, listing-suppression, suspension]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *mktPerf}]
+
+  - <<: *cfg
+    name: distribution.withdrawal-sla
+    outputSchema: {type: object, required: [sla], properties: {sla: {type: string, pattern: "^PT"}}}
+    body: {language: static, source: &dstSla {sla: PT4H}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *dstSla}]
+
+  - <<: *cfg
+    name: campaign.margin-check
+    outputSchema: {type: object, required: [mandatoryWhen], properties: {mandatoryWhen: {type: object, properties: {discountPercentAbove: {type: integer}, budgetAboveMinor: {type: integer}}}}}
+    body: {language: static, source: &cmpMargin {mandatoryWhen: {discountPercentAbove: 15, budgetAboveMinor: 1000000}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *cmpMargin}]
+
+  - <<: *cfg
+    name: campaign.approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &cmpApproval {measure: maxDiscountPercent, tiers: [{upTo: 15, stages: [{approverRoles: [marketing-manager], quorum: 1}]}, {upTo: 40, stages: [{approverRoles: [marketing-manager], quorum: 1}, {approverRoles: [pricing-manager], quorum: 1}]}, {upTo: unbounded, stages: [{approverRoles: [marketing-manager], quorum: 1}, {approverRoles: [pricing-manager], quorum: 1}, {approverRoles: [commercial-director], quorum: 1}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *cmpApproval}]
+
+  - <<: *cfg
+    name: portfolio.end-of-life
+    outputSchema: {type: object, required: [requireMigrationOffer, maxActiveEntitlements], properties: {requireMigrationOffer: {type: boolean}, maxActiveEntitlements: {type: integer, minimum: 0}, overrideApproverRoles: {type: array}}}
+    body: {language: static, source: &pflEol {requireMigrationOffer: true, maxActiveEntitlements: 0, overrideApproverRoles: [commercial-director]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *pflEol}]
+
+  - <<: *cfg
+    name: rights.expiry-warning
+    outputSchema: {type: object, required: [horizon], properties: {horizon: {type: string, pattern: "^P"}}}
+    body: {language: static, source: &rgtWarn {horizon: P60D}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *rgtWarn}]

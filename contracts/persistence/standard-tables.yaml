@@ -1,0 +1,34 @@
+# Language-neutral persistence contract: the standard tables every bounded-context schema carries
+# (CIC-003-001 §4) and the tenancy rules (CIC-003-001 §5). Verified black-box by
+# conformance/s0/test_persistence_standard.py against the live catalog of every ucos_* schema.
+id: S0-PERSISTENCE
+version: 1.0.0
+traces: [CIC-003-001, CIC-014-001, CR-003-001-01]
+standardTables:
+  event_store:
+    columns: {tenant_id: uuid, aggregate_type: text, aggregate_id: character, sequence: bigint, event_id: character,
+              event_type: text, schema_version: text, occurred_at: timestamp with time zone,
+              recorded_at: timestamp with time zone, correlation_id: character, causation_id: character,
+              principal: text, payload: jsonb, payload_enc_key: text}
+    partitioned: range
+    tenantScoped: true
+  outbox:
+    columns: {id: bigint, event_id: character, topic: text, partition_key: text, envelope: jsonb,
+              created_at: timestamp with time zone, published_at: timestamp with time zone}
+    tenantScoped: false   # see docs/amendment-requests.md AR-0001
+  snapshots:
+    columns: {tenant_id: uuid, aggregate_id: character, sequence: bigint, state: jsonb, taken_at: timestamp with time zone}
+    tenantScoped: true
+  processed_messages:
+    columns: {consumer: text, event_id: character, processed_at: timestamp with time zone}
+    tenantScoped: false   # see docs/amendment-requests.md AR-0001
+tenancy:
+  # Every table that has tenant_id: tenant_id is the first PK column; RLS enabled AND forced;
+  # a policy using current_setting('ucos.tenant_id')::uuid for both USING and WITH CHECK.
+  settingName: ucos.tenant_id
+  forceRowSecurity: true
+  serviceRoles: {superuser: false, bypassrls: false, ddl: false}
+  nonTenantTables:
+    # Tables without tenant_id are platform bookkeeping; the service role may only INSERT into outbox
+    # (never SELECT), and only the relay role may read/update it.
+    outbox: {serviceRole: [INSERT], relayRole: [SELECT, UPDATE]}

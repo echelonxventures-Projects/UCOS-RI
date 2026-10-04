@@ -1,0 +1,237 @@
+header:
+  id: DOM-STL
+  title: Settlement Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-004, CIC-008-001, CIC-015-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-005, PRIN-008, PRIN-016]
+  certification: [CR-STL-01, CR-STL-02, CR-STL-03, CR-STL-04]
+  validation: [VR-STL-01, VR-STL-02]
+
+purpose: >
+  Compute and pay what is owed between the parties of multi-party commerce — marketplace sellers,
+  resellers, distributors, agents, affiliates, licensors (royalties), partners (revenue share),
+  carriers and service providers — through settlement agreements, accrual of settlement items from
+  commercial events, periodic statements, netting, holds, withholding, and payout instructions.
+
+scope:
+  includes:
+    - SettlementAgreement (terms: commission/fee/revenue-share/royalty models, schedules, reserves, netting)
+    - Settlement items accrued from events (orders, invoices, payments, refunds, chargebacks, usage)
+    - Settlement statements per counterparty and period; disputes and adjustments
+    - Reserves and holds (risk-based, policy-based), withholding tax via DOM-TAX
+    - Payout instructions to DOM-PAY (payout-funding intents) and remittance advice
+  excludes:
+    - Customer payments and PSP settlement reconciliation (DOM-PAY)
+    - Marketplace onboarding/listing (DOM-MKT), accounting (DOM-ACC)
+
+responsibilities:
+  - Every settleable event produces settlement items per applicable agreements, exactly once.
+  - Statements are reproducible and reconcile to items.
+  - Payouts never exceed available (net of reserves, holds, negative balances).
+
+principles: [PRIN-001, PRIN-005, PRIN-008, PRIN-016]
+
+boundaries:
+  upstream: [DOM-ORD, DOM-BIL, DOM-PAY, DOM-ENT, DOM-MKT, DOM-CTR, DOM-TAX, DOM-FRK, DOM-PRC]
+  downstream: [DOM-PAY, DOM-ACC, DOM-PRF, DOM-ANL, DOM-DOC]
+
+ownership:
+  boundedContext: settlement
+  owningRole: Chief Product Architect
+  service: settlement-service
+  schema: ucos_settlement
+
+capabilities:
+  - {id: STL-C1, name: Agreements, description: "Define settlement terms per counterparty with versioning."}
+  - {id: STL-C2, name: Accrue, description: "Accrue settlement items from events using settlement rules."}
+  - {id: STL-C3, name: Statements, description: "Periodic statements with netting, reserves, adjustments."}
+  - {id: STL-C4, name: Payouts, description: "Instruct payouts with remittance advice; handle failures."}
+  - {id: STL-C5, name: Holds & reserves, description: "Risk/policy-driven holds and rolling reserves."}
+
+services:
+  - {name: SettlementAgreementService, kind: application, operations: [CreateSettlementAgreement, AmendSettlementAgreement, TerminateSettlementAgreement]}
+  - {name: SettlementAccrualEngine, kind: domain-service, contract: "accrue(event) -> SettlementItem[] via settlement rules (fact kind settlement-rule) and agreement models (PriceModel reuse: percentage-of, tiered, flat, formula); idempotent on (eventId, agreementId, ruleRef)"}
+  - {name: StatementService, kind: application, operations: [GenerateStatement, FinalizeStatement, AdjustStatement, DisputeStatementLine, ResolveStatementDispute]}
+  - {name: PayoutService, kind: application, operations: [InstructPayout, RecordPayoutResult, PlaceHold, ReleaseHold]}
+  - {name: SettlementQueryService, kind: application, operations: [GetSettlementAgreement, GetBalance, GetStatement, FindSettlementItems, GetPayout]}
+
+aggregates:
+  - name: SettlementAgreement
+    identity: "urn:ucos:<tenant>:settlement-agreement:<ulid>"
+    invariants: ["INV-STL-1: one active agreement version per (counterparty, scope, role) at any instant; models validate as PriceModels; schedule and currency set."]
+    fields:
+      - {name: counterparty, type: PartyUrn}
+      - {name: role, type: "seller|reseller|distributor|agent|affiliate|licensor|partner|provider"}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: models, type: "[{itemKind: commission|fee|revenue-share|royalty|rebate|chargeback-pass-through, basis: gross|net|margin|units, priceModel}]"}
+      - {name: schedule, type: "{period: P1W|P2W|P1M, statementDayOffset, payoutDelayDays}"}
+      - {name: reserve, type: "{percent, holdDays}?"}
+      - {name: netting, type: boolean}
+      - {name: currency, type: CurrencyCode}
+      - {name: contractRef, type: "InstanceUrn?"}
+      - {name: version, type: int}
+      - {name: status, type: "active|suspended|terminated"}
+  - name: SettlementStatement
+    identity: "urn:ucos:<tenant>:settlement-statement:<ulid>"
+    invariants:
+      - "INV-STL-2: statement total = Σ items + adjustments - reserves held + reserves released, exactly; finalized statements immutable."
+      - "INV-STL-3: payable = max(0, opening balance + total); negative carried forward when netting=true."
+    fields:
+      - {name: counterparty, type: PartyUrn}
+      - {name: period, type: "{from, to}"}
+      - {name: openingBalance, type: Money}
+      - {name: itemsTotal, type: Money}
+      - {name: adjustments, type: Money}
+      - {name: reserveMovement, type: Money}
+      - {name: withholding, type: Money}
+      - {name: payable, type: Money}
+      - {name: status, type: "draft|finalized|paid|partially-paid|disputed"}
+  - name: Payout
+    identity: "urn:ucos:<tenant>:payout:<ulid>"
+    invariants: ["INV-STL-4: payout amount <= statement payable minus active holds; idempotent instruction to DOM-PAY."]
+    fields:
+      - {name: statementRef, type: InstanceUrn}
+      - {name: amount, type: Money}
+      - {name: destination, type: "payout method ref (DOM-PAY)"}
+      - {name: paymentIntentRef, type: "InstanceUrn?"}
+      - {name: status, type: "instructed|sent|settled|failed|returned"}
+
+entities:
+  - {name: SettlementItem, within: "ledger (per counterparty)", fields: [itemId, agreementRef, sourceEventId, sourceRef, itemKind, amount, currency, occurredAt, statementRef]}
+  - {name: Hold, within: "counterparty balance", fields: [holdId, reason, amount, placedBy, until, status]}
+
+valueObjects:
+  - {name: Balance, definition: "{counterparty, currency, accruedUnstated, statedUnpaid, reserves, holds, available}"}
+
+commands:
+  - {name: CreateSettlementAgreement, input: "SettlementAgreement", emits: [SettlementAgreementCreated]}
+  - {name: AmendSettlementAgreement, input: "{id, changes, effectiveFrom, approvalRef}", emits: [SettlementAgreementAmended]}
+  - {name: TerminateSettlementAgreement, input: "{id, effectiveAt}", emits: [SettlementAgreementTerminated]}
+  - {name: GenerateStatement, input: "{counterparty, period}", emits: [SettlementStatementGenerated]}
+  - {name: FinalizeStatement, input: "{statementId}", emits: [SettlementStatementFinalized]}
+  - {name: AdjustStatement, input: "{statementId | counterparty, amount, reasonCode, approvalRef}", emits: [SettlementAdjusted]}
+  - {name: DisputeStatementLine, input: "{statementId, itemIds, reason}", emits: [SettlementDisputeOpened]}
+  - {name: ResolveStatementDispute, input: "{disputeId, outcome, adjustment?}", emits: [SettlementDisputeResolved]}
+  - {name: InstructPayout, input: "{statementId, amount?}", emits: [PayoutInstructed]}
+  - {name: RecordPayoutResult, input: "{payoutId, result}", emits: [PayoutSettled, PayoutFailed]}
+  - {name: PlaceHold, input: "{counterparty, amount|all, reason, until?}", emits: [SettlementHoldPlaced]}
+  - {name: ReleaseHold, input: "{holdId}", emits: [SettlementHoldReleased]}
+
+queries:
+  - {name: GetSettlementAgreement, input: "{id}", output: SettlementAgreement}
+  - {name: GetBalance, input: "{counterparty, currency}", output: Balance}
+  - {name: GetStatement, input: "{id}", output: "SettlementStatement + items page"}
+  - {name: FindSettlementItems, input: "{counterparty, period?, sourceRef?, cursor}", output: "page"}
+  - {name: GetPayout, input: "{id}", output: Payout}
+
+apis:
+  - {style: REST, path: "/v1/settlement/agreements", methods: {POST: CreateSettlementAgreement}}
+  - {style: REST, path: "/v1/settlement/agreements/{id}", methods: {GET: GetSettlementAgreement}}
+  - {style: REST, path: "/v1/settlement/agreements/{id}/amendments", methods: {POST: AmendSettlementAgreement}}
+  - {style: REST, path: "/v1/settlement/agreements/{id}:terminate", methods: {POST: TerminateSettlementAgreement}}
+  - {style: REST, path: "/v1/settlement/statements", methods: {POST: GenerateStatement}}
+  - {style: REST, path: "/v1/settlement/statements/{id}", methods: {GET: GetStatement}}
+  - {style: REST, path: "/v1/settlement/statements/{id}:finalize", methods: {POST: FinalizeStatement}}
+  - {style: REST, path: "/v1/settlement/adjustments", methods: {POST: AdjustStatement}}
+  - {style: REST, path: "/v1/settlement/statements/{id}/disputes", methods: {POST: DisputeStatementLine}}
+  - {style: REST, path: "/v1/settlement/statement-disputes/{disputeId}:resolve", methods: {POST: ResolveStatementDispute}}
+  - {style: REST, path: "/v1/settlement/payouts", methods: {POST: InstructPayout}}
+  - {style: REST, path: "/v1/settlement/payouts/{id}", methods: {GET: GetPayout}}
+  - {style: REST, path: "/v1/settlement/payouts/{id}/results", methods: {POST: RecordPayoutResult}}
+  - {style: REST, path: "/v1/settlement/holds", methods: {POST: PlaceHold}}
+  - {style: REST, path: "/v1/settlement/holds/{holdId}:release", methods: {POST: ReleaseHold}}
+  - {style: REST, path: "/v1/settlement/balances/{counterparty}", methods: {GET: GetBalance}}
+  - {style: REST, path: "/v1/settlement/items", methods: {GET: FindSettlementItems}}
+
+events:
+  - {type: ucos.settlement.agreement.created.v1, payload: "{id, counterparty, role, scope}"}
+  - {type: ucos.settlement.agreement.amended.v1, payload: "{id, version, effectiveFrom}"}
+  - {type: ucos.settlement.agreement.terminated.v1, payload: "{id, effectiveAt}"}
+  - {type: ucos.settlement.item.accrued.v1, payload: "{itemId, counterparty, itemKind, amount, sourceEventId}", consumers: [accounting, profitability]}
+  - {type: ucos.settlement.statement.generated.v1, payload: "{id, counterparty, period, payable}"}
+  - {type: ucos.settlement.statement.finalized.v1, payload: "{id, payable}", consumers: [documents (remittance advice), accounting]}
+  - {type: ucos.settlement.statement.adjusted.v1, payload: "{counterparty, amount, reasonCode}"}
+  - {type: ucos.settlement.statement-dispute.opened.v1, payload: "{disputeId, statementId}"}
+  - {type: ucos.settlement.statement-dispute.resolved.v1, payload: "{disputeId, outcome}"}
+  - {type: ucos.settlement.payout.instructed.v1, payload: "{id, statementRef, amount}"}
+  - {type: ucos.settlement.payout.settled.v1, payload: "{id, settledAt}"}
+  - {type: ucos.settlement.payout.failed.v1, payload: "{id, reason}"}
+  - {type: ucos.settlement.hold.placed.v1, payload: "{holdId, counterparty, amount, reason}"}
+  - {type: ucos.settlement.hold.released.v1, payload: "{holdId}"}
+
+stateMachines:
+  - name: StatementLifecycle
+    initial: draft
+    states: [draft, finalized, disputed, partially-paid, paid]
+    terminal: [paid]
+    transitions:
+      - {from: draft, to: finalized, command: FinalizeStatement}
+      - {from: finalized, to: disputed, command: DisputeStatementLine}
+      - {from: disputed, to: finalized, command: ResolveStatementDispute}
+      - {from: [finalized, partially-paid], to: partially-paid, trigger: "payout settled < payable"}
+      - {from: [finalized, partially-paid], to: paid, trigger: "Σ payouts settled = payable or payable = 0"}
+  - name: PayoutLifecycle
+    initial: instructed
+    states: [instructed, sent, settled, failed, returned]
+    terminal: [settled, failed, returned]
+    transitions:
+      - {from: instructed, to: sent, trigger: "DOM-PAY intent created and submitted"}
+      - {from: sent, to: settled, command: RecordPayoutResult, guard: "success"}
+      - {from: [instructed, sent], to: failed, command: RecordPayoutResult, guard: "failure"}
+      - {from: settled, to: returned, trigger: "bank return received (funds re-credited to balance)"}
+
+rules:
+  - {id: RUL-STL-1, statement: "Refunds and chargebacks accrue negative items under the same agreement version that accrued the original (version effective at original event time)."}
+  - {id: RUL-STL-2, statement: "Risk holds are placed automatically when DOM-FRD/FRK risk band for the counterparty is high or critical (policy settlement.risk-holds)."}
+  - {id: RUL-STL-3, statement: "Withholding taxes on payouts are determined by DOM-TAX (document kind payout) and shown on remittance advice."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:settlement-rule.resolution", purpose: "ResolutionConfig for settlement rules"}
+  - {urn: "urn:ucos:ucos.std:policy:settlement.risk-holds", purpose: "Automatic hold triggers and amounts by risk band"}
+  - {urn: "urn:ucos:ucos.std:policy:settlement.adjustment-approval", purpose: "Approval plan for manual adjustments"}
+
+decisions:
+  - {id: DEC-STL-1, question: "What does counterparty C earn/owe for event E?", algorithm: "SettlementAccrualEngine under agreement version effective at event time"}
+  - {id: DEC-STL-2, question: "How much may be paid out now?", algorithm: "payable - holds - reserves (INV-STL-3/4)"}
+
+security:
+  permissions: [settlement.read, settlement.agreement.manage, settlement.statement.manage, settlement.adjust, settlement.payout.instruct, settlement.hold.manage]
+  dataClassification: "Confidential financial; counterparty bank details only as DOM-PAY references."
+  threats: ["Payout fraud (bank detail change) -> payout method changes require verification and cooling period in DOM-PAY", "Adjustment abuse -> approvals + SoD"]
+
+governance:
+  changeControl: "Agreement templates and settlement rules via ChangeSet; amendments with Finance approval."
+  evidence: "Finalized statements and remittance advice digests captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Accrual idempotent; balances strongly consistent per counterparty (serialized ledger appends)."
+  slo: {accrual_lag_p99_s: 30, GenerateStatement_100k_items_p95_s: 60, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_settlement (event-sourced; financial)
+  tables:
+    - {name: settlement_agreements, columns: "tenant_id, id, counterparty, role, version, scope jsonb, body jsonb, status, valid_from, valid_to", pk: "(tenant_id, id, version)"}
+    - {name: settlement_items, columns: "tenant_id, item_id, counterparty, agreement_id, agreement_version, source_event_id, rule_ref, item_kind, amount_minor, currency, occurred_at, statement_id", pk: "(tenant_id, item_id)", indexes: ["unique(tenant_id, source_event_id, agreement_id, rule_ref)", "(tenant_id, counterparty, occurred_at)"]}
+    - {name: statements, columns: "tenant_id, id, counterparty, period_from, period_to, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: payouts, columns: "tenant_id, id, statement_id, amount_minor, currency, status, payment_intent_ref", pk: "(tenant_id, id)"}
+    - {name: holds, columns: "tenant_id, hold_id, counterparty, amount_minor, reason, until, status", pk: "(tenant_id, hold_id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "settlement_items range(occurred_at) monthly x hash(tenant_id) 16."
+  retention: "Financial retention (min 10 years)."
+
+extensionModel:
+  extensionPoints: ["Settlement models via PriceModel plugins", "Royalty reporting formats", "Payout rails via DOM-PAY providers"]
+  forbidden: ["Counterparty-specific code"]
+
+certificationCriteria:
+  - {id: CR-STL-01, rule: "Accrual completeness: every settleable event yields items per applicable agreements; replay produces identical items (idempotency).", level: L1}
+  - {id: CR-STL-02, rule: "Statement arithmetic INV-STL-2/3 holds for 10^5 random sequences including refunds, chargebacks, reserves, netting.", level: L1}
+  - {id: CR-STL-03, rule: "Payout never exceeds available under concurrent hold placement (race test).", level: L1}
+  - {id: CR-STL-04, rule: "Statement generation for 100k items p95 <= 60s.", level: L2}
+validationRules:
+  - {id: VR-STL-01, rule: "Every settlement item kind has a posting rule in DOM-ACC."}
+  - {id: VR-STL-02, rule: "Every marketplace seller in reference fixtures has an active settlement agreement."}

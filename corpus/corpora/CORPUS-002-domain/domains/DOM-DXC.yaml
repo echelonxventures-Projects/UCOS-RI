@@ -1,0 +1,187 @@
+header:
+  id: DOM-DXC
+  title: Data Exchange Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-028-001, CIC-006-001, CIC-020-001, CIC-002-001]
+  traces: [PRIN-022, PRIN-009, PRIN-003]
+  certification: [CR-DXC-01, CR-DXC-02, CR-DXC-03]
+  validation: [VR-DXC-01, VR-DXC-02]
+
+purpose: >
+  Move data between UCOS and the outside world safely: connectors (ERP, CRM, WMS, PIM, EDI, files,
+  APIs, CDC) acting as anti-corruption layers, bulk imports and exports, mapping specifications into
+  UCOS commands and out of UCOS events, scheduling, error handling, and replay — so integrations never
+  bypass domain commands or write domain stores.
+
+scope:
+  includes:
+    - Connector instances (plugin-backed) with credentials, schedules, and direction (in/out/bidirectional)
+    - Mapping specifications (declarative: source fields -> command payload / event -> target payload) using IOP mappings
+    - Inbound pipelines (files, APIs, CDC, EDI) -> validation -> domain commands (idempotent)
+    - Outbound pipelines (events/queries) -> transforms -> destinations with acknowledgements
+    - Bulk import/export jobs (resumable), error records, replay
+  excludes:
+    - Standards vocabularies (DOM-IOP), master data reconciliation (DOM-MDM), webhooks to subscribers (DOM-EVT)
+
+responsibilities:
+  - Every inbound record becomes exactly one domain command (or a recorded error) — no direct writes.
+  - Every outbound delivery is traceable to its source events.
+  - Failures isolated, retried, and replayable.
+
+principles: [PRIN-003, PRIN-009, PRIN-022]
+
+boundaries:
+  upstream: [DOM-EXT, DOM-IOP, DOM-EVT, DOM-SEC, DOM-SOV]
+  downstream: [DOM-MDM, DOM-COB, DOM-PTY, DOM-ORD, DOM-ACC, DOM-SUPN, DOM-LIN, DOM-PRV]
+
+ownership:
+  boundedContext: data
+  owningRole: Chief Data Architect
+  service: data-exchange-service
+  schema: ucos_data
+
+capabilities:
+  - {id: DXC-C1, name: Connectors, description: "Configure connector instances with secrets and schedules."}
+  - {id: DXC-C2, name: Mappings, description: "Declarative mappings to commands and from events."}
+  - {id: DXC-C3, name: Inbound, description: "Validate and convert inbound data into commands."}
+  - {id: DXC-C4, name: Outbound, description: "Transform and deliver outbound data with acks."}
+  - {id: DXC-C5, name: Bulk & replay, description: "Bulk jobs, error queues, replay."}
+
+services:
+  - {name: DataExchangeCommandService, kind: application, operations: [CreateConnectorInstance, UpdateConnectorInstance, DisableConnectorInstance, DefineMapping, StartImport, StartExport, RetryErrorRecords, ReplayOutbound]}
+  - {name: InboundPipeline, kind: application, contract: "read batch -> map (MappingSpec) -> validate against command schema -> issue command with idempotencyKey = hash(connector, sourceKey, sourceVersion) -> record outcome; lineage events per run"}
+  - {name: OutboundPipeline, kind: application, contract: "consume events (filters) -> enrich via queries (authorized as connector identity) -> map -> deliver -> ack; at-least-once with destination idempotency key"}
+  - {name: DataExchangeQueryService, kind: application, operations: [GetConnectorInstance, GetRun, FindErrorRecords]}
+
+aggregates:
+  - name: ConnectorInstance
+    identity: "urn:ucos:<tenant>:connector:<ulid>"
+    invariants: ["INV-DXC-1: backed by an active plugin activation (DOM-EXT); credentials referenced via SecretsPort; runs under a System identity with least-privilege scopes."]
+    fields:
+      - {name: pluginActivationRef, type: InstanceUrn}
+      - {name: direction, type: "inbound|outbound|bidirectional"}
+      - {name: systemIdentity, type: IdentityUrn}
+      - {name: mappings, type: "MappingSpecRef[]"}
+      - {name: schedule, type: "cron | event-driven | cdc"}
+      - {name: status, type: "active|disabled|failing"}
+  - name: MappingSpec
+    identity: "urn:ucos:<tenant|namespace>:mapping:<name>@<semver>"
+    invariants: ["INV-DXC-2: target is a published command schema (inbound) or external schema (outbound); every required target field mapped; CEL transforms type-check."]
+    fields:
+      - {name: direction, type: "inbound|outbound"}
+      - {name: source, type: "schema ref"}
+      - {name: target, type: "command/schema ref"}
+      - {name: fieldMappings, type: "[{target, expression (CEL), required}]"}
+      - {name: codeMappings, type: "IOP code-map refs"}
+  - name: ExchangeRun
+    identity: "urn:ucos:<tenant>:exchange-run:<ulid>"
+    fields:
+      - {name: connector, type: InstanceUrn}
+      - {name: kind, type: "import|export|stream-window"}
+      - {name: counts, type: "{read, succeeded, failed, skipped}"}
+      - {name: status, type: "running|completed|completed-with-errors|failed"}
+
+entities:
+  - {name: ErrorRecord, within: ExchangeRun, fields: [recordKey, stage (read|map|validate|command|deliver), errorCode, detail, attempts, status]}
+
+valueObjects:
+  - {name: DeliveryAck, definition: "{destinationRef, externalId, at, status}"}
+
+commands:
+  - {name: CreateConnectorInstance, input: "ConnectorInstance + changeSetRef", emits: [ConnectorInstanceCreated]}
+  - {name: UpdateConnectorInstance, input: "{id, patch}", emits: [ConnectorInstanceUpdated]}
+  - {name: DisableConnectorInstance, input: "{id, reason}", emits: [ConnectorInstanceDisabled]}
+  - {name: DefineMapping, input: "MappingSpec + changeSetRef", emits: [MappingDefined]}
+  - {name: StartImport, input: "{connector, source (file ref | query), mode: full|delta}", emits: [ExchangeRunStarted, ExchangeRunCompleted], async: true}
+  - {name: StartExport, input: "{connector, query | eventRange}", emits: [ExchangeRunStarted, ExchangeRunCompleted], async: true}
+  - {name: RetryErrorRecords, input: "{runId, recordKeys[] | all}", emits: [ErrorRecordsRetried]}
+  - {name: ReplayOutbound, input: "{connector, fromOffset|fromTime, toOffset?}", emits: [OutboundReplayStarted]}
+
+queries:
+  - {name: GetConnectorInstance, input: "{id}", output: ConnectorInstance}
+  - {name: GetRun, input: "{runId}", output: ExchangeRun}
+  - {name: FindErrorRecords, input: "{runId?, connector?, stage?, cursor}", output: "page"}
+
+apis:
+  - {style: REST, path: "/v1/data-exchange/connectors", methods: {POST: CreateConnectorInstance}}
+  - {style: REST, path: "/v1/data-exchange/connectors/{id}", methods: {GET: GetConnectorInstance, PATCH: UpdateConnectorInstance}}
+  - {style: REST, path: "/v1/data-exchange/connectors/{id}:disable", methods: {POST: DisableConnectorInstance}}
+  - {style: REST, path: "/v1/data-exchange/mappings", methods: {POST: DefineMapping}}
+  - {style: REST, path: "/v1/data-exchange/imports", methods: {POST: StartImport}}
+  - {style: REST, path: "/v1/data-exchange/exports", methods: {POST: StartExport}}
+  - {style: REST, path: "/v1/data-exchange/runs/{runId}", methods: {GET: GetRun}}
+  - {style: REST, path: "/v1/data-exchange/runs/{runId}/errors", methods: {GET: FindErrorRecords}}
+  - {style: REST, path: "/v1/data-exchange/runs/{runId}/errors:retry", methods: {POST: RetryErrorRecords}}
+  - {style: REST, path: "/v1/data-exchange/connectors/{id}:replay", methods: {POST: ReplayOutbound}}
+
+events:
+  - {type: ucos.data.connector.created.v1, payload: "{id, direction, plugin}"}
+  - {type: ucos.data.connector.updated.v1, payload: "{id}"}
+  - {type: ucos.data.connector.disabled.v1, payload: "{id, reason}"}
+  - {type: ucos.data.mapping.defined.v1, payload: "{urn, direction, target}"}
+  - {type: ucos.data.exchange-run.started.v1, payload: "{runId, connector, kind}"}
+  - {type: ucos.data.exchange-run.completed.v1, payload: "{runId, counts, status}", consumers: [lineage, operations]}
+  - {type: ucos.data.error-records.retried.v1, payload: "{runId, count}"}
+  - {type: ucos.data.outbound-replay.started.v1, payload: "{connector, from, to}"}
+
+stateMachines:
+  - name: ConnectorLifecycle
+    initial: active
+    states: [active, failing, disabled]
+    terminal: []
+    transitions:
+      - {from: active, to: failing, trigger: "error rate > policy threshold over window"}
+      - {from: failing, to: active, trigger: "recovered"}
+      - {from: [active, failing], to: disabled, command: DisableConnectorInstance}
+      - {from: disabled, to: active, command: UpdateConnectorInstance, guard: "re-enable"}
+
+rules:
+  - {id: RUL-DXC-1, statement: "Inbound data enters UCOS only through published commands with the connector's System identity; PDP and invariants apply as for any caller."}
+  - {id: RUL-DXC-2, statement: "Outbound personal data requires purpose-bound grants and sovereignty allow-listing of the destination (DOM-PRI, DOM-SOV)."}
+  - {id: RUL-DXC-3, statement: "Every run emits OpenLineage events (DOM-LIN RUL-LIN-1)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:data-exchange.error-thresholds", purpose: "Error rates that mark connectors failing and stop runs"}
+
+decisions:
+  - {id: DEC-DXC-1, question: "Which command does inbound record R become?", algorithm: "MappingSpec evaluation + schema validation"}
+
+security:
+  permissions: [data-exchange.read, data-exchange.connector.manage, data-exchange.mapping.manage, data-exchange.run, data-exchange.replay]
+  dataClassification: "Per payload; error records encrypted when containing personal data, retained minimally."
+  threats: ["Credential leakage -> SecretsPort refs only", "Integration privilege creep -> least-privilege System identities per connector"]
+
+governance:
+  changeControl: "Connectors and mappings via ChangeSet."
+  evidence: "Run reports retained."
+
+runtimeBehavior:
+  consistency: "Idempotent command issuance; outbound at-least-once."
+  slo: {import_throughput: ">= 5,000 records/s per connector", availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_data (separate tables) + object storage for files
+  tables:
+    - {name: connectors, columns: "tenant_id, id, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: mappings, columns: "tenant_id, urn, body jsonb", pk: "(tenant_id, urn)"}
+    - {name: exchange_runs, columns: "tenant_id, run_id, connector_id, kind, counts jsonb, status, started_at", pk: "(tenant_id, run_id)"}
+    - {name: error_records, columns: "tenant_id, run_id, record_key, stage, error_code, detail_enc bytea, attempts, status", pk: "(tenant_id, run_id, record_key)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "error_records hash(tenant_id) 16."
+  retention: "Runs 1 year; error records 90 days after resolution."
+
+extensionModel:
+  extensionPoints: ["Connector plugins (ERP, CRM, PIM, WMS, EDI, SFTP, CDC)", "Mapping functions (CEL libraries)"]
+  forbidden: ["Direct database writes into domain schemas"]
+
+certificationCriteria:
+  - {id: CR-DXC-01, rule: "Re-importing the same file yields zero duplicate aggregates (idempotency).", level: L1}
+  - {id: CR-DXC-02, rule: "Connector identities cannot call commands outside granted scopes (negative tests).", level: L1}
+  - {id: CR-DXC-03, rule: "Import throughput >= 5,000 records/s with p99 command latency within domain SLOs.", level: L2}
+validationRules:
+  - {id: VR-DXC-01, rule: "Every inbound mapping targets a command declared in a DOM spec."}
+  - {id: VR-DXC-02, rule: "Every connector has a System identity and owner."}

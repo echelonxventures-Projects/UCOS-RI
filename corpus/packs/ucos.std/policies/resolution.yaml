@@ -1,0 +1,93 @@
+# ResolutionConfig policies — one per registered fact kind (VR-CTX-02, INV-CTX-5).
+# Platform-layer static configuration; tenants may override in tenant layer unless a field is $locked.
+defaults: &resolutionPolicy
+  kind: configuration
+  layer: platform
+  scope: {}
+  outputSchema: {$ref: resolution-config}
+
+policies:
+  - <<: *resolutionPolicy
+    name: cob.contextual-precedence
+    body: {language: static, source: {conflictStrategy: most-recent, cardinality: one, relaxationAllowed: true, fallbackChains: [locale, channel, territory, market], maxFallbackSteps: 32}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: most-recent, cardinality: one, relaxationAllowed: true, fallbackChains: [locale, channel, territory, market], maxFallbackSteps: 32}}
+
+  - <<: *resolutionPolicy
+    name: localized-variant.resolution
+    body: {language: static, source: {conflictStrategy: most-recent, cardinality: one, relaxationAllowed: true, fallbackChains: [locale, channel], maxFallbackSteps: 16}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: most-recent, cardinality: one, relaxationAllowed: true, fallbackChains: [locale, channel], maxFallbackSteps: 16}}
+
+  - <<: *resolutionPolicy
+    name: price-entry.resolution
+    body: {language: static, source: {dimensionPrecedence: [contract, party, organization], conflictStrategy: error, cardinality: one, relaxationAllowed: true, fallbackChains: [price-list-tier, channel, territory, market], maxFallbackSteps: 16}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {dimensionPrecedence: [contract, party, organization], conflictStrategy: error, cardinality: one, relaxationAllowed: true, fallbackChains: [price-list-tier, channel, territory, market], maxFallbackSteps: 16}}
+
+  - <<: *resolutionPolicy
+    name: price-adjustment.resolution
+    body: {language: static, source: {conflictStrategy: all, cardinality: many, relaxationAllowed: false}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: all, cardinality: many, relaxationAllowed: false}}
+
+  - <<: *resolutionPolicy
+    name: catalog.resolution
+    body: {language: static, source: {conflictStrategy: all, cardinality: many, relaxationAllowed: true, fallbackChains: [channel, territory, market], maxFallbackSteps: 8}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: all, cardinality: many, relaxationAllowed: true, fallbackChains: [channel, territory, market], maxFallbackSteps: 8}}
+
+  - <<: *resolutionPolicy
+    name: catalog-exclusion.resolution
+    body: {language: static, source: {conflictStrategy: all, cardinality: many, relaxationAllowed: false}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: all, cardinality: many, relaxationAllowed: false}}
+
+  - <<: *resolutionPolicy
+    name: catalog-ordering.resolution
+    body: {language: static, source: {conflictStrategy: all, cardinality: many, relaxationAllowed: false, hitPolicy: priority}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: all, cardinality: many, relaxationAllowed: false, hitPolicy: priority}}
+
+  - <<: *resolutionPolicy
+    name: offer.resolution
+    body: {language: static, source: {conflictStrategy: all, cardinality: many, relaxationAllowed: true, fallbackChains: [channel, territory, market], maxFallbackSteps: 8}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: all, cardinality: many, relaxationAllowed: true, fallbackChains: [channel, territory, market], maxFallbackSteps: 8}}
+
+  - <<: *resolutionPolicy
+    name: eligibility.resolution
+    body: {language: static, source: {conflictStrategy: all, cardinality: many, relaxationAllowed: false, hitPolicy: collect, combine: deny-overrides}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: all, cardinality: many, relaxationAllowed: false, hitPolicy: collect, combine: deny-overrides}}
+
+  - <<: *resolutionPolicy
+    name: configuration-constraint.resolution
+    body: {language: static, source: {conflictStrategy: all, cardinality: many, relaxationAllowed: false, hitPolicy: collect}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: all, cardinality: many, relaxationAllowed: false, hitPolicy: collect}}
+
+  - <<: *resolutionPolicy
+    name: sellability-rule.resolution
+    body: {language: static, source: {dimensionPrecedence: [jurisdiction], conflictStrategy: all, cardinality: many, relaxationAllowed: false, hitPolicy: collect, combine: deny-overrides}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {dimensionPrecedence: [jurisdiction], conflictStrategy: all, cardinality: many, relaxationAllowed: false, hitPolicy: collect, combine: deny-overrides}}
+
+  - <<: *resolutionPolicy
+    name: context-derivation.resolution
+    body: {language: static, source: {conflictStrategy: error, cardinality: many, relaxationAllowed: false, hitPolicy: priority}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: error, cardinality: many, relaxationAllowed: false, hitPolicy: priority}}
+
+  - <<: *resolutionPolicy
+    name: order-decomposition.resolution
+    body: {language: static, source: {conflictStrategy: error, cardinality: one, relaxationAllowed: true, fallbackChains: [channel, territory, market], maxFallbackSteps: 8, hitPolicy: unique}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: error, cardinality: one, relaxationAllowed: true, fallbackChains: [channel, territory, market], maxFallbackSteps: 8, hitPolicy: unique}}
+
+  - <<: *resolutionPolicy
+    name: policy.resolution
+    layer: constitutional
+    body: {language: static, source: {conflictStrategy: all, cardinality: many, relaxationAllowed: false}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {conflictStrategy: all, cardinality: many, relaxationAllowed: false}}

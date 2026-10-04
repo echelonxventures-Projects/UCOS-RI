@@ -1,0 +1,145 @@
+# Core configuration and authorization policies of ucos.std (CIC-009-001).
+policies:
+  - name: pricing.phases
+    kind: configuration
+    layer: platform
+    scope: {}
+    outputSchema:
+      type: object
+      required: [phases]
+      properties:
+        phases:
+          type: array
+          minItems: 1
+          items: {type: object, required: [order, code], properties: {order: {type: integer}, code: {type: string, pattern: "^[A-Z][A-Z-]*$"}}}
+    body:
+      language: static
+      source: {phases: [{order: 10, code: LIST}, {order: 20, code: CONTRACT}, {order: 30, code: SEGMENT}, {order: 40, code: PROMOTION}, {order: 50, code: BUNDLE}, {order: 60, code: LOYALTY}, {order: 70, code: MANUAL}, {order: 80, code: FEES}, {order: 90, code: TAX}]}
+    testVectors:
+      - name: default
+        input: {}
+        context: {}
+        expectedOutput: {phases: [{order: 10, code: LIST}, {order: 20, code: CONTRACT}, {order: 30, code: SEGMENT}, {order: 40, code: PROMOTION}, {order: 50, code: BUNDLE}, {order: 60, code: LOYALTY}, {order: 70, code: MANUAL}, {order: 80, code: FEES}, {order: 90, code: TAX}]}
+
+  - name: pricing.rounding
+    kind: configuration
+    layer: platform
+    scope: {}
+    outputSchema:
+      type: object
+      required: [mode, stage]
+      properties:
+        mode: {type: string, pattern: "^(half-even|half-up|down|up|cash\\([0-9]+\\))$"}
+        stage: {enum: [component, line, total]}
+        intermediateScale: {type: integer, minimum: 6, maximum: 34}
+    body: {language: static, source: {mode: half-even, stage: line, intermediateScale: 18}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {mode: half-even, stage: line, intermediateScale: 18}}
+
+  - name: catalog.visible-states
+    kind: configuration
+    layer: platform
+    scope: {}
+    outputSchema:
+      type: object
+      required: [public, owner]
+      properties:
+        public: {type: array, items: {enum: [draft, review, ready, active, suspended, winding-down, closed, archived]}}
+        owner: {type: array, items: {enum: [draft, review, ready, active, suspended, winding-down, closed, archived]}}
+    body: {language: static, source: {public: [active], owner: [active, winding-down]}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {public: [active], owner: [active, winding-down]}}
+
+  - name: availability.thresholds
+    kind: configuration
+    layer: platform
+    scope: {}
+    outputSchema:
+      type: object
+      required: [limitedThreshold]
+      properties: {limitedThreshold: {type: integer, minimum: 1}}
+    body: {language: static, source: {limitedThreshold: 5}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {limitedThreshold: 5}}
+
+  - name: governance.approval
+    kind: configuration
+    layer: constitutional
+    scope: {}
+    outputSchema:
+      type: object
+      required: [plans]
+      properties:
+        plans:
+          type: object
+          required: [low, medium, high, critical]
+          additionalProperties:
+            type: object
+            required: [stages]
+            properties:
+              coolOffHours: {type: integer, minimum: 0}
+              stages: {type: array, minItems: 1, items: {type: object, required: [approverRoles, quorum], properties: {approverRoles: {type: array, minItems: 1}, quorum: {type: integer, minimum: 1}}}}
+    body:
+      language: static
+      source:
+        plans:
+          low: {stages: [{approverRoles: [domain-owner], quorum: 1}]}
+          medium: {stages: [{approverRoles: [domain-owner, domain-architect], quorum: 2}]}
+          high: {stages: [{approverRoles: [domain-owner, domain-architect], quorum: 2}, {approverRoles: [governance], quorum: 1}]}
+          critical: {coolOffHours: 24, stages: [{approverRoles: [domain-owner, chief-architect], quorum: 2}, {approverRoles: [constitutional-authority, compliance], quorum: 1}]}
+    testVectors:
+      - name: default
+        input: {}
+        context: {}
+        expectedOutput:
+          plans:
+            low: {stages: [{approverRoles: [domain-owner], quorum: 1}]}
+            medium: {stages: [{approverRoles: [domain-owner, domain-architect], quorum: 2}]}
+            high: {stages: [{approverRoles: [domain-owner, domain-architect], quorum: 2}, {approverRoles: [governance], quorum: 1}]}
+            critical: {coolOffHours: 24, stages: [{approverRoles: [domain-owner, chief-architect], quorum: 2}, {approverRoles: [constitutional-authority, compliance], quorum: 1}]}
+
+  - name: cob.transition
+    kind: authorization
+    layer: platform
+    scope: {}
+    combining: deny-overrides
+    outputSchema: {type: object, required: [effect], properties: {effect: {enum: [allow, deny]}}}
+    body:
+      language: cel
+      source: |
+        principal.tenant == resource.tenant &&
+        (
+          (transition in ['submit','end-sale','end-life','archive','suspend','resume'] && 'catalog-manager' in principal.roles) ||
+          (transition == 'approve' && 'product-approver' in principal.roles && principal.party != resource.submittedBy) ||
+          (transition == 'activate' && ('catalog-manager' in principal.roles || principal.kind == 'system'))
+        ) ? {'effect': 'allow'} : {'effect': 'deny'}
+    obligations: [{id: audit-transition, kind: log, params: {level: info}}]
+    testVectors:
+      - name: manager-submits
+        input: {principal: {tenant: t1, roles: [catalog-manager], party: p1, kind: human}, resource: {tenant: t1, submittedBy: p1}, transition: submit}
+        context: {}
+        expectedOutput: {effect: allow}
+      - name: author-cannot-approve-own
+        input: {principal: {tenant: t1, roles: [product-approver], party: p1, kind: human}, resource: {tenant: t1, submittedBy: p1}, transition: approve}
+        context: {}
+        expectedOutput: {effect: deny}
+      - name: other-approver-approves
+        input: {principal: {tenant: t1, roles: [product-approver], party: p2, kind: human}, resource: {tenant: t1, submittedBy: p1}, transition: approve}
+        context: {}
+        expectedOutput: {effect: allow}
+      - name: cross-tenant-denied
+        input: {principal: {tenant: t2, roles: [catalog-manager], party: p9, kind: human}, resource: {tenant: t1, submittedBy: p1}, transition: submit}
+        context: {}
+        expectedOutput: {effect: deny}
+
+  - name: entitlement.consumption-order
+    kind: configuration
+    layer: platform
+    scope: {}
+    outputSchema:
+      type: object
+      required: [order]
+      properties: {order: {type: array, items: {enum: [earliest-valid-to, promotional-first, paid-first, highest-remaining, lowest-remaining]}}}
+    body: {language: static, source: {order: [earliest-valid-to, promotional-first]}}
+    testVectors:
+      - {name: default, input: {}, context: {}, expectedOutput: {order: [earliest-valid-to, promotional-first]}}

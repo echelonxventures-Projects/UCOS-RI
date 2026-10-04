@@ -1,0 +1,14 @@
+# Build manifest (CIC-001-001 §6).
+module: echo-service
+context: echo
+slice: S0
+domains: []            # S0 platform demonstration context; not a corpus domain (CIC-030-001 §3)
+traces: [CIC-030-001, CIC-001-001, CIC-003-001, CIC-005-001, CIC-006-001, CIC-014-001,
+         CR-003-001-01, CR-005-001-04, CR-006-001-02, CR-006-001-03, CR-001-001-01, CR-001-001-07]
+ports: {consumes: [EventBusPort], provides: [EchoApi]}
+api: {openapi: contracts/echo/echo.openapi.yaml, asyncapi: contracts/echo/echo.asyncapi.yaml}
+runtime:
+  language: go
+  image: "golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"   # golang:1.25-alpine
+migrations: domains/echo/migrations
+certificationLevel: L1

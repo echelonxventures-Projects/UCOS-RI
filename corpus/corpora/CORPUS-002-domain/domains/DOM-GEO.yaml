@@ -1,0 +1,171 @@
+header:
+  id: DOM-GEO
+  title: Geography Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-002-001, CIC-003-001]
+  traces: [PRIN-006, PRIN-017, PRIN-020, DOM-CTX]
+  certification: [CR-GEO-01, CR-GEO-02, CR-GEO-03]
+  validation: [VR-GEO-01, VR-GEO-02]
+
+purpose: >
+  Provide the geographic reference model of UCOS — administrative areas (ISO 3166-1/-2 and finer),
+  postal areas, custom geo areas and geofences, geocoding and point-in-area resolution — as the
+  value source and hierarchy for the geo, territory, and jurisdiction context dimensions.
+
+scope:
+  includes:
+    - GeoArea aggregate (polygon/multipolygon, kind, parent links via BROADER terms in ucos.std.geo-areas)
+    - Area hierarchies (admin, postal) with temporal validity (boundary changes)
+    - Point-in-area resolution (lat/lon or address -> smallest containing areas)
+    - Geocoding/reverse geocoding via GeocoderPort plugins with caching
+    - Distance and travel-time helpers for sourcing (CEL functions ucos.geo.*)
+  excludes:
+    - Commercial territories (DOM-TER), tax jurisdictions semantics (DOM-TAX; uses GEO areas)
+    - Postal address formatting/validation (DOM-PTY value object; address verification plugins)
+
+responsibilities:
+  - Authoritative, versioned boundaries for resolution and analytics.
+  - Deterministic point-in-area results for a given dataset version.
+  - Supply CEL geo functions used by rules (ucos.geo.country, ucos.geo.distanceKm, ucos.geo.within).
+
+principles: [PRIN-006, PRIN-017, PRIN-020]
+
+boundaries:
+  upstream: [DOM-REF, DOM-DXC]
+  downstream: [DOM-CTX, DOM-TER, DOM-TAX, DOM-AVL, DOM-LOG, DOM-PTY]
+
+ownership:
+  boundedContext: context
+  owningRole: Chief Data Architect
+  service: geography-service
+  schema: ucos_context
+
+capabilities:
+  - {id: GEO-C1, name: Areas, description: "Import and maintain geo areas and hierarchies with versions."}
+  - {id: GEO-C2, name: Resolve, description: "Point/address -> containing areas (smallest first)."}
+  - {id: GEO-C3, name: Geocode, description: "Address <-> coordinates via plugins with confidence."}
+  - {id: GEO-C4, name: Geofences, description: "Tenant-defined areas (delivery zones, service areas)."}
+
+services:
+  - {name: GeographyCommandService, kind: application, operations: [ImportGeoDataset, ActivateGeoDataset, DefineCustomArea, RetireCustomArea]}
+  - {name: SpatialResolver, kind: domain-service, contract: "resolvePoint(lat, lon, datasetVersion) -> [areaRef by ascending size]; R-tree/PostGIS GiST; boundary ties resolved by lexicographically smallest area code"}
+  - {name: GeographyQueryService, kind: application, operations: [ResolvePoint, ResolveAddress, GetArea, GetAreaAncestors, Geocode, ReverseGeocode]}
+
+aggregates:
+  - name: GeoArea
+    identity: "urn:ucos:<namespace|tenant>:geo-area:<code>"
+    invariants:
+      - "INV-GEO-1: geometry valid (OGC simple features, closed rings, no self-intersection); SRID 4326."
+      - "INV-GEO-2: within a dataset version, children of an admin parent are contained in the parent (tolerance 50 m) — violations flagged, not silently fixed."
+    fields:
+      - {name: code, type: "string (e.g. FR, FR-IDF, FR-75056, postal:FR-75001, custom:<tenant>:<code>)"}
+      - {name: kind, type: "country|subdivision|locality|postal|custom|continent|region-group"}
+      - {name: names, type: LocalizedText}
+      - {name: geometry, type: geo-shape}
+      - {name: parentCodes, type: "string[]"}
+      - {name: datasetVersion, type: string}
+      - {name: validFrom, type: Date}
+      - {name: validTo, type: "Date?"}
+  - name: GeoDataset
+    identity: "urn:ucos:global:geo-dataset:<source>@<version>"
+    fields:
+      - {name: source, type: "iso3166|natural-earth|national-postal|osm-admin|custom"}
+      - {name: version, type: string}
+      - {name: digest, type: Sha256}
+      - {name: status, type: "imported|active|superseded"}
+
+entities: []
+
+valueObjects:
+  - {name: GeoPoint, definition: "{lat, lon} WGS84 decimal degrees, 6 decimals"}
+  - {name: GeocodeResult, definition: "{point, accuracy: rooftop|interpolated|centroid|postal, confidence 0..1, areas[]}"}
+
+commands:
+  - {name: ImportGeoDataset, input: "{source, version, artifactRef (digest)}", emits: [GeoDatasetImported], async: true}
+  - {name: ActivateGeoDataset, input: "{source, version, approvalRef}", emits: [GeoDatasetActivated]}
+  - {name: DefineCustomArea, input: "{code, names, geometry, parentCodes}", emits: [CustomAreaDefined]}
+  - {name: RetireCustomArea, input: "{code, validTo}", emits: [CustomAreaRetired]}
+
+queries:
+  - {name: ResolvePoint, input: "{point, asOf?}", output: "GeoArea refs (smallest first)"}
+  - {name: ResolveAddress, input: "{postalAddress, asOf?}", output: "{geocode: GeocodeResult, areas[]}"}
+  - {name: GetArea, input: "{code, asOf?, includeGeometry?}", output: GeoArea}
+  - {name: GetAreaAncestors, input: "{code, asOf?}", output: "codes (nearest first)"}
+  - {name: Geocode, input: "{address}", output: GeocodeResult}
+  - {name: ReverseGeocode, input: "{point}", output: "PostalAddress + areas"}
+
+apis:
+  - {style: REST, path: "/v1/geography:resolve-point", methods: {GET: ResolvePoint}}
+  - {style: REST, path: "/v1/geography:resolve-address", methods: {POST: ResolveAddress}}
+  - {style: REST, path: "/v1/geography/areas", methods: {POST: DefineCustomArea}}
+  - {style: REST, path: "/v1/geography/areas/{code}", methods: {GET: GetArea}}
+  - {style: REST, path: "/v1/geography/areas/{code}/ancestors", methods: {GET: GetAreaAncestors}}
+  - {style: REST, path: "/v1/geography/areas/{code}:retire", methods: {POST: RetireCustomArea}}
+  - {style: REST, path: "/v1/geography/datasets", methods: {POST: ImportGeoDataset}}
+  - {style: REST, path: "/v1/geography/datasets/{source}/{version}:activate", methods: {POST: ActivateGeoDataset}}
+  - {style: REST, path: "/v1/geography:geocode", methods: {POST: Geocode}}
+  - {style: REST, path: "/v1/geography:reverse-geocode", methods: {GET: ReverseGeocode}}
+
+events:
+  - {type: ucos.context.geo-dataset.imported.v1, payload: "{source, version, areas, containmentViolations}"}
+  - {type: ucos.context.geo-dataset.activated.v1, payload: "{source, version}", consumers: [context hierarchy index, tax, territory]}
+  - {type: ucos.context.geo-area.custom-defined.v1, payload: "{code, parentCodes}"}
+  - {type: ucos.context.geo-area.custom-retired.v1, payload: "{code, validTo}"}
+
+stateMachines:
+  - name: GeoDatasetLifecycle
+    initial: imported
+    states: [imported, active, superseded]
+    terminal: [superseded]
+    transitions:
+      - {from: imported, to: active, command: ActivateGeoDataset}
+      - {from: active, to: superseded, trigger: "newer dataset of same source activated"}
+
+rules:
+  - {id: RUL-GEO-1, statement: "Context resolution and tax use the dataset version active at asOf, so historical prices and taxes replay with historical boundaries."}
+  - {id: RUL-GEO-2, statement: "Geocoding results below policy geography.min-confidence are not used for authoritative derivations (jurisdiction) — the address must be verified."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:geography.min-confidence", purpose: "Minimum geocode confidence for authoritative derivations"}
+
+decisions:
+  - {id: DEC-GEO-1, question: "Which areas contain point P at time T?", algorithm: "SpatialResolver on dataset active at T"}
+
+security:
+  permissions: [geography.read, geography.dataset.manage, geography.area.define, geography.geocode]
+  dataClassification: "Public reference data; geocoded customer addresses are personal and not stored here (only cache keyed by salted address hash, TTL 30 days)."
+  threats: ["Geocoder data leakage -> addresses sent only to approved processors (privacy purpose tax-determination/shipping)"]
+
+governance:
+  changeControl: "Dataset activation via ChangeSet with tax/finance impact note."
+  evidence: "Dataset digests recorded."
+
+runtimeBehavior:
+  consistency: "Datasets immutable per version."
+  slo: {ResolvePoint_p99_ms: 10, Geocode_p99_ms: 400, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL + PostGIS schema ucos_context (separate tables)
+  tables:
+    - {name: geo_areas, columns: "namespace text, code text, dataset_version text, kind text, names jsonb, geom geometry(MultiPolygon,4326), parent_codes text[], valid_from date, valid_to date", pk: "(namespace, code, dataset_version)", indexes: ["gist(geom)", "(code)"]}
+    - {name: geo_datasets, columns: "source, version, digest, status", pk: "(source, version)", global: true}
+    - {name: geocode_cache, columns: "tenant_id, address_hash bytea, result jsonb, expires_at", pk: "(tenant_id, address_hash)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "geo_areas list(kind)."
+  retention: "All dataset versions retained (replay)."
+
+extensionModel:
+  extensionPoints: ["GeocoderPort plugins", "Dataset importers", "Custom area kinds"]
+  forbidden: ["Country lists in code"]
+
+certificationCriteria:
+  - {id: CR-GEO-01, rule: "ResolvePoint matches reference results on 10^5 sampled points incl. borders and enclaves.", level: L1}
+  - {id: CR-GEO-02, rule: "Historical replay uses historical boundaries (golden boundary-change cases).", level: L1}
+  - {id: CR-GEO-03, rule: "ResolvePoint p99 <= 10ms at 10,000 rps.", level: L2}
+validationRules:
+  - {id: VR-GEO-01, rule: "Every area code referenced by pack dimensions/derivations exists in an active dataset."}
+  - {id: VR-GEO-02, rule: "Every active dataset has containment violations reviewed (count recorded in activation ChangeSet)."}

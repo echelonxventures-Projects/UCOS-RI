@@ -1,0 +1,181 @@
+header:
+  id: DOM-EVO
+  title: Evolution Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-000-001, CIC-000-003, CIC-015-001, CIC-002-001]
+  traces: [PRIN-011, PRIN-013, PRIN-012]
+  certification: [CR-EVO-01, CR-EVO-02, CR-EVO-03]
+  validation: [VR-EVO-01, VR-EVO-02]
+
+purpose: >
+  Govern how UCOS itself evolves: corpus releases and amendments, platform release trains, MAJOR
+  version programs (deprecation -> migration -> sunset across APIs, events, metadata), and the
+  architecture decision record (ADR) catalog — turning kernel-gap outcomes, regulatory change, and
+  operational learning into planned, traceable change.
+
+scope:
+  includes:
+    - Corpus release management (tags, changelogs, amendment ChangeSets, compatibility class)
+    - Evolution programs (multi-release initiatives, e.g. API v2) with milestones tied to DOM-VER sunsets and CIC-026 migrations
+    - ADR catalog (MADR) linked to artifacts
+    - Release train calendar for platform modules
+  excludes:
+    - Per-artifact version catalog and pins (DOM-VER), ChangeSet mechanics (DOM-GOV), kernel gap analysis (DOM-FUT)
+
+responsibilities:
+  - Every corpus release validated and traceable to amendments.
+  - MAJOR programs complete migrations before sunsets.
+  - Decisions recorded with context and consequences.
+
+principles: [PRIN-011, PRIN-012, PRIN-013]
+
+boundaries:
+  upstream: [DOM-FUT, DOM-VER, DOM-GOV, DOM-CMPL, DOM-TRC]
+  downstream: [DOM-GOV, DOM-VER, DOM-TRC, DOM-CRT]
+
+ownership:
+  boundedContext: governance
+  owningRole: Chief Architect
+  service: evolution-service
+  schema: ucos_governance
+
+capabilities:
+  - {id: EVO-C1, name: Corpus releases, description: "Cut, validate, publish corpus releases."}
+  - {id: EVO-C2, name: Programs, description: "Plan and track MAJOR evolution programs."}
+  - {id: EVO-C3, name: ADRs, description: "Record and link architecture decisions."}
+  - {id: EVO-C4, name: Release trains, description: "Publish platform release calendar."}
+
+services:
+  - {name: EvolutionCommandService, kind: application, operations: [CutCorpusRelease, PublishCorpusRelease, StartEvolutionProgram, UpdateProgramMilestone, CompleteEvolutionProgram, RecordAdr, SupersedeAdr]}
+  - {name: EvolutionQueryService, kind: application, operations: [GetCorpusRelease, GetEvolutionProgram, FindAdrs, GetReleaseCalendar]}
+
+aggregates:
+  - name: CorpusRelease
+    identity: "urn:ucos:platform:corpus-release:<semver>"
+    invariants: ["INV-EVO-1: release digest validates (tools/validate.py exit 0); version bump >= max compatibility class of included amendments."]
+    fields:
+      - {name: version, type: SemVer}
+      - {name: gitTag, type: string}
+      - {name: digest, type: Sha256}
+      - {name: amendments, type: "ChangeSetRef[]"}
+      - {name: changelog, type: string}
+      - {name: status, type: "cut|validated|published|superseded"}
+  - name: EvolutionProgram
+    identity: "urn:ucos:platform:evolution-program:<code>"
+    invariants: ["INV-EVO-2: a program's sunset milestone cannot complete while DOM-VER CanRetire is false for its artifacts."]
+    fields:
+      - {name: code, type: string}
+      - {name: goal, type: string}
+      - {name: artifacts, type: "artifact versions affected"}
+      - {name: milestones, type: "[{code, dueAt, kind: announce|deprecate|migrate|sunset, status}]"}
+      - {name: status, type: "planned|active|completed|cancelled"}
+  - name: Adr
+    identity: "urn:ucos:platform:adr:<number>"
+    fields:
+      - {name: title, type: string}
+      - {name: status, type: "proposed|accepted|superseded|deprecated"}
+      - {name: context, type: string}
+      - {name: decision, type: string}
+      - {name: consequences, type: string}
+      - {name: traces, type: "Artifact/Domain IDs"}
+      - {name: supersededBy, type: "AdrUrn?"}
+
+entities: []
+
+valueObjects:
+  - {name: ReleaseCalendar, definition: "[{train, date, modules, freezeWindowRef}]"}
+
+commands:
+  - {name: CutCorpusRelease, input: "{version, gitTag, amendments}", emits: [CorpusReleaseCut]}
+  - {name: PublishCorpusRelease, input: "{version}", emits: [CorpusReleasePublished], preconditions: ["INV-EVO-1"]}
+  - {name: StartEvolutionProgram, input: "{code, goal, artifacts, milestones}", emits: [EvolutionProgramStarted]}
+  - {name: UpdateProgramMilestone, input: "{code, milestone, status}", emits: [ProgramMilestoneUpdated]}
+  - {name: CompleteEvolutionProgram, input: "{code}", emits: [EvolutionProgramCompleted]}
+  - {name: RecordAdr, input: "Adr", emits: [AdrRecorded]}
+  - {name: SupersedeAdr, input: "{number, supersededBy}", emits: [AdrSuperseded]}
+
+queries:
+  - {name: GetCorpusRelease, input: "{version}", output: CorpusRelease}
+  - {name: GetEvolutionProgram, input: "{code}", output: EvolutionProgram}
+  - {name: FindAdrs, input: "{trace?, status?}", output: "Adr[]"}
+  - {name: GetReleaseCalendar, input: "{from, to}", output: ReleaseCalendar}
+
+apis:
+  - {style: REST, path: "/v1/evolution/corpus-releases", methods: {POST: CutCorpusRelease}}
+  - {style: REST, path: "/v1/evolution/corpus-releases/{version}", methods: {GET: GetCorpusRelease}}
+  - {style: REST, path: "/v1/evolution/corpus-releases/{version}:publish", methods: {POST: PublishCorpusRelease}}
+  - {style: REST, path: "/v1/evolution/programs", methods: {POST: StartEvolutionProgram}}
+  - {style: REST, path: "/v1/evolution/programs/{code}", methods: {GET: GetEvolutionProgram}}
+  - {style: REST, path: "/v1/evolution/programs/{code}/milestones", methods: {POST: UpdateProgramMilestone}}
+  - {style: REST, path: "/v1/evolution/programs/{code}:complete", methods: {POST: CompleteEvolutionProgram}}
+  - {style: REST, path: "/v1/evolution/adrs", methods: {POST: RecordAdr, GET: FindAdrs}}
+  - {style: REST, path: "/v1/evolution/adrs/{number}:supersede", methods: {POST: SupersedeAdr}}
+  - {style: REST, path: "/v1/evolution/release-calendar", methods: {GET: GetReleaseCalendar}}
+
+events:
+  - {type: ucos.governance.corpus-release.cut.v1, payload: "{version, gitTag}"}
+  - {type: ucos.governance.corpus-release.published.v1, payload: "{version, digest}", consumers: [traceability, certification, reference implementation vendoring]}
+  - {type: ucos.governance.evolution-program.started.v1, payload: "{code, milestones}"}
+  - {type: ucos.governance.evolution-program.milestone-updated.v1, payload: "{code, milestone, status}"}
+  - {type: ucos.governance.evolution-program.completed.v1, payload: "{code}"}
+  - {type: ucos.governance.adr.recorded.v1, payload: "{number, title, traces}"}
+  - {type: ucos.governance.adr.superseded.v1, payload: "{number, supersededBy}"}
+
+stateMachines:
+  - name: EvolutionProgramLifecycle
+    initial: planned
+    states: [planned, active, completed, cancelled]
+    terminal: [completed, cancelled]
+    transitions:
+      - {from: planned, to: active, trigger: "first milestone started"}
+      - {from: active, to: completed, command: CompleteEvolutionProgram, guard: "all milestones done (INV-EVO-2)"}
+      - {from: [planned, active], to: cancelled, command: cancel}
+
+rules:
+  - {id: RUL-EVO-1, statement: "Corpus MAJOR releases require a constitutional-class ChangeSet and a published migration guide."}
+  - {id: RUL-EVO-2, statement: "Every ADR that changes behavior specified in the corpus must reference an amendment ChangeSet; ADRs cannot override the corpus (CIC-030-001 §1)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:evolution.release-cadence", purpose: "Release train cadence and MAJOR program minimum durations"}
+
+decisions:
+  - {id: DEC-EVO-1, question: "Can program P sunset its old versions now?", algorithm: "All artifacts CanRetire (DOM-VER) and migration milestones done"}
+
+security:
+  permissions: [evolution.read, evolution.release.manage, evolution.program.manage, evolution.adr.record]
+  dataClassification: "Internal."
+  threats: ["Unvalidated corpus publication -> INV-EVO-1 gate"]
+
+governance:
+  changeControl: "Corpus releases via amendment ChangeSets (CIC-000-001 §5)."
+  evidence: "Release validation outputs and digests as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong."
+  slo: {availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_governance (separate tables)
+  tables:
+    - {name: corpus_releases, columns: "version text pk, git_tag, digest, body jsonb, status", global: true}
+    - {name: evolution_programs, columns: "code text pk, body jsonb, status", global: true}
+    - {name: adrs, columns: "number int pk, body jsonb, status", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None."
+  retention: "Indefinite."
+
+extensionModel:
+  extensionPoints: ["Program templates (API MAJOR, event MAJOR, kernel amendment)"]
+  forbidden: ["Silent behavior changes without ADR/amendment linkage"]
+
+certificationCriteria:
+  - {id: CR-EVO-01, rule: "Publishing an invalid corpus digest is rejected.", level: L1}
+  - {id: CR-EVO-02, rule: "Program completion blocked while pins remain (integration with DOM-VER).", level: L1}
+  - {id: CR-EVO-03, rule: "Every accepted ADR traces to existing corpus IDs.", level: L1}
+validationRules:
+  - {id: VR-EVO-01, rule: "Every corpus release version follows CIC-000-003 §4 relative to included amendments."}
+  - {id: VR-EVO-02, rule: "Every program milestone kind is from the allowed set."}

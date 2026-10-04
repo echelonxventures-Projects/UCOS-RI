@@ -1,0 +1,283 @@
+header:
+  id: DOM-ONT
+  title: Ontology Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-000-002, CIC-002-001, CIC-000-003]
+  traces: [PRIN-002, PRIN-004, PRIN-013, PRIN-018, PRIN-019]
+  certification: [CR-ONT-01, CR-ONT-02, CR-ONT-03, CR-ONT-04]
+  validation: [VR-ONT-01, VR-ONT-02, VR-ONT-03]
+
+
+# Attributes (DOM-ATTR) are AttributeDefinitions owned by this domain; a separate spec would split
+# ownership of one aggregate (PRIN-001).
+subsumes:
+  - domain: DOM-ATTR
+    coverage: "AttributeDefinition aggregate, Datatype/Cardinality/Constraint value objects, DefineAttribute command, attribute.published event, INV-ONT-7/8, VR-ONT-03, ucos.std attributes.yaml"
+
+purpose: >
+  Define, version, validate, and serve the metadata that gives meaning to every commercial object:
+  type definitions, attribute definitions, facets, relationship types, and their constraints. The
+  ontology is the interpreter input that lets the kernel support any commercial model without code change.
+
+scope:
+  includes:
+    - TypeDefinition (with multiple inheritance via supertypes and facet composition)
+    - AttributeDefinition (datatype, cardinality, constraints, localization, sensitivity)
+    - FacetDefinition (reusable bundles of attributes + behavioral contracts)
+    - RelationshipType definitions (consumed by DOM-REL)
+    - Namespaces and namespace ownership
+    - Schema compilation to JSON Schema 2020-12 and to storage index plans
+  excludes:
+    - Instances of commercial objects (DOM-COB)
+    - Taxonomy terms and classification of instances (DOM-TXO, DOM-CLS)
+    - Lifecycle model definitions (DOM-LFC) — referenced by TypeDefinition only
+
+responsibilities:
+  - Own the single definition of every type, attribute, facet, and relationship type (PRIN-001).
+  - Guarantee well-formedness: acyclic inheritance, attribute conflict resolution, facet requirement satisfaction.
+  - Publish compiled, versioned schemas that all contexts use for validation.
+  - Guarantee backward compatibility classification (MAJOR/MINOR/PATCH) of every definition change.
+
+principles: [PRIN-002, PRIN-004, PRIN-013, PRIN-016, PRIN-018, PRIN-019]
+
+boundaries:
+  upstream: [DOM-IDN, DOM-GOV, DOM-LFC]
+  downstream: [DOM-COB, DOM-REL, DOM-CAT, DOM-PRC, DOM-SRC, DOM-MDM]
+  antiCorruption: "External schemas (GS1, schema.org, TM Forum SID, HL7 FHIR, ACORD) are imported via DOM-IOP mappers into TypeDefinitions; ONT never depends on external vocabularies at runtime."
+
+ownership:
+  boundedContext: ontology
+  owningRole: Chief Data Architect
+  service: ontology-service
+  schema: ucos_ontology
+
+capabilities:
+  - {id: ONT-C1, name: Define type, description: "Draft, validate, and publish TypeDefinitions through a ChangeSet."}
+  - {id: ONT-C2, name: Compose facets, description: "Attach FacetDefinitions to types with required/optional marking."}
+  - {id: ONT-C3, name: Compile schema, description: "Produce the effective (flattened) schema of a type version, including inherited attributes and facets."}
+  - {id: ONT-C4, name: Classify change, description: "Compute compatibility class of a definition diff."}
+  - {id: ONT-C5, name: Resolve type, description: "Return the effective schema for a type URN, optionally pinned, in a context."}
+  - {id: ONT-C6, name: Import vocabulary, description: "Map external vocabulary to TypeDefinitions via IOP mappers."}
+
+services:
+  - name: OntologyCommandService
+    kind: application
+    operations: [DraftTypeDefinition, ReviseTypeDefinition, PublishTypeDefinition, DeprecateTypeDefinition, DefineAttribute, DefineFacet, DefineRelationshipType]
+  - name: SchemaCompiler
+    kind: domain-service
+    contract: "compile(typeUrn@version) -> EffectiveSchema; deterministic; pure function of the input definitions"
+  - name: CompatibilityClassifier
+    kind: domain-service
+    contract: "classify(before: Definition, after: Definition) -> MAJOR|MINOR|PATCH with reasons[]"
+  - name: OntologyQueryService
+    kind: application
+    operations: [GetTypeDefinition, ResolveEffectiveSchema, FindSubtypes, FindTypesByFacet]
+
+aggregates:
+  - name: TypeDefinition
+    kernel: true
+    identity: "urn:ucos:<namespace>:type:<name>@<semver>"
+    root: TypeDefinition
+    invariants:
+      - "INV-ONT-1: supertypes graph is acyclic across all published versions."
+      - "INV-ONT-2: an attribute code is defined at most once in the effective schema unless the redefinition is a compatible narrowing (subtype refinement)."
+      - "INV-ONT-3: every facet with required=true has all its required attributes present in the effective schema."
+      - "INV-ONT-4: a published version is immutable; changes create a new version."
+      - "INV-ONT-5: abstract=true types cannot be instantiated by DOM-COB."
+      - "INV-ONT-6: lifecycleModelRef resolves to a published LifecycleModel whose states cover the facet-required states."
+    fields:
+      - {name: urn, type: MetadataUrn, required: true}
+      - {name: namespace, type: Namespace, required: true}
+      - {name: name, type: string, required: true}
+      - {name: version, type: SemVer, required: true}
+      - {name: label, type: LocalizedText, required: true}
+      - {name: description, type: LocalizedText}
+      - {name: abstract, type: boolean, default: false}
+      - {name: supertypes, type: "MetadataUrn[]", description: "Pinned versions"}
+      - {name: facets, type: "FacetBinding[]"}
+      - {name: attributes, type: "AttributeBinding[]"}
+      - {name: allowedRelationships, type: "RelationshipConstraint[]"}
+      - {name: lifecycleModelRef, type: MetadataUrn}
+      - {name: identityStrategy, type: IdentityStrategy}
+      - {name: state, type: DefinitionState}
+      - {name: changeSetRef, type: Urn}
+  - name: AttributeDefinition
+    identity: "urn:ucos:<namespace>:attr:<code>@<semver>"
+    invariants:
+      - "INV-ONT-7: datatype is a member of the kernel datatype set or a published composite datatype."
+      - "INV-ONT-8: constraints are satisfiable (min<=max, enum non-empty, regex compiles under RE2)."
+    fields:
+      - {name: code, type: string, pattern: "^[a-z][a-zA-Z0-9]{1,63}$"}
+      - {name: datatype, type: Datatype}
+      - {name: cardinality, type: Cardinality}
+      - {name: constraints, type: "Constraint[]"}
+      - {name: localizable, type: boolean}
+      - {name: contextualizable, type: boolean, description: "Value may vary by ApplicabilityScope (resolved via CIC-011-001)"}
+      - {name: sensitivity, type: DataClassification}
+      - {name: unitDimension, type: "UnitDimension?", description: "e.g. mass, length, duration, data-volume"}
+      - {name: searchable, type: SearchHints}
+  - name: FacetDefinition
+    identity: "urn:ucos:<namespace>:facet:<name>@<semver>"
+    invariants:
+      - "INV-ONT-9: a facet declares the commands/events/policies it requires of conforming types (behavioral contract)."
+    fields:
+      - {name: attributes, type: "AttributeBinding[]"}
+      - {name: requiresPolicies, type: "MetadataUrn[]", description: "e.g. Priceable requires pricing.resolution policy family"}
+      - {name: requiresLifecycleStates, type: "string[]"}
+      - {name: capabilityContract, type: "CapabilityContract", description: "Contexts that provide behavior for this facet (e.g. Priceable->pricing, Stockable->supply)"}
+  - name: RelationshipTypeDefinition
+    identity: "urn:ucos:<namespace>:reltype:<name>@<semver>"
+    fields:
+      - {name: sourceTypes, type: "MetadataUrn[]"}
+      - {name: targetTypes, type: "MetadataUrn[]"}
+      - {name: cardinality, type: "RelCardinality", description: "1:1|1:N|N:1|N:M with min/max"}
+      - {name: hierarchical, type: boolean, description: "If true, participates in HIER acyclicity checks"}
+      - {name: acyclic, type: boolean}
+      - {name: inverseName, type: LocalizedText}
+      - {name: edgeAttributes, type: "AttributeBinding[]"}
+      - {name: semantics, type: "RelSemantics", description: "composition|aggregation|association|dependency|substitution|exclusion|requires"}
+
+entities:
+  - {name: AttributeBinding, within: TypeDefinition, fields: [attributeRef, required, defaultValue, overrideConstraints, displayOrder, group]}
+  - {name: FacetBinding, within: TypeDefinition, fields: [facetRef, required, configuration]}
+  - {name: RelationshipConstraint, within: TypeDefinition, fields: [relTypeRef, role, minCount, maxCount]}
+
+valueObjects:
+  - {name: MetadataUrn, definition: "CIC-000-002 metadata URN; equality is string equality on pinned form"}
+  - {name: SemVer, definition: "major.minor.patch[-pre]"}
+  - {name: Namespace, definition: "reverse-DNS segments; owned by exactly one Organization (DOM-ORG)"}
+  - {name: Datatype, definition: "enum: string, text, integer, decimal, boolean, date, datetime, duration, money, quantity, uri, urn, localized-text, enum, json, geo-point, geo-shape, binary-ref, composite(<urn>)"}
+  - {name: Cardinality, definition: "{min: 0..n, max: 1..n|unbounded, ordered: bool, unique: bool}"}
+  - {name: Constraint, definition: "{kind: range|length|pattern|enum|precision|unit|cel, expression, messageKey}; cel expressions evaluated with input 'value' and 'object'"}
+  - {name: DataClassification, definition: "public|internal|confidential|restricted|personal|sensitive-personal|regulated(<regime>)"}
+  - {name: IdentityStrategy, definition: "{naturalKeyAttributes: [code], uniquenessScope: tenant|namespace|global}"}
+  - {name: EffectiveSchema, definition: "Flattened attribute set + facets + relationship constraints + JSON Schema 2020-12 document + digest sha256"}
+  - {name: DefinitionState, definition: "draft|in-review|published|deprecated|retired"}
+
+commands:
+  - {name: DraftTypeDefinition, input: "{namespace, name, label, supertypes[], facets[], attributes[], allowedRelationships[], lifecycleModelRef, changeSetRef}", emits: [TypeDefinitionDrafted], preconditions: ["caller holds ontology.type.author on namespace", "name unique in namespace among non-retired"]}
+  - {name: ReviseTypeDefinition, input: "{urn, expectedRevision, patch(JSON Merge Patch)}", emits: [TypeDefinitionRevised], preconditions: ["state=draft|in-review"]}
+  - {name: SubmitTypeDefinitionForReview, input: "{urn}", emits: [TypeDefinitionSubmitted], preconditions: ["SchemaCompiler.compile succeeds", "all INV-ONT-* hold"]}
+  - {name: PublishTypeDefinition, input: "{urn, approvalRef}", emits: [TypeDefinitionPublished], preconditions: ["ChangeSet approved (DOM-GOV)", "version bump >= CompatibilityClassifier result"]}
+  - {name: DeprecateTypeDefinition, input: "{urn, successor?, sunsetAt}", emits: [TypeDefinitionDeprecated]}
+  - {name: RetireTypeDefinition, input: "{urn}", emits: [TypeDefinitionRetired], preconditions: ["zero live CommercialObject instances pinned to this version (query DOM-COB projection)"]}
+  - {name: DefineAttribute, input: "AttributeDefinition draft", emits: [AttributeDefinitionPublished]}
+  - {name: DefineFacet, input: "FacetDefinition draft", emits: [FacetDefinitionPublished]}
+  - {name: DefineRelationshipType, input: "RelationshipTypeDefinition draft", emits: [RelationshipTypePublished]}
+
+queries:
+  - {name: GetTypeDefinition, input: "{urn (pinned or unpinned), context?}", output: TypeDefinition, consistency: strong}
+  - {name: ResolveEffectiveSchema, input: "{urn, context?}", output: EffectiveSchema, consistency: "cached; invalidated by TypeDefinitionPublished"}
+  - {name: FindSubtypes, input: "{urn, transitive: bool}", output: "MetadataUrn[]"}
+  - {name: FindTypesByFacet, input: "{facetUrn}", output: "MetadataUrn[]"}
+  - {name: FindTypes, input: "{namespace?, facet?, state?, cursor, limit<=500}", output: "page of TypeDefinition summaries"}
+  - {name: FindAttributes, input: "{namespace?, datatype?, sensitivity?, cursor, limit}", output: "page of AttributeDefinition"}
+  - {name: FindFacets, input: "{namespace?, cursor, limit}", output: "page of FacetDefinition"}
+  - {name: FindRelationshipTypes, input: "{namespace?, sourceType?, targetType?, hierarchical?, cursor, limit}", output: "page of RelationshipTypeDefinition"}
+  - {name: DiffDefinitions, input: "{fromUrn, toUrn}", output: "{changes[], compatibility}"}
+
+apis:
+  - {style: REST, path: "/v1/ontology/types", methods: {POST: DraftTypeDefinition, GET: "FindTypes (filter: namespace, facet, state; cursor pagination)"}}
+  - {style: REST, path: "/v1/ontology/types/{urn}", methods: {GET: GetTypeDefinition, PATCH: ReviseTypeDefinition}}
+  - {style: REST, path: "/v1/ontology/types/{urn}:submit", methods: {POST: SubmitTypeDefinitionForReview}}
+  - {style: REST, path: "/v1/ontology/types/{urn}:publish", methods: {POST: PublishTypeDefinition}}
+  - {style: REST, path: "/v1/ontology/types/{urn}/effective-schema", methods: {GET: ResolveEffectiveSchema}, cache: "ETag = schema digest; Cache-Control: max-age=300, stale-while-revalidate=3600"}
+  - {style: REST, path: "/v1/ontology/attributes", methods: {POST: DefineAttribute, GET: FindAttributes}}
+  - {style: REST, path: "/v1/ontology/facets", methods: {POST: DefineFacet, GET: FindFacets}}
+  - {style: REST, path: "/v1/ontology/relationship-types", methods: {POST: DefineRelationshipType, GET: FindRelationshipTypes}}
+  - {style: gRPC, service: "ucos.ontology.v1.SchemaService", rpcs: [ResolveEffectiveSchema, BatchResolveEffectiveSchema]}
+
+events:
+  - {type: ucos.ontology.type.drafted.v1, payload: "{urn, namespace, name, version, changeSetRef}"}
+  - {type: ucos.ontology.type.revised.v1, payload: "{urn, revision, patch}"}
+  - {type: ucos.ontology.type.submitted.v1, payload: "{urn, schemaDigest, compatibility}"}
+  - {type: ucos.ontology.type.published.v1, payload: "{urn, schemaDigest, compatibility, supertypes, facets}", consumers: [commercial-object, catalog, search, ui, graph]}
+  - {type: ucos.ontology.type.deprecated.v1, payload: "{urn, successor, sunsetAt}"}
+  - {type: ucos.ontology.type.retired.v1, payload: "{urn}"}
+  - {type: ucos.ontology.attribute.published.v1, payload: "{urn, datatype, sensitivity}"}
+  - {type: ucos.ontology.facet.published.v1, payload: "{urn}"}
+  - {type: ucos.ontology.reltype.published.v1, payload: "{urn, hierarchical, acyclic}"}
+
+stateMachines:
+  - name: DefinitionLifecycle
+    appliesTo: [TypeDefinition, AttributeDefinition, FacetDefinition, RelationshipTypeDefinition]
+    initial: draft
+    states: [draft, in-review, published, deprecated, retired]
+    terminal: [retired]
+    transitions:
+      - {from: draft, to: in-review, command: SubmitTypeDefinitionForReview, guard: "compile ok"}
+      - {from: in-review, to: draft, command: ReviseTypeDefinition, guard: "reviewer rejected"}
+      - {from: in-review, to: published, command: PublishTypeDefinition, guard: "ChangeSet approved"}
+      - {from: published, to: deprecated, command: DeprecateTypeDefinition}
+      - {from: deprecated, to: retired, command: RetireTypeDefinition, guard: "no live pinned instances"}
+
+rules:
+  - {id: RUL-ONT-1, statement: "Attribute merge across supertypes: if two supertypes define the same attribute code with different datatypes, compilation fails (E-ONT-ATTR-CONFLICT)."}
+  - {id: RUL-ONT-2, statement: "Subtype may narrow constraints (smaller range, subset enum, required where optional) but never widen them."}
+  - {id: RUL-ONT-3, statement: "Supertype linearization uses C3 (as in Python MRO); attribute display order and default precedence follow the linearization."}
+  - {id: RUL-ONT-4, statement: "Compatibility: removing attribute, changing datatype, narrowing constraint on existing type, adding required attribute without default => MAJOR; adding optional attribute/facet, adding enum value => MINOR; label/description => PATCH."}
+  - {id: RUL-ONT-5, statement: "Kernel types in namespace ucos.kernel cannot be subtyped with abstract=false overrides of kernel invariants."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:ontology.namespace-authoring", purpose: "Who may author in a namespace", inputs: [principal, namespace, action]}
+  - {urn: "urn:ucos:ucos.std:policy:ontology.publication-approval", purpose: "Number and roles of approvers required by compatibility class (default MAJOR: 2 incl. domain owner; MINOR: 1; PATCH: 0)"}
+  - {urn: "urn:ucos:ucos.std:policy:ontology.sensitivity-floor", purpose: "Minimum DataClassification per datatype/attribute pattern (e.g. attributes tagged person.* >= personal)"}
+
+decisions:
+  - {id: DEC-ONT-1, question: "Is this definition change publishable without breaking consumers?", inputs: ["CompatibilityClassifier result", "declared version bump", "consumer pins (from COB projection)"], output: "allow|deny + reasons", authority: CompatibilityClassifier}
+  - {id: DEC-ONT-2, question: "Which type version does an unpinned reference resolve to?", algorithm: "Highest published (non-deprecated preferred) version whose ApplicabilityScope matches context; deprecated chosen only if no published exists."}
+
+security:
+  permissions:
+    - ontology.type.read
+    - ontology.type.author
+    - ontology.type.approve
+    - ontology.type.publish
+    - ontology.namespace.admin
+  dataClassification: "Definitions are internal; definitions in tenant namespaces are tenant-confidential."
+  tenancy: "ucos.* namespaces are global read-only to tenants; tenant namespaces are visible only to that tenant and its delegated partners."
+  threats: ["Schema poisoning via CEL constraints -> CEL evaluation sandbox with cost limit 10,000 and no I/O functions", "Namespace squatting -> namespace registration requires verified Organization ownership (DOM-ORG)"]
+
+governance:
+  changeControl: "Every publish is bound to an approved ChangeSet (DOM-GOV). Approval rule from policy ontology.publication-approval."
+  evidence: "Publish captures EffectiveSchema digest + approver identities as Evidence (DOM-EVD)."
+  audit: "All commands audited (who, what, when, before/after digest)."
+
+runtimeBehavior:
+  consistency: "Command side strongly consistent per aggregate (optimistic concurrency on revision). Schema reads eventually consistent with <= 2s propagation p99."
+  slo: {ResolveEffectiveSchema_p99_ms: 10, availability: "99.99%"}
+  caching: "Every context embeds a schema cache keyed by pinned URN (immutable => infinite TTL) and by unpinned URN+contextDigest (TTL 300s, invalidated by type.published events)."
+  failureModes: ["Ontology service unavailable: consumers continue with cached pinned schemas; unpinned resolution serves last-known with Warning header 'ucos-stale-schema'"]
+
+persistenceModel:
+  store: PostgreSQL schema ucos_ontology
+  tables:
+    - {name: definitions, columns: "urn text pk, kind text, namespace text, name text, version_major int, version_minor int, version_patch int, state text, body jsonb, schema_digest bytea, revision bigint, created_at timestamptz, published_at timestamptz", indexes: ["unique(kind, namespace, name, version_major, version_minor, version_patch)", "gin(body jsonb_path_ops)", "(kind, state)"]}
+    - {name: supertype_edges, columns: "sub_urn text, super_urn text, ordinal int", indexes: ["pk(sub_urn, super_urn)", "(super_urn)"]}
+    - {name: facet_bindings, columns: "type_urn text, facet_urn text, required bool", indexes: ["(facet_urn)"]}
+    - {name: compiled_schemas, columns: "type_urn text pk, schema jsonb, digest bytea, compiled_at timestamptz"}
+    - {name: event_store, columns: "standard (CIC-003-001 §4)"}
+    - {name: outbox, columns: "standard (CIC-006-001 §5)"}
+  partitioning: "None required (definition volume < 10^7); tenant namespaces filtered by RLS on namespace owner."
+  retention: "Indefinite: definitions are referenced by historical objects and evidence."
+
+extensionModel:
+  extensionPoints:
+    - "New TypeDefinitions in any owned namespace (subtyping ucos.std types)"
+    - "New FacetDefinitions with capability contracts bound to plugins (CORPUS-028)"
+    - "New composite datatypes"
+    - "New Constraint kinds via CEL functions registered by certified plugins"
+  forbidden: ["Modifying published definitions", "Subtyping across tenants without delegation"]
+
+certificationCriteria:
+  - {id: CR-ONT-01, rule: "Property test: SchemaCompiler is deterministic — compiling the same inputs 1,000 times yields identical digests.", level: L1}
+  - {id: CR-ONT-02, rule: "CompatibilityClassifier test corpus (>= 200 diff cases from RUL-ONT-4) passes 100%.", level: L1}
+  - {id: CR-ONT-03, rule: "Cycle insertion tests: any attempt to publish a cyclic supertype or hierarchical reltype graph is rejected.", level: L1}
+  - {id: CR-ONT-04, rule: "ResolveEffectiveSchema p99 <= 10ms at 5,000 rps with warm cache.", level: L2}
+validationRules:
+  - {id: VR-ONT-01, rule: "Every TypeDefinition in ucos.std pack compiles without error."}
+  - {id: VR-ONT-02, rule: "Every facet referenced by a type exists and is published."}
+  - {id: VR-ONT-03, rule: "Every attribute with sensitivity personal|sensitive-personal has localizable=false or an explicit justification."}

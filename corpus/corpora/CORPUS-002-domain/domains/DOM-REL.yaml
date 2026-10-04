@@ -1,0 +1,168 @@
+header:
+  id: DOM-REL
+  title: Relationships Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-002-001, CIC-003-001, CIC-011-001]
+  traces: [PRIN-007, PRIN-017, PRIN-001, DOM-ONT]
+  certification: [CR-REL-01, CR-REL-02, CR-REL-03]
+  validation: [VR-REL-01]
+
+
+# Hierarchy (DOM-HIER) is the set of hierarchical, acyclic RelationshipTypes plus their closure
+# tables maintained here (PRIN-017).
+subsumes:
+  - domain: DOM-HIER
+    coverage: "Hierarchical reltypes (INV-REL-3), closure table, Traverse, ConstraintGuard acyclicity, CR-REL-01/02"
+
+purpose: >
+  Hold every association between UCOS aggregates as a first-class, typed, versioned, time-bounded,
+  optionally context-scoped Relationship. Replaces all cross-domain foreign keys and all fixed hierarchies.
+
+scope:
+  includes:
+    - Relationship instances typed by RelationshipTypeDefinitions (DOM-ONT)
+    - Cardinality, acyclicity, and endpoint-type enforcement
+    - Temporal validity and context scoping of edges
+    - Traversal queries bounded in depth (graph-native traversal is served by DOM-KGR projection)
+  excludes:
+    - RelationshipType definitions (DOM-ONT)
+    - Analytical graph algorithms and knowledge inference (DOM-KGR, DOM-KNW)
+
+responsibilities:
+  - Enforce relationship constraints transactionally.
+  - Emit relationship events consumed by graph projection, catalog membership, search.
+
+principles: [PRIN-007, PRIN-017, PRIN-008]
+
+boundaries:
+  upstream: [DOM-ONT, DOM-IDN, DOM-CTX]
+  downstream: [DOM-KGR, DOM-HIER, DOM-COB, DOM-CAT, DOM-SRC, DOM-PTY]
+
+ownership:
+  boundedContext: graph
+  owningRole: Chief Data Architect
+  service: relationship-service
+  schema: ucos_graph
+
+capabilities:
+  - {id: REL-C1, name: Link, description: "Create a typed edge between two aggregates."}
+  - {id: REL-C2, name: Unlink / end, description: "End an edge's validity (edges are never physically deleted)."}
+  - {id: REL-C3, name: Traverse, description: "Bounded traversal (depth <= 8) with type and context filters."}
+  - {id: REL-C4, name: Bulk link, description: "Transactional batch of up to 10,000 link operations."}
+
+services:
+  - {name: RelationshipCommandService, kind: application, operations: [CreateRelationship, EndRelationship, UpdateRelationshipAttributes, BulkRelationshipOperations]}
+  - {name: ConstraintGuard, kind: domain-service, contract: "check(op, relType, current edges) -> violations; cardinality via per-(source,relType) and per-(target,relType) counters; acyclicity via closure-table reachability check"}
+  - {name: RelationshipQueryService, kind: application, operations: [GetRelationship, FindRelationships, Traverse]}
+
+aggregates:
+  - name: Relationship
+    kernel: true
+    identity: "urn:ucos:<tenant>:rel:<ulid>"
+    invariants:
+      - "INV-REL-1: source and target types conform to relType.sourceTypes/targetTypes (subtype-aware)."
+      - "INV-REL-2: cardinality max not exceeded at any instant of validity."
+      - "INV-REL-3: if relType.acyclic, adding the edge creates no cycle among edges valid at overlapping times."
+      - "INV-REL-4: validFrom < validTo; ended edges are immutable."
+    fields:
+      - {name: id, type: InstanceUrn}
+      - {name: relTypeRef, type: MetadataUrn}
+      - {name: source, type: InstanceUrn}
+      - {name: target, type: InstanceUrn}
+      - {name: scope, type: ApplicabilityScope}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+      - {name: ordinal, type: "decimal?", description: "Ordering among siblings (fractional indexing)"}
+      - {name: attributes, type: "map<code,value>", description: "Validated against relType.edgeAttributes"}
+      - {name: revision, type: long}
+
+entities: []
+
+valueObjects:
+  - {name: TraversalSpec, definition: "{start: InstanceUrn[], relTypes: [MetadataUrn], direction: out|in|both, maxDepth<=8, context?, asOf?, filter: CEL over edge+vertex summary}"}
+  - {name: Path, definition: "ordered list of {relId, from, to}"}
+
+commands:
+  - {name: CreateRelationship, input: "{relTypeRef, source, target, scope?, validFrom?, validTo?, ordinal?, attributes?, idempotencyKey}", emits: [RelationshipCreated], preconditions: ["INV-REL-1..4", "PDP allow rel.create on both endpoints' owning contexts"]}
+  - {name: EndRelationship, input: "{id, expectedRevision, validTo (default now)}", emits: [RelationshipEnded]}
+  - {name: UpdateRelationshipAttributes, input: "{id, expectedRevision, attributes, ordinal?}", emits: [RelationshipAttributesChanged]}
+  - {name: BulkRelationshipOperations, input: "{ops: [create|end|update] <= 10000, atomic: bool}", emits: ["per-op events", RelationshipBatchCompleted]}
+
+queries:
+  - {name: GetRelationship, input: "{id}", output: Relationship}
+  - {name: FindRelationships, input: "{source?|target?, relTypeRef?, asOf?, context?, cursor, limit}", output: "page of Relationship"}
+  - {name: Traverse, input: TraversalSpec, output: "{vertices[], edges[], paths[]?}", note: "Served from closure tables for hierarchical types; delegated to DOM-KGR projection for depth > 3 non-hierarchical"}
+
+apis:
+  - {style: REST, path: "/v1/graph/relationships", methods: {POST: CreateRelationship, GET: FindRelationships}}
+  - {style: REST, path: "/v1/graph/relationships/{id}", methods: {GET: GetRelationship, PATCH: UpdateRelationshipAttributes}}
+  - {style: REST, path: "/v1/graph/relationships/{id}:end", methods: {POST: EndRelationship}}
+  - {style: REST, path: "/v1/graph/relationships:bulk", methods: {POST: BulkRelationshipOperations}}
+  - {style: REST, path: "/v1/graph:traverse", methods: {POST: Traverse}}
+
+events:
+  - {type: ucos.graph.relationship.created.v1, payload: "{id, relTypeRef, source, target, scope, validFrom, validTo, attributes}"}
+  - {type: ucos.graph.relationship.ended.v1, payload: "{id, validTo}"}
+  - {type: ucos.graph.relationship.attributes-changed.v1, payload: "{id, revision, attributes, ordinal}"}
+  - {type: ucos.graph.relationship.batch-completed.v1, payload: "{batchId, created, ended, updated, failed}"}
+
+stateMachines:
+  - name: RelationshipValidity
+    initial: pending
+    states: [pending, active, ended]
+    terminal: [ended]
+    transitions:
+      - {from: pending, to: active, trigger: "time reaches validFrom (evaluated at read; no scheduler)"}
+      - {from: active, to: ended, command: EndRelationship}
+      - {from: pending, to: ended, command: EndRelationship}
+
+rules:
+  - {id: RUL-REL-1, statement: "Composition semantics: ending a composition edge whose parent is active and whose component slot is required is rejected (E-REL-REQUIRED-COMPONENT)."}
+  - {id: RUL-REL-2, statement: "Edges between tenants are allowed only for relTypes flagged crossTenant and only with an active delegation (DOM-MKT/DOM-AUTH)."}
+  - {id: RUL-REL-3, statement: "Ordinal uses fractional indexing strings; rebalancing emits attributes-changed events in a single batch."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:rel.create", purpose: "Authorization to link, evaluated against both endpoints"}
+  - {urn: "urn:ucos:ucos.std:policy:rel.traversal-limits", purpose: "Max depth/fan-out per tenant plan"}
+
+decisions:
+  - {id: DEC-REL-1, question: "Can this edge be created?", inputs: ["INV-REL-1..4", "PDP rel.create"], output: "allow|deny + violations"}
+  - {id: DEC-REL-2, question: "Which edges apply in context C at time T?", algorithm: "Temporal filter + scope Matches (CIC-011-001 §3.1); cardinality many"}
+
+security:
+  permissions: [rel.read, rel.create, rel.end, rel.bulk]
+  dataClassification: "Edges inherit the higher classification of their endpoints; party-to-party edges are personal data."
+  threats: ["Graph inference of hidden objects -> traversal results filtered by PDP read on each vertex; hidden vertices pruned with their subtrees"]
+
+governance:
+  changeControl: "Edges of relTypes flagged governed (e.g. regulatory hierarchies) require ChangeSet."
+  evidence: "Bulk operations > 1,000 ops attach batch manifest as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong for constraint checks within a tenant (serializable on (relType, endpoint) lock keys); projections eventual (p99 2s)."
+  slo: {CreateRelationship_p99_ms: 50, Traverse_depth3_p99_ms: 30, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_graph (+ graph projection DOM-KGR)
+  tables:
+    - {name: relationships, columns: "tenant_id uuid, id char(26), rel_type text, source text, target text, scope jsonb, valid_from timestamptz, valid_to timestamptz, ordinal text, attributes jsonb, revision bigint", pk: "(tenant_id, id)", indexes: ["(tenant_id, source, rel_type) INCLUDE (target, valid_from, valid_to)", "(tenant_id, target, rel_type) INCLUDE (source, valid_from, valid_to)", "gist(tstzrange(valid_from, valid_to))"]}
+    - {name: closure, columns: "tenant_id uuid, rel_type text, ancestor text, descendant text, depth int, valid_from timestamptz, valid_to timestamptz", pk: "(tenant_id, rel_type, ancestor, descendant, valid_from)", note: "Maintained only for hierarchical relTypes"}
+    - {name: cardinality_counters, columns: "tenant_id, rel_type, endpoint, side, active_count", pk: "(tenant_id, rel_type, endpoint, side)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 64; very large tenants sub-partitioned by rel_type."
+  retention: "Ended edges retained for history; hot for 24 months after validTo then archived."
+
+extensionModel:
+  extensionPoints: ["New relationship types via DOM-ONT", "Edge attribute schemas", "Plugin traversal filters (pure CEL functions)"]
+  forbidden: ["Physical deletion of edges (except crypto-shred of personal edges)"]
+
+certificationCriteria:
+  - {id: CR-REL-01, rule: "Concurrent cycle-creation test (two edges that together form a cycle submitted concurrently) never commits both.", level: L1}
+  - {id: CR-REL-02, rule: "Closure table equals recomputed transitive closure after 10^5 random operations.", level: L1}
+  - {id: CR-REL-03, rule: "Traverse depth 3, fan-out 50 p99 <= 30ms on 10^8-edge dataset.", level: L2}
+validationRules:
+  - {id: VR-REL-01, rule: "Every relTypeRef in ucos.std pack seeds exists in DOM-ONT definitions."}

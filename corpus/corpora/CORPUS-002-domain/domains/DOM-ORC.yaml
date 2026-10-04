@@ -1,0 +1,177 @@
+header:
+  id: DOM-ORC
+  title: Orchestration Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-018-001, CIC-002-001, CIC-025-001, CIC-006-001]
+  traces: [PRIN-008, PRIN-011, PRIN-015]
+  certification: [CR-ORC-01, CR-ORC-02, CR-ORC-03]
+  validation: [VR-ORC-01, VR-ORC-02]
+
+purpose: >
+  Give operations one place to see and resolve cross-domain process exceptions: a registry of
+  process managers (sagas) and their instances' progress (order fulfilment plans, ChangeSet apply,
+  migrations, DSRs), fallout/exception queues with retry and manual resolution, SLA tracking for
+  end-to-end processes, and process-level metrics — without taking ownership of the processes.
+
+scope:
+  includes:
+    - Process type registry (saga kinds declared by initiating contexts, steps, compensations, SLAs)
+    - Process instance projection (from step events of sagas and workflows)
+    - Fallout/exception queue (failed steps, stuck instances, compensation failures) with retry/skip/compensate/resolve actions routed to owning contexts
+    - End-to-end SLA timers and escalation
+  excludes:
+    - Executing saga steps (owning contexts), workflow engine (DOM-WFL), DLQ mechanics (DOM-EVT)
+
+responsibilities:
+  - Every stuck or failed process step is visible with an owner within minutes.
+  - Resolution actions go through owning contexts' APIs (no direct state edits).
+  - End-to-end process SLAs measured.
+
+principles: [PRIN-008, PRIN-011, PRIN-015]
+
+boundaries:
+  upstream: [DOM-ORD, DOM-GOV, DOM-WFL, DOM-PRI, DOM-EVT, DOM-RTM]
+  downstream: [DOM-ORD, DOM-FUL, DOM-SDL, DOM-BIL, DOM-MON]
+
+ownership:
+  boundedContext: automation
+  owningRole: Chief Platform Architect
+  service: orchestration-service
+  schema: ucos_automation
+
+capabilities:
+  - {id: ORC-C1, name: Process registry, description: "Declare process types with steps, compensations, SLAs."}
+  - {id: ORC-C2, name: Visibility, description: "Track instances across contexts from events."}
+  - {id: ORC-C3, name: Fallout, description: "Exception queues with routed resolution actions."}
+  - {id: ORC-C4, name: SLA, description: "End-to-end timers and escalation."}
+
+services:
+  - {name: ProcessRegistryService, kind: application, operations: [RegisterProcessType]}
+  - {name: ProcessTracker, kind: application, contract: "Consumes step events (e.g. order.fulfillment-task-*, changeset.applying/applied, workflow.*) mapped by process type definitions; detects stuck steps (no progress > step SLA)"}
+  - {name: FalloutService, kind: application, operations: [AssignFallout, RetryFalloutStep, SkipFalloutStep, CompensateFallout, ResolveFallout]}
+  - {name: OrchestrationQueryService, kind: application, operations: [GetProcessInstance, FindProcessInstances, GetFalloutQueue, GetProcessSlaReport]}
+
+aggregates:
+  - name: ProcessType
+    identity: "urn:ucos:<namespace>:process-type:<code>"
+    invariants: ["INV-ORC-1: each step names owning context and the APIs for retry/compensate; SLAs per step and end-to-end."]
+    fields:
+      - {name: code, type: "string (e.g. order-fulfillment, changeset-apply, dsr-erasure, tenant-relocation)"}
+      - {name: steps, type: "[{code, context, startEvent, completeEvent, failEvent, retryOperation, compensateOperation, sla}]"}
+      - {name: endToEndSla, type: duration}
+  - name: FalloutItem
+    identity: "urn:ucos:<tenant>:fallout:<ulid>"
+    invariants: ["INV-ORC-2: one open item per (processInstance, step); actions invoke owning-context operations with idempotency keys."]
+    fields:
+      - {name: processType, type: string}
+      - {name: processInstanceRef, type: string}
+      - {name: step, type: string}
+      - {name: error, type: "{code, message, retryable}"}
+      - {name: assignee, type: "PartyUrn?"}
+      - {name: attempts, type: int}
+      - {name: status, type: "open|assigned|retrying|resolved|skipped|compensated"}
+
+entities:
+  - {name: ProcessInstanceView, within: "projection", fields: [processType, instanceRef, steps (status, startedAt, completedAt), status, slaState]}
+
+valueObjects:
+  - {name: SlaReport, definition: "{processType, window, onTimePct, p50, p95, breaches, topFailureSteps}"}
+
+commands:
+  - {name: RegisterProcessType, input: "ProcessType + changeSetRef", emits: [ProcessTypeRegistered]}
+  - {name: AssignFallout, input: "{id, assignee}", emits: [FalloutAssigned]}
+  - {name: RetryFalloutStep, input: "{id}", emits: [FalloutRetried]}
+  - {name: SkipFalloutStep, input: "{id, reason, approvalRef?}", emits: [FalloutSkipped], preconditions: ["step declares skippable"]}
+  - {name: CompensateFallout, input: "{id, reason}", emits: [FalloutCompensated]}
+  - {name: ResolveFallout, input: "{id, resolution, evidenceRef?}", emits: [FalloutResolved]}
+
+queries:
+  - {name: GetProcessInstance, input: "{processType, instanceRef}", output: ProcessInstanceView}
+  - {name: FindProcessInstances, input: "{processType?, status?, slaState?, cursor}", output: "page"}
+  - {name: GetFalloutQueue, input: "{processType?, status?, assignee?, cursor}", output: "FalloutItem[]"}
+  - {name: GetProcessSlaReport, input: "{processType, window}", output: SlaReport}
+
+apis:
+  - {style: REST, path: "/v1/orchestration/process-types", methods: {POST: RegisterProcessType}}
+  - {style: REST, path: "/v1/orchestration/processes", methods: {GET: FindProcessInstances}}
+  - {style: REST, path: "/v1/orchestration/processes/{processType}/{instanceRef}", methods: {GET: GetProcessInstance}}
+  - {style: REST, path: "/v1/orchestration/fallout", methods: {GET: GetFalloutQueue}}
+  - {style: REST, path: "/v1/orchestration/fallout/{id}:assign", methods: {POST: AssignFallout}}
+  - {style: REST, path: "/v1/orchestration/fallout/{id}:retry", methods: {POST: RetryFalloutStep}}
+  - {style: REST, path: "/v1/orchestration/fallout/{id}:skip", methods: {POST: SkipFalloutStep}}
+  - {style: REST, path: "/v1/orchestration/fallout/{id}:compensate", methods: {POST: CompensateFallout}}
+  - {style: REST, path: "/v1/orchestration/fallout/{id}:resolve", methods: {POST: ResolveFallout}}
+  - {style: REST, path: "/v1/orchestration/sla-reports", methods: {GET: GetProcessSlaReport}}
+
+events:
+  - {type: ucos.automation.process-type.registered.v1, payload: "{code, steps}"}
+  - {type: ucos.automation.fallout.opened.v1, payload: "{id, processType, instanceRef, step, error}", consumers: [monitoring, work queues]}
+  - {type: ucos.automation.fallout.assigned.v1, payload: "{id, assignee}"}
+  - {type: ucos.automation.fallout.retried.v1, payload: "{id, attempt}"}
+  - {type: ucos.automation.fallout.skipped.v1, payload: "{id, reason}"}
+  - {type: ucos.automation.fallout.compensated.v1, payload: "{id}"}
+  - {type: ucos.automation.fallout.resolved.v1, payload: "{id, resolution}"}
+  - {type: ucos.automation.process.sla-breached.v1, payload: "{processType, instanceRef, step?, breachedAt}"}
+
+stateMachines:
+  - name: FalloutLifecycle
+    initial: open
+    states: [open, assigned, retrying, resolved, skipped, compensated]
+    terminal: [resolved, skipped, compensated]
+    transitions:
+      - {from: open, to: assigned, command: AssignFallout}
+      - {from: [open, assigned], to: retrying, command: RetryFalloutStep}
+      - {from: retrying, to: resolved, trigger: "step completion event observed"}
+      - {from: retrying, to: assigned, trigger: "step failed again"}
+      - {from: [open, assigned], to: skipped, command: SkipFalloutStep}
+      - {from: [open, assigned], to: compensated, command: CompensateFallout}
+      - {from: [open, assigned], to: resolved, command: ResolveFallout}
+
+rules:
+  - {id: RUL-ORC-1, statement: "Fallout actions call the step's declared retry/compensate operations on the owning context; ORC never mutates another context's state."}
+  - {id: RUL-ORC-2, statement: "Fallout items older than the step SLA escalate per policy orchestration.escalation; financial process types escalate to finance operations."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:orchestration.escalation", purpose: "Escalation levels and timings by process type"}
+
+decisions:
+  - {id: DEC-ORC-1, question: "Is process instance P stuck?", algorithm: "No completion event for current step within step SLA"}
+
+security:
+  permissions: [orchestration.read, orchestration.process-type.register, orchestration.fallout.work, orchestration.fallout.skip]
+  dataClassification: "Operational; payload excerpts redacted."
+  threats: ["Skip abuse bypassing controls -> skip requires approval for financial process types"]
+
+governance:
+  changeControl: "Process type registration via ChangeSet."
+  evidence: "Skip/resolve decisions audited; financial skips evidence-backed."
+
+runtimeBehavior:
+  consistency: "Projection eventual (p99 5s)."
+  slo: {fallout_visibility_p99_s: 60, availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_automation (separate tables)
+  tables:
+    - {name: process_types, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: process_instances, columns: "tenant_id, process_type, instance_ref, body jsonb, status, sla_state", pk: "(tenant_id, process_type, instance_ref)", indexes: ["(tenant_id, status, sla_state)"]}
+    - {name: fallout_items, columns: "tenant_id, id, process_type, instance_ref, step, body jsonb, assignee, status, opened_at", pk: "(tenant_id, id)", indexes: ["unique(tenant_id, instance_ref, step) WHERE status IN ('open','assigned','retrying')"]}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Resolved fallout 1 year."
+
+extensionModel:
+  extensionPoints: ["Process types declared by contexts and plugins"]
+  forbidden: ["Direct state repair outside owning APIs"]
+
+certificationCriteria:
+  - {id: CR-ORC-01, rule: "Injected step failures in order fulfilment appear as fallout within 60s and retry succeeds via owning API.", level: L1}
+  - {id: CR-ORC-02, rule: "No ORC action writes outside ucos_automation (schema grant test).", level: L1}
+  - {id: CR-ORC-03, rule: "SLA breach detection matches golden timelines.", level: L1}
+validationRules:
+  - {id: VR-ORC-01, rule: "Every saga in specs (PlaceOrder, ChangeSet apply, DSR, tenant relocation, bill run) has a registered process type."}
+  - {id: VR-ORC-02, rule: "Every process step's retry/compensate operations exist in published contracts."}

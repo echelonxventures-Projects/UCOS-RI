@@ -1,0 +1,175 @@
+header:
+  id: DOM-OBS
+  title: Observability Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-022-001, CIC-014-001, CIC-021-001, CIC-002-001]
+  traces: [PRIN-015, PRIN-022, PRIN-010, CIC-022-001]
+  certification: [CR-OBS-01, CR-OBS-02, CR-OBS-03]
+  validation: [VR-OBS-01, VR-OBS-02]
+
+purpose: >
+  Collect, protect, route, and serve telemetry (traces, metrics, logs, profiles) from every UCOS
+  workload per CIC-022-001: OpenTelemetry collectors per cell, redaction, sampling, tenant-aware
+  routing to backends, telemetry schemas and signal catalogs, and tenant-facing operational views.
+
+scope:
+  includes:
+    - Collector fleet configuration (pipelines, processors, exporters) as code
+    - Redaction and DLP processors; sampling policies (head + tail)
+    - Signal catalog (metric/span/log definitions per module, owners, cardinality budgets)
+    - Backend routing (TelemetryBackendPort adapters) and retention tiers
+    - Tenant-scoped operational views (their API usage, latency, errors) without cross-tenant data
+  excludes:
+    - Alerting and on-call (DOM-MON), SLO/error budget governance (DOM-RLB), audit (DOM-AUD)
+
+responsibilities:
+  - Telemetry never carries personal data or secrets in clear.
+  - Cardinality and cost within budgets.
+  - Trace continuity across sync and async hops.
+
+principles: [PRIN-010, PRIN-015, PRIN-022]
+
+boundaries:
+  upstream: [DOM-RTM, DOM-SEC, DOM-PRI, DOM-CFG]
+  downstream: [DOM-MON, DOM-RLB, DOM-CYR, DOM-VER, DOM-ANL]
+
+ownership:
+  boundedContext: runtime
+  owningRole: Chief Platform Architect
+  service: observability-service
+  schema: ucos_runtime
+
+capabilities:
+  - {id: OBS-C1, name: Collect, description: "Per-cell OTLP collectors and pipelines."}
+  - {id: OBS-C2, name: Protect, description: "Redaction, DLP, sampling."}
+  - {id: OBS-C3, name: Catalog, description: "Signal definitions and cardinality budgets."}
+  - {id: OBS-C4, name: Route & retain, description: "Backend routing and retention tiers."}
+  - {id: OBS-C5, name: Tenant views, description: "Per-tenant usage and performance views."}
+
+services:
+  - {name: ObservabilityConfigService, kind: application, operations: [DefinePipeline, DefineSamplingPolicy, DefineRedactionRule, RegisterSignal, SetCardinalityBudget]}
+  - {name: TelemetryGateway, kind: infrastructure, contract: "OTLP ingress per cell; processors: attribute allow-lists, DLP detectors (email, phone, PAN, IBAN, national IDs), tenant hashing, tail sampling; exporters via TelemetryBackendPort"}
+  - {name: ObservabilityQueryService, kind: application, operations: [GetSignalCatalog, GetTenantUsageView, GetCardinalityReport, GetTrace]}
+
+aggregates:
+  - name: SignalDefinition
+    identity: "urn:ucos:platform:signal:<name>"
+    invariants: ["INV-OBS-1: name follows CIC-001-001 §7; allowed attributes declared; tenant attribute only as tier unless cardinality-safe; owner set."]
+    fields:
+      - {name: name, type: string}
+      - {name: kind, type: "metric|span|log|profile"}
+      - {name: unit, type: "UCUM"}
+      - {name: attributes, type: "allowed attribute keys"}
+      - {name: cardinalityBudget, type: int}
+      - {name: owner, type: "module/team"}
+  - name: TelemetryPipeline
+    identity: "urn:ucos:platform:telemetry-pipeline:<cell>/<name>"
+    fields:
+      - {name: receivers, type: "string[]"}
+      - {name: processors, type: "ordered processor refs (redaction, sampling, batching)"}
+      - {name: exporters, type: "backend refs"}
+      - {name: version, type: int}
+  - name: SamplingPolicy
+    identity: "urn:ucos:platform:sampling-policy:<name>"
+    fields:
+      - {name: headRate, type: "decimal (default 0.05)"}
+      - {name: tailRules, type: "[keep errors, keep > SLO p99, keep regulated decision types, rate per route]"}
+
+entities:
+  - {name: RedactionRule, within: TelemetryPipeline, fields: [ruleId, matcher (attribute key pattern | value detector), action (drop|hash|mask)]}
+
+valueObjects:
+  - {name: CardinalityReport, definition: "{signal, series, budget, topAttributes}"}
+
+commands:
+  - {name: DefinePipeline, input: "TelemetryPipeline + changeSetRef", emits: [TelemetryPipelineDefined]}
+  - {name: DefineSamplingPolicy, input: "SamplingPolicy", emits: [SamplingPolicyDefined]}
+  - {name: DefineRedactionRule, input: "{pipeline, rule}", emits: [RedactionRuleDefined]}
+  - {name: RegisterSignal, input: "SignalDefinition", emits: [SignalRegistered], note: "Generated from module manifests and contracts at build"}
+  - {name: SetCardinalityBudget, input: "{signal, budget}", emits: [CardinalityBudgetSet]}
+
+queries:
+  - {name: GetSignalCatalog, input: "{module?}", output: "SignalDefinition[]"}
+  - {name: GetTenantUsageView, input: "{tenant, from, to}", output: "{requestsByApi, errorRates, latencyPercentiles, quotaUsage}"}
+  - {name: GetCardinalityReport, input: "{window}", output: "CardinalityReport[]"}
+  - {name: GetTrace, input: "{traceId}", output: "spans (redacted)"}
+
+apis:
+  - {style: REST, path: "/ops/v1/observability/pipelines", methods: {POST: DefinePipeline}}
+  - {style: REST, path: "/ops/v1/observability/sampling-policies", methods: {POST: DefineSamplingPolicy}}
+  - {style: REST, path: "/ops/v1/observability/pipelines/{id}/redaction-rules", methods: {POST: DefineRedactionRule}}
+  - {style: REST, path: "/ops/v1/observability/signals", methods: {POST: RegisterSignal, GET: GetSignalCatalog}}
+  - {style: REST, path: "/ops/v1/observability/signals/{name}/budget", methods: {PUT: SetCardinalityBudget}}
+  - {style: REST, path: "/ops/v1/observability/cardinality", methods: {GET: GetCardinalityReport}}
+  - {style: REST, path: "/ops/v1/observability/traces/{traceId}", methods: {GET: GetTrace}}
+  - {style: REST, path: "/v1/observability/usage", methods: {GET: GetTenantUsageView}}
+
+events:
+  - {type: ucos.runtime.telemetry-pipeline.defined.v1, payload: "{cell, name, version}"}
+  - {type: ucos.runtime.sampling-policy.defined.v1, payload: "{name}"}
+  - {type: ucos.runtime.redaction-rule.defined.v1, payload: "{pipeline, ruleId}"}
+  - {type: ucos.runtime.signal.registered.v1, payload: "{name, kind, owner}"}
+  - {type: ucos.runtime.signal.cardinality-budget-set.v1, payload: "{name, budget}"}
+  - {type: ucos.runtime.telemetry.redaction-triggered.v1, payload: "{signal, detector, count, service}", note: "Indicates emitting bug; alerts if sustained (CIC-022-001 §3)"}
+  - {type: ucos.runtime.signal.cardinality-exceeded.v1, payload: "{name, series, budget}"}
+
+stateMachines:
+  - name: PipelineRollout
+    initial: draft
+    states: [draft, canary, active, rolled-back]
+    terminal: []
+    transitions:
+      - {from: draft, to: canary, trigger: "deployed to canary cell"}
+      - {from: canary, to: active, trigger: "no data loss and redaction tests pass for 1h"}
+      - {from: canary, to: rolled-back, trigger: "drop rate > 0.1% or redaction failure"}
+      - {from: active, to: rolled-back, trigger: "regression detected"}
+
+rules:
+  - {id: RUL-OBS-1, statement: "Unknown attributes are dropped at the collector unless declared in the signal catalog (allow-list)."}
+  - {id: RUL-OBS-2, statement: "Signals exceeding cardinality budget are aggregated (attribute dropped) and the owner notified; budgets are part of module certification."}
+  - {id: RUL-OBS-3, statement: "Tenant usage views query only that tenant's hashed/scoped series; platform-wide views require platform roles."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:observability.retention", purpose: "Retention per signal kind and tier"}
+
+decisions:
+  - {id: DEC-OBS-1, question: "Is this trace kept?", algorithm: "Head sampling decision + tail rules (errors, slow, regulated) at collector"}
+
+security:
+  permissions: [observability.read.platform, observability.read.tenant, observability.config]
+  dataClassification: "Internal operational data; personal data prohibited (DLP enforced)."
+  threats: ["Telemetry as exfiltration channel -> allow-listed attributes + DLP + egress-controlled exporters"]
+
+governance:
+  changeControl: "Pipelines and redaction rules via ChangeSet with Security approval."
+  evidence: "Redaction test results per release."
+
+runtimeBehavior:
+  consistency: "Best-effort telemetry (not audit); loss budget < 0.1%."
+  slo: {collector_drop_rate: "< 0.1%", trace_query_p95_s: 3, availability: "99.9%"}
+
+persistenceModel:
+  store: "TelemetryBackendPort backends (traces/metrics/logs) + PostgreSQL schema ucos_runtime for configuration"
+  tables:
+    - {name: signals, columns: "name text pk, body jsonb", global: true}
+    - {name: telemetry_pipelines, columns: "id text pk, body jsonb, version int", global: true}
+    - {name: sampling_policies, columns: "name text pk, body jsonb", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Backends partition by time and cell."
+  retention: "Traces 14 days, metrics 13 months (downsampled), logs 30 days (policy observability.retention)."
+
+extensionModel:
+  extensionPoints: ["TelemetryBackendPort adapters", "DLP detectors"]
+  forbidden: ["Personal data in telemetry", "Unregistered high-cardinality attributes"]
+
+certificationCriteria:
+  - {id: CR-OBS-01, rule: "Passes CIC-022-001 CR-022-001-01 and CR-022-001-03.", level: L1}
+  - {id: CR-OBS-02, rule: "Undeclared attributes are dropped (collector test).", level: L1}
+  - {id: CR-OBS-03, rule: "Tenant usage view returns zero series of other tenants (isolation test).", level: L1}
+validationRules:
+  - {id: VR-OBS-01, rule: "Every module's emitted signals are registered with owners and budgets."}
+  - {id: VR-OBS-02, rule: "Metric names follow naming rules (VR-022-001-02)."}

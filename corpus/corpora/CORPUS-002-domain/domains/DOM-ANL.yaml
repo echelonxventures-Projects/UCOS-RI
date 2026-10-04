@@ -1,0 +1,179 @@
+header:
+  id: DOM-ANL
+  title: Analytics Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-006-001, CIC-003-001, CIC-014-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-006, PRIN-008, PRIN-010]
+  certification: [CR-ANL-01, CR-ANL-02, CR-ANL-03]
+  validation: [VR-ANL-01, VR-ANL-02]
+
+purpose: >
+  Provide governed commercial analytics: an event-sourced analytical store, a semantic layer of
+  certified metric definitions (one definition per metric, PRIN-001), dimensional models whose
+  dimensions are the context dimensions, dashboards and ad-hoc exploration under row/column security,
+  and data products shared to other domains and tenants' BI tools.
+
+scope:
+  includes:
+    - Analytical projections (facts and dimensions) built from domain events (no OLTP queries)
+    - Semantic layer: metrics (formula, grain, filters, owners, certification), dimensions, joins
+    - Query service (metrics API, SQL over semantic layer for BI tools via JDBC/Arrow Flight SQL)
+    - Dashboards as metadata; scheduled reports; anomaly alerts on metrics
+    - Data products (governed datasets with contracts) for consumers (DOM-FCS, DOM-INT, external BI)
+  excludes:
+    - Profitability facts (DOM-PRF owns, exposed via semantic layer), ML features (DOM-INT)
+
+responsibilities:
+  - One certified definition per business metric across UCOS.
+  - Row-level (tenant, org, territory) and column-level (classification) security in every query path.
+  - Reproducible numbers from events (rebuildable).
+
+principles: [PRIN-001, PRIN-006, PRIN-008, PRIN-010]
+
+boundaries:
+  upstream: [DOM-EVT, DOM-LIN, DOM-PRF, DOM-CTX, DOM-PRI]
+  downstream: [DOM-FCS, DOM-INT, DOM-PFL, DOM-RCM, DOM-ORK]
+
+ownership:
+  boundedContext: intelligence
+  owningRole: Chief Data Architect
+  service: analytics-service
+  schema: ucos_intelligence
+
+capabilities:
+  - {id: ANL-C1, name: Projections, description: "Event-driven analytical facts and dimensions."}
+  - {id: ANL-C2, name: Semantic layer, description: "Certified metrics and dimensions."}
+  - {id: ANL-C3, name: Query, description: "Metrics API and SQL interface with security."}
+  - {id: ANL-C4, name: Dashboards & alerts, description: "Metadata dashboards, schedules, anomaly alerts."}
+  - {id: ANL-C5, name: Data products, description: "Contracted datasets for consumers."}
+
+services:
+  - {name: AnalyticsProjector, kind: application, contract: "Consumes registered event types into star schemas per subject area (orders, billing, entitlements, catalog, pricing, payments); rebuildable from archive"}
+  - {name: SemanticLayerService, kind: application, operations: [DefineMetric, CertifyMetric, DefineDimension, PublishDataProduct, DefineDashboard, DefineMetricAlert]}
+  - {name: AnalyticsQueryService, kind: application, operations: [QueryMetrics, RunSql, GetDashboard, GetDataProduct]}
+
+aggregates:
+  - name: MetricDefinition
+    identity: "urn:ucos:<namespace|tenant>:metric:<code>@<semver>"
+    invariants:
+      - "INV-ANL-1: code unique per namespace; certified metrics immutable per version; formula references existing measures and dimensions."
+      - "INV-ANL-2: dimensions are registered context dimensions or analytical dimensions mapped to them."
+    fields:
+      - {name: code, type: string}
+      - {name: label, type: LocalizedText}
+      - {name: formula, type: "semantic expression (measures, filters, ratios)"}
+      - {name: grain, type: "time grain + allowed dimensions"}
+      - {name: owner, type: PartyUrn}
+      - {name: certified, type: boolean}
+      - {name: classification, type: DataClassification}
+  - name: DataProduct
+    identity: "urn:ucos:<tenant>:data-product:<code>@<semver>"
+    fields:
+      - {name: datasetRef, type: "DOM-LIN dataset"}
+      - {name: contract, type: "{schema, freshness SLO, quality checks (DOM-DQL), owner}"}
+      - {name: consumers, type: "grants"}
+  - name: Dashboard
+    identity: "urn:ucos:<tenant>:dashboard:<code>"
+    fields:
+      - {name: tiles, type: "[{metricRef, dimensions, filters, visualization}]"}
+      - {name: audience, type: "roles"}
+
+entities:
+  - {name: MetricAlert, within: MetricDefinition, fields: [alertId, condition (anomaly|threshold), dimensions, recipients, schedule]}
+
+valueObjects:
+  - {name: MetricQuery, definition: "{metrics[], dimensions[], filters, timeRange, timeGrain, currency?}"}
+
+commands:
+  - {name: DefineMetric, input: "MetricDefinition draft", emits: [MetricDefined]}
+  - {name: CertifyMetric, input: "{urn, approvalRef}", emits: [MetricCertified]}
+  - {name: DefineDimension, input: "{code, mapping to context dimension or attribute}", emits: [AnalyticalDimensionDefined]}
+  - {name: PublishDataProduct, input: "DataProduct + changeSetRef", emits: [DataProductPublished]}
+  - {name: DefineDashboard, input: "Dashboard", emits: [DashboardDefined]}
+  - {name: DefineMetricAlert, input: "{metric, alert}", emits: [MetricAlertDefined]}
+
+queries:
+  - {name: QueryMetrics, input: MetricQuery, output: "rows + metric versions used"}
+  - {name: RunSql, input: "{sql over semantic views}", output: "rows", note: "Read-only; security rewrite enforced"}
+  - {name: GetDashboard, input: "{code, filters}", output: "tiles data"}
+  - {name: GetDataProduct, input: "{urn}", output: "DataProduct + access endpoints"}
+
+apis:
+  - {style: REST, path: "/v1/analytics/metrics", methods: {POST: DefineMetric}}
+  - {style: REST, path: "/v1/analytics/metrics/{urn}:certify", methods: {POST: CertifyMetric}}
+  - {style: REST, path: "/v1/analytics/metrics/{urn}/alerts", methods: {POST: DefineMetricAlert}}
+  - {style: REST, path: "/v1/analytics/dimensions", methods: {POST: DefineDimension}}
+  - {style: REST, path: "/v1/analytics:query", methods: {POST: QueryMetrics}}
+  - {style: REST, path: "/v1/analytics:sql", methods: {POST: RunSql}}
+  - {style: REST, path: "/v1/analytics/dashboards", methods: {POST: DefineDashboard}}
+  - {style: REST, path: "/v1/analytics/dashboards/{code}", methods: {GET: GetDashboard}}
+  - {style: REST, path: "/v1/analytics/data-products", methods: {POST: PublishDataProduct}}
+  - {style: REST, path: "/v1/analytics/data-products/{urn}", methods: {GET: GetDataProduct}}
+
+events:
+  - {type: ucos.intelligence.metric.defined.v1, payload: "{urn}"}
+  - {type: ucos.intelligence.metric.certified.v1, payload: "{urn, version}"}
+  - {type: ucos.intelligence.metric.alert-triggered.v1, payload: "{metric, alertId, dimensions, value, expected}", consumers: [operations, owners]}
+  - {type: ucos.intelligence.analytical-dimension.defined.v1, payload: "{code}"}
+  - {type: ucos.intelligence.data-product.published.v1, payload: "{urn, datasetRef}"}
+  - {type: ucos.intelligence.dashboard.defined.v1, payload: "{code}"}
+  - {type: ucos.intelligence.metric-alert.defined.v1, payload: "{metric, alertId}"}
+
+stateMachines:
+  - name: MetricLifecycle
+    initial: draft
+    states: [draft, certified, deprecated]
+    terminal: []
+    transitions:
+      - {from: draft, to: certified, command: CertifyMetric}
+      - {from: certified, to: deprecated, trigger: "successor certified"}
+
+rules:
+  - {id: RUL-ANL-1, statement: "Dashboards and data products may use only certified metrics in production audiences."}
+  - {id: RUL-ANL-2, statement: "Security rewrite injects tenant and row filters (organization, territory per role) and removes columns above the caller's classification clearance."}
+  - {id: RUL-ANL-3, statement: "Personal data appears in analytics only for purposes analytics-aggregate with k-anonymity >= 10 on exposed group-bys (policy analytics.k-anonymity)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:analytics.k-anonymity", purpose: "Minimum group size for exposed aggregates"}
+
+decisions:
+  - {id: DEC-ANL-1, question: "What is metric M for dimensions D?", algorithm: "Semantic layer compile -> security rewrite -> execute on analytical store"}
+
+security:
+  permissions: [analytics.read, analytics.metric.define, analytics.metric.certify, analytics.sql, analytics.dataproduct.publish]
+  dataClassification: "Aggregates mostly internal; row-level security applied."
+  threats: ["Re-identification via small groups -> k-anonymity enforcement", "SQL abuse -> read-only semantic views, cost limits"]
+
+governance:
+  changeControl: "Metric certification via ChangeSet with owner approval."
+  evidence: "Certified metric definitions versioned."
+
+runtimeBehavior:
+  consistency: "Eventual; freshness SLO per subject area (p95 5 min)."
+  slo: {QueryMetrics_p95_s: 2, availability: "99.9%"}
+
+persistenceModel:
+  store: "AnalyticsStorePort (columnar, ClickHouse/DuckDB-compatible) + PostgreSQL schema ucos_intelligence for semantic metadata"
+  tables:
+    - {name: metric_definitions, columns: "tenant_id, urn, body jsonb, certified bool", pk: "(tenant_id, urn)"}
+    - {name: dashboards, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: data_products, columns: "tenant_id, urn, body jsonb", pk: "(tenant_id, urn)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Facts by (tenant group, day)."
+  retention: "Detailed facts 25 months; aggregates 10 years."
+
+extensionModel:
+  extensionPoints: ["Metric packs per industry", "BI connectors (JDBC/Arrow Flight SQL)", "Anomaly detectors (plugins)"]
+  forbidden: ["Uncertified metric copies with the same code", "Analytics queries against OLTP stores"]
+
+certificationCriteria:
+  - {id: CR-ANL-01, rule: "Rebuild from events reproduces certified metric values for reference periods.", level: L1}
+  - {id: CR-ANL-02, rule: "Security rewrite prevents cross-tenant and above-clearance column access in fuzzed SQL.", level: L1}
+  - {id: CR-ANL-03, rule: "k-anonymity enforced on exposed aggregates (negative tests).", level: L1}
+validationRules:
+  - {id: VR-ANL-01, rule: "Every certified metric has an owner and references registered dimensions."}
+  - {id: VR-ANL-02, rule: "Every KPI referenced in CIC-022-001 §4 has a metric definition."}

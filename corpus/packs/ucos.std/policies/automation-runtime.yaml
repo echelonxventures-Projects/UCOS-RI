@@ -1,0 +1,73 @@
+# Policies for DOM-WFL, ORC, AGT, OBS, MON, RLB, CUS (and CIC-017-001).
+defaults: &cfg
+  kind: configuration
+  layer: platform
+  scope: {}
+
+policies:
+  - name: ai.high-risk-tools
+    kind: authorization
+    layer: platform
+    scope: {}
+    combining: deny-overrides
+    outputSchema: {$ref: authorization-decision}
+    body:
+      language: cel
+      source: |
+        autonomy == 'suggest' ? {'effect': 'deny', 'reason': 'R-AGT-SUGGEST-ONLY'}
+        : tool.riskClass == 'read' ? {'effect': 'allow'}
+        : autonomy == 'act-with-approval' || tool.riskClass == 'financial' || tool.riskClass == 'write-high'
+          ? {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['agent-supervisor']}}]}
+        : autonomy == 'act-within-limits' && amountMinor > spendRemainingMinor
+          ? {'effect': 'allow', 'obligations': [{'kind': 'require-approval', 'params': {'approverRoles': ['agent-supervisor']}}]}
+        : {'effect': 'allow'}
+    testVectors:
+      - {name: suggest-only, input: {autonomy: suggest, tool: {riskClass: read}, amountMinor: 0, spendRemainingMinor: 0}, context: {}, expectedOutput: {effect: deny, reason: R-AGT-SUGGEST-ONLY}}
+      - {name: read-tool, input: {autonomy: act-within-limits, tool: {riskClass: read}, amountMinor: 0, spendRemainingMinor: 0}, context: {}, expectedOutput: {effect: allow}}
+      - {name: financial-always-approval, input: {autonomy: act, tool: {riskClass: financial}, amountMinor: 100, spendRemainingMinor: 100000}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [agent-supervisor]}}]}}
+      - {name: low-write-within-limits, input: {autonomy: act-within-limits, tool: {riskClass: write-low}, amountMinor: 500, spendRemainingMinor: 10000}, context: {}, expectedOutput: {effect: allow}}
+      - {name: low-write-over-limit, input: {autonomy: act-within-limits, tool: {riskClass: write-low}, amountMinor: 50000, spendRemainingMinor: 10000}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [agent-supervisor]}}]}}
+      - {name: act-with-approval-any-write, input: {autonomy: act-with-approval, tool: {riskClass: write-low}, amountMinor: 0, spendRemainingMinor: 10000}, context: {}, expectedOutput: {effect: allow, obligations: [{kind: require-approval, params: {approverRoles: [agent-supervisor]}}]}}
+
+  - <<: *cfg
+    name: ai.model-residency
+    layer: regulatory
+    outputSchema: {type: object, required: [default], properties: {default: {type: array, items: {type: string}}, byJurisdiction: {type: object, additionalProperties: {type: array, items: {type: string}}}}}
+    body: {language: static, source: &aiRes {default: ["*"], byJurisdiction: {EU: [eu-west-1, eu-central-1]}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *aiRes}]
+
+  - <<: *cfg
+    name: workflow.limits
+    outputSchema: {type: object, required: [maxConcurrentInstances, maxStepsPerSecond, maxHistoryEvents], properties: {maxConcurrentInstances: {type: integer}, maxStepsPerSecond: {type: integer}, maxHistoryEvents: {type: integer}}}
+    body: {language: static, source: &wflLim {maxConcurrentInstances: 100000, maxStepsPerSecond: 2000, maxHistoryEvents: 50000}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *wflLim}]
+
+  - <<: *cfg
+    name: orchestration.escalation
+    outputSchema: {type: object, required: [levels], properties: {levels: {type: array, items: {type: object, required: [afterSlaMultiple, notify], properties: {afterSlaMultiple: {type: number}, notify: {type: array}}}}, financialProcessTypes: {type: array}}}
+    body: {language: static, source: &orcEsc {levels: [{afterSlaMultiple: 1.0, notify: [owning-team]}, {afterSlaMultiple: 2.0, notify: [owning-team-lead, operations]}, {afterSlaMultiple: 4.0, notify: [domain-owner]}], financialProcessTypes: [bill-run, settlement-statement, payout, changeset-apply]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *orcEsc}]
+
+  - <<: *cfg
+    name: observability.retention
+    outputSchema: {type: object, required: [traces, metrics, logs], properties: {traces: {type: string, pattern: "^P"}, metrics: {type: string, pattern: "^P"}, logs: {type: string, pattern: "^P"}, profiles: {type: string, pattern: "^P"}}}
+    body: {language: static, source: &obsRet {traces: P14D, metrics: P13M, logs: P30D, profiles: P7D}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *obsRet}]
+
+  - <<: *cfg
+    name: monitoring.paging
+    outputSchema: {type: object, required: [bySeverity], properties: {bySeverity: {type: object, additionalProperties: {type: object, required: [page, ackWithin], properties: {page: {type: boolean}, ackWithin: {type: string, pattern: "^PT"}}}}}}
+    body: {language: static, source: &monPage {bySeverity: {sev1: {page: true, ackWithin: PT5M}, sev2: {page: true, ackWithin: PT15M}, sev3: {page: false, ackWithin: PT8H}, sev4: {page: false, ackWithin: PT72H}}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *monPage}]
+
+  - <<: *cfg
+    name: reliability.budget-policy
+    outputSchema: {type: object, required: [freezeOnExhausted, atRiskThresholdPct], properties: {freezeOnExhausted: {type: boolean}, atRiskThresholdPct: {type: number}, exemptions: {type: array}}}
+    body: {language: static, source: &rlbPol {freezeOnExhausted: true, atRiskThresholdPct: 25, exemptions: [security-fix, reliability-fix, regulatory-deadline]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *rlbPol}]
+
+  - <<: *cfg
+    name: customization.sandbox
+    outputSchema: {type: object, required: [maxSandboxes, defaultDataPolicy, maxLifetime], properties: {maxSandboxes: {type: integer}, defaultDataPolicy: {enum: [metadata-only, synthetic, masked]}, maxLifetime: {type: string, pattern: "^P"}, maskedRequiresApproval: {type: boolean}}}
+    body: {language: static, source: &cusSb {maxSandboxes: 5, defaultDataPolicy: metadata-only, maxLifetime: P90D, maskedRequiresApproval: true}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *cusSb}]

@@ -1,0 +1,180 @@
+header:
+  id: DOM-CFG
+  title: Configuration Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Platform Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-020-001, CIC-024-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-016, PRIN-022, CIC-020-001]
+  certification: [CR-CFG-01, CR-CFG-02, CR-CFG-03]
+  validation: [VR-CFG-01, VR-CFG-02]
+
+purpose: >
+  Own runtime configuration — feature flags, kill switches, operational parameters (rate limits,
+  pool sizes overrides, degradation modes) — strictly separated from behavioral configuration
+  (policies, CIC-020-001 §4), with OpenFeature-compatible evaluation, ownership, expiry, and audit.
+
+scope:
+  includes:
+    - Feature flags (release, experiment, ops, permission-gated) with targeting by tenant/cell/percentage
+    - Kill switches (instant disable of a capability, plugin, provider, or agent class)
+    - Operational parameters with typed schemas and safe ranges
+    - Flag evaluation SDK provider (OpenFeature) and streaming updates
+  excludes:
+    - Business behavior (DOM-POL policies) — flags must not encode business rules
+    - Deployment configuration (Helm values; CIC-024-001)
+
+responsibilities:
+  - Every flag has an owner, purpose, type, and expiry.
+  - Kill switches propagate within seconds.
+  - Stale flags are detected and removed.
+
+principles: [PRIN-005, PRIN-016, PRIN-022]
+
+boundaries:
+  upstream: [DOM-GOV, DOM-RTM]
+  downstream: [DOM-RTM, DOM-EXT, DOM-AGT, DOM-PAY, DOM-TIM, DOM-LOC]
+
+ownership:
+  boundedContext: runtime
+  owningRole: Chief Platform Architect
+  service: configuration-service
+  schema: ucos_runtime
+
+capabilities:
+  - {id: CFG-C1, name: Flags, description: "Define, target, roll out, and retire feature flags."}
+  - {id: CFG-C2, name: Kill switches, description: "Instantly disable capabilities with audited reasons."}
+  - {id: CFG-C3, name: Parameters, description: "Typed operational parameters with ranges."}
+  - {id: CFG-C4, name: Evaluate, description: "Low-latency evaluation via embedded provider with streaming sync."}
+
+services:
+  - {name: ConfigurationCommandService, kind: application, operations: [DefineFlag, UpdateFlagTargeting, RetireFlag, ActivateKillSwitch, DeactivateKillSwitch, SetParameter]}
+  - {name: FlagEvaluator, kind: library, contract: "OpenFeature provider; evaluate(flagKey, evaluationContext{tenant, cell, service, principalKind}) -> value + reason; deterministic bucketing murmur3(flagKey+tenant) % 10000"}
+  - {name: ConfigurationQueryService, kind: application, operations: [GetFlag, ListFlags, EvaluateFlags, GetParameter, ListStaleFlags]}
+
+aggregates:
+  - name: FeatureFlag
+    identity: "urn:ucos:platform:flag:<key>"
+    invariants:
+      - "INV-CFG-1: owner, purpose (release|experiment|ops|permission), valueType, default, and expiresAt (release flags <= 90 days) required."
+      - "INV-CFG-2: targeting rules reference only runtime attributes (tenant, cell, region, service, principal kind, percentage) — never commercial attributes (market, price, product)."
+    fields:
+      - {name: key, type: "string ^[a-z][a-z0-9.-]{2,95}$"}
+      - {name: purpose, type: "release|experiment|ops|permission"}
+      - {name: valueType, type: "boolean|string|number|json"}
+      - {name: default, type: json}
+      - {name: rules, type: "[{match: {tenant?, cell?, region?, service?, principalKind?}, percentage?, value}]"}
+      - {name: owner, type: "team/role"}
+      - {name: expiresAt, type: Instant}
+      - {name: status, type: "active|retired"}
+  - name: KillSwitch
+    identity: "urn:ucos:platform:kill-switch:<capability>"
+    fields:
+      - {name: capability, type: "string (e.g. plugin:<id>, provider:<id>, agent-class:<x>, api:<operationId>)"}
+      - {name: scope, type: "{tenants?, cells?}"}
+      - {name: active, type: boolean}
+      - {name: reason, type: string}
+      - {name: activatedBy, type: PartyUrn}
+  - name: OperationalParameter
+    identity: "urn:ucos:platform:parameter:<service>.<key>"
+    invariants: ["INV-CFG-3: value validates against schema and safe range; changes outside safe range require approval."]
+    fields:
+      - {name: schema, type: JsonSchema}
+      - {name: value, type: json}
+      - {name: scope, type: "{cell?, tenant?}"}
+
+entities: []
+
+valueObjects:
+  - {name: EvaluationResult, definition: "{flagKey, value, variant, reason: default|targeting-match|split|disabled|error}"}
+
+commands:
+  - {name: DefineFlag, input: "FeatureFlag", emits: [FlagDefined]}
+  - {name: UpdateFlagTargeting, input: "{key, rules, reason}", emits: [FlagTargetingUpdated]}
+  - {name: RetireFlag, input: "{key}", emits: [FlagRetired], preconditions: ["no code references (scanner report) or default equals final value"]}
+  - {name: ActivateKillSwitch, input: "{capability, scope, reason}", emits: [KillSwitchActivated]}
+  - {name: DeactivateKillSwitch, input: "{capability, reason}", emits: [KillSwitchDeactivated]}
+  - {name: SetParameter, input: "{service, key, value, scope, approvalRef?}", emits: [ParameterSet]}
+
+queries:
+  - {name: GetFlag, input: "{key}", output: FeatureFlag}
+  - {name: ListFlags, input: "{owner?, purpose?, status?}", output: "FeatureFlag[]"}
+  - {name: EvaluateFlags, input: "{keys[], evaluationContext}", output: "EvaluationResult[]"}
+  - {name: GetParameter, input: "{service, key, scope}", output: OperationalParameter}
+  - {name: ListStaleFlags, input: "{}", output: "flags past expiresAt or unchanged 100% rollout > 30 days"}
+
+apis:
+  - {style: REST, path: "/ops/v1/config/flags", methods: {POST: DefineFlag, GET: ListFlags}}
+  - {style: REST, path: "/ops/v1/config/flags/{key}", methods: {GET: GetFlag, PATCH: UpdateFlagTargeting}}
+  - {style: REST, path: "/ops/v1/config/flags/{key}:retire", methods: {POST: RetireFlag}}
+  - {style: REST, path: "/ops/v1/config/flags:stale", methods: {GET: ListStaleFlags}}
+  - {style: REST, path: "/ops/v1/config/kill-switches/{capability}:activate", methods: {POST: ActivateKillSwitch}}
+  - {style: REST, path: "/ops/v1/config/kill-switches/{capability}:deactivate", methods: {POST: DeactivateKillSwitch}}
+  - {style: REST, path: "/ops/v1/config/parameters/{service}/{key}", methods: {PUT: SetParameter, GET: GetParameter}}
+  - {style: REST, path: "/internal/v1/config:evaluate", methods: {POST: EvaluateFlags}}
+
+events:
+  - {type: ucos.runtime.flag.defined.v1, payload: "{key, purpose, owner, expiresAt}"}
+  - {type: ucos.runtime.flag.targeting-updated.v1, payload: "{key, rulesDigest}", consumers: [all embedded providers (stream)]}
+  - {type: ucos.runtime.flag.retired.v1, payload: "{key}"}
+  - {type: ucos.runtime.kill-switch.activated.v1, payload: "{capability, scope, reason}", consumers: [all services, plugin host, agent gateway]}
+  - {type: ucos.runtime.kill-switch.deactivated.v1, payload: "{capability}"}
+  - {type: ucos.runtime.parameter.set.v1, payload: "{service, key, scope}"}
+
+stateMachines:
+  - name: FlagLifecycle
+    initial: active
+    states: [active, stale, retired]
+    terminal: [retired]
+    transitions:
+      - {from: active, to: stale, trigger: "expiresAt passed (timer)"}
+      - {from: stale, to: active, command: UpdateFlagTargeting, guard: "expiresAt extended with approval"}
+      - {from: [active, stale], to: retired, command: RetireFlag}
+
+rules:
+  - {id: RUL-CFG-1, statement: "Flags may be read only in -service and -infrastructure layers (lint UCOS-L006); domain logic never branches on flags."}
+  - {id: RUL-CFG-2, statement: "Stale release flags older than 30 days past expiry block the owning module's release (CIC-024-001 gate)."}
+  - {id: RUL-CFG-3, statement: "Kill switch activation is effective in all cells within 10s p99 and never requires a deployment."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:config.kill-switch", purpose: "Who may activate kill switches per capability class"}
+
+decisions:
+  - {id: DEC-CFG-1, question: "What value does flag F take for context E?", algorithm: "FlagEvaluator: first matching rule (order) with deterministic percentage bucketing; else default; kill switch overrides to disabled"}
+
+security:
+  permissions: [config.read, config.flag.manage, config.kill-switch.activate, config.parameter.set]
+  dataClassification: "Internal."
+  threats: ["Flag-based business logic smuggling -> INV-CFG-2 + lint", "Unauthorized kill switch -> PDP config.kill-switch + audit + notifications"]
+
+governance:
+  changeControl: "Parameter changes outside safe range and flag expiry extensions require approval; kill switches are emergency actions reviewed post-hoc."
+  evidence: "Kill switch activations captured as Evidence with reason."
+
+runtimeBehavior:
+  consistency: "Streaming updates to embedded providers; snapshot fallback on reconnect."
+  slo: {EvaluateFlags_embedded_p99_us: 50, propagation_p99_s: 10, availability: "99.99% (embedded with last-known snapshot)"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_runtime (separate tables)
+  tables:
+    - {name: flags, columns: "key text pk, body jsonb, status, expires_at", global: true}
+    - {name: kill_switches, columns: "capability text pk, body jsonb, active bool", global: true}
+    - {name: parameters, columns: "service, key, scope_digest, value jsonb, body jsonb", pk: "(service, key, scope_digest)", global: true}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None."
+  retention: "Retired flags 1 year; audit indefinite via event store."
+
+extensionModel:
+  extensionPoints: ["OpenFeature providers for external flag systems (adapter)", "Capability classes for kill switches"]
+  forbidden: ["Commercial targeting in flags", "Flags in domain layer"]
+
+certificationCriteria:
+  - {id: CR-CFG-01, rule: "Kill switch propagation <= 10s p99 across all cells (chaos test).", level: L2}
+  - {id: CR-CFG-02, rule: "Bucketing determinism: identical results across SDK languages for 10^6 (flag, tenant) pairs.", level: L1}
+  - {id: CR-CFG-03, rule: "Lint UCOS-L006 reports zero flag reads in -domain modules.", level: L1}
+validationRules:
+  - {id: VR-CFG-01, rule: "Every flag has owner and expiresAt (CIC-020-001 VR-020-001-02)."}
+  - {id: VR-CFG-02, rule: "No flag targeting rule references a context dimension other than runtime attributes."}

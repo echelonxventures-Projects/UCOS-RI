@@ -1,0 +1,189 @@
+header:
+  id: DOM-TER
+  title: Territory Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Data Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-001, CIC-002-001]
+  traces: [PRIN-006, PRIN-017, PRIN-020, DOM-GEO]
+  certification: [CR-TER-01, CR-TER-02, CR-TER-03]
+  validation: [VR-TER-01, VR-TER-02]
+
+purpose: >
+  Define commercial territories — markets, sales territories, service territories, distribution
+  regions, licensing territories, embargo zones — as governed compositions of geo areas, party
+  segments, and other dimension values, with ownership assignments, so that "where may this be sold,
+  serviced, licensed, or managed, and by whom" is data, not code (PRIN-020).
+
+scope:
+  includes:
+    - Territory aggregate: inclusion/exclusion of geo areas (and optionally segments/channels), kind, hierarchy
+    - Territory assignments (owner party/team, distributor, licensee) with validity
+    - Market definitions as values of the market dimension (ucos.std.markets taxonomy terms mapped to territories)
+    - Territory realignment (planned changes with effective dates and impact)
+  excludes:
+    - Geometry (DOM-GEO), tax jurisdictions (DOM-TAX), embargo law content (sellability rules in DOM-RUL reference territories)
+
+responsibilities:
+  - Non-overlap of territories within a territory set flagged exclusive.
+  - Deterministic territory membership for any (location, context, asOf).
+  - Governed realignments with impact analysis on accounts, contracts, and quotas.
+
+principles: [PRIN-006, PRIN-017, PRIN-020, PRIN-021]
+
+boundaries:
+  upstream: [DOM-GEO, DOM-TXO, DOM-PTY, DOM-ORG]
+  downstream: [DOM-CTX, DOM-AVL, DOM-PRC, DOM-CAT, DOM-MKT, DOM-DST, DOM-RUL]
+
+ownership:
+  boundedContext: context
+  owningRole: Chief Data Architect
+  service: territory-service
+  schema: ucos_context
+
+capabilities:
+  - {id: TER-C1, name: Define, description: "Compose territories from geo areas and other dimension values."}
+  - {id: TER-C2, name: Assign, description: "Assign owners/partners/licensees with validity."}
+  - {id: TER-C3, name: Resolve, description: "Point/area/context -> territories per territory set."}
+  - {id: TER-C4, name: Realign, description: "Plan and apply territory changes with impact reports."}
+
+services:
+  - {name: TerritoryCommandService, kind: application, operations: [DefineTerritorySet, DefineTerritory, ReviseTerritory, AssignTerritory, EndTerritoryAssignment, PlanRealignment, ApplyRealignment]}
+  - {name: TerritoryResolver, kind: domain-service, contract: "resolve(ctx|point|areaCode, territorySet, asOf) -> territories; includes minus excludes; exclusive sets return exactly one or E-TER-UNASSIGNED"}
+  - {name: TerritoryQueryService, kind: application, operations: [ResolveTerritories, GetTerritory, GetTerritorySet, GetAssignments, GetRealignmentImpact]}
+
+aggregates:
+  - name: TerritorySet
+    identity: "urn:ucos:<tenant>:territory-set:<code>"
+    invariants: ["INV-TER-1: exclusive sets have no geographic overlap among member territories at any instant (validated on publish via spatial union)."]
+    fields:
+      - {name: code, type: string}
+      - {name: purpose, type: "market|sales|service|distribution|licensing|embargo|custom"}
+      - {name: exclusive, type: boolean}
+      - {name: coverageRequired, type: "boolean (every point in scope must belong to a territory)"}
+  - name: Territory
+    identity: "urn:ucos:<tenant>:territory:<set>/<code>"
+    invariants: ["INV-TER-2: includes non-empty; referenced geo areas exist in active dataset; parent territory in same set."]
+    fields:
+      - {name: code, type: string}
+      - {name: label, type: LocalizedText}
+      - {name: includes, type: "[{dimension: geo|party-segment|channel|…, values[]}]"}
+      - {name: excludes, type: "[{dimension, values[]}]"}
+      - {name: parent, type: "TerritoryUrn?"}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+  - name: TerritoryAssignment
+    identity: "urn:ucos:<tenant>:territory-assignment:<ulid>"
+    fields:
+      - {name: territory, type: TerritoryUrn}
+      - {name: role, type: "owner|team|distributor|licensee|service-provider"}
+      - {name: party, type: PartyUrn}
+      - {name: validFrom, type: Instant}
+      - {name: validTo, type: "Instant?"}
+  - name: Realignment
+    identity: "urn:ucos:<tenant>:realignment:<ulid>"
+    fields:
+      - {name: changes, type: "[{territory, newIncludes, newExcludes, newAssignments}]"}
+      - {name: effectiveAt, type: Instant}
+      - {name: impact, type: "{accountsMoved, openQuotes, contracts, quotaShift}"}
+      - {name: status, type: "planned|approved|applied|cancelled"}
+
+entities: []
+
+valueObjects:
+  - {name: TerritoryMembership, definition: "{territorySet, territories[], matchedBy (area codes), asOf}"}
+
+commands:
+  - {name: DefineTerritorySet, input: "TerritorySet", emits: [TerritorySetDefined]}
+  - {name: DefineTerritory, input: "Territory", emits: [TerritoryDefined], preconditions: ["INV-TER-1,2"]}
+  - {name: ReviseTerritory, input: "{urn, patch, effectiveFrom}", emits: [TerritoryRevised], note: "Direct revision only for future-dated changes; current changes go through realignment"}
+  - {name: AssignTerritory, input: "TerritoryAssignment", emits: [TerritoryAssigned]}
+  - {name: EndTerritoryAssignment, input: "{id, validTo}", emits: [TerritoryAssignmentEnded]}
+  - {name: PlanRealignment, input: "{changes, effectiveAt}", emits: [RealignmentPlanned], note: "Computes impact via KG + party/account projections"}
+  - {name: ApplyRealignment, input: "{id, approvalRef}", emits: [RealignmentApplied, TerritoryRevised]}
+
+queries:
+  - {name: ResolveTerritories, input: "{territorySet, context | point | areaCode, asOf?}", output: TerritoryMembership}
+  - {name: GetTerritory, input: "{urn, asOf?}", output: Territory}
+  - {name: GetTerritorySet, input: "{code}", output: "TerritorySet + territories"}
+  - {name: GetAssignments, input: "{territory?, party?, role?, asOf?}", output: "TerritoryAssignment[]"}
+  - {name: GetRealignmentImpact, input: "{id}", output: "impact"}
+
+apis:
+  - {style: REST, path: "/v1/territory/sets", methods: {POST: DefineTerritorySet}}
+  - {style: REST, path: "/v1/territory/sets/{code}", methods: {GET: GetTerritorySet}}
+  - {style: REST, path: "/v1/territory/territories", methods: {POST: DefineTerritory}}
+  - {style: REST, path: "/v1/territory/territories/{urn}", methods: {GET: GetTerritory, PATCH: ReviseTerritory}}
+  - {style: REST, path: "/v1/territory/assignments", methods: {POST: AssignTerritory, GET: GetAssignments}}
+  - {style: REST, path: "/v1/territory/assignments/{id}:end", methods: {POST: EndTerritoryAssignment}}
+  - {style: REST, path: "/v1/territory/realignments", methods: {POST: PlanRealignment}}
+  - {style: REST, path: "/v1/territory/realignments/{id}", methods: {GET: GetRealignmentImpact}}
+  - {style: REST, path: "/v1/territory/realignments/{id}:apply", methods: {POST: ApplyRealignment}}
+  - {style: REST, path: "/v1/territory:resolve", methods: {POST: ResolveTerritories}}
+
+events:
+  - {type: ucos.context.territory-set.defined.v1, payload: "{code, purpose, exclusive}"}
+  - {type: ucos.context.territory.defined.v1, payload: "{urn, includes, excludes}"}
+  - {type: ucos.context.territory.revised.v1, payload: "{urn, effectiveFrom}", consumers: [context hierarchy index, catalog, pricing caches]}
+  - {type: ucos.context.territory.assigned.v1, payload: "{id, territory, role, party}"}
+  - {type: ucos.context.territory.assignment-ended.v1, payload: "{id, validTo}"}
+  - {type: ucos.context.realignment.planned.v1, payload: "{id, effectiveAt, impact}"}
+  - {type: ucos.context.realignment.applied.v1, payload: "{id}"}
+
+stateMachines:
+  - name: RealignmentLifecycle
+    initial: planned
+    states: [planned, approved, applied, cancelled]
+    terminal: [applied, cancelled]
+    transitions:
+      - {from: planned, to: approved, trigger: "ChangeSet approved"}
+      - {from: approved, to: applied, command: ApplyRealignment, guard: "now >= effectiveAt or explicit apply"}
+      - {from: [planned, approved], to: cancelled, command: cancel}
+
+rules:
+  - {id: RUL-TER-1, statement: "Territory membership = (union of includes) minus (union of excludes), evaluated per dimension; geo includes match by area containment (descendant-of)."}
+  - {id: RUL-TER-2, statement: "Embargo-purpose territories feed sellability rules; changes require Compliance approval."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:territory.realignment-approval", purpose: "Approval plan for realignments by impact"}
+
+decisions:
+  - {id: DEC-TER-1, question: "Which territory (in set S) covers context C at time T?", algorithm: "TerritoryResolver per RUL-TER-1"}
+
+security:
+  permissions: [territory.read, territory.define, territory.assign, territory.realign]
+  dataClassification: "Internal; assignments confidential (commercial structure)."
+  threats: ["Unauthorized embargo changes -> RUL-TER-2"]
+
+governance:
+  changeControl: "Territory definitions and realignments via ChangeSet; impact attached."
+  evidence: "Realignment impact reports attached."
+
+runtimeBehavior:
+  consistency: "Strong for definitions; membership cache version-keyed by territory events."
+  slo: {ResolveTerritories_p99_ms: 10, availability: "99.95%"}
+
+persistenceModel:
+  store: PostgreSQL + PostGIS schema ucos_context (separate tables)
+  tables:
+    - {name: territory_sets, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: territories, columns: "tenant_id, urn, set_code, body jsonb, valid_from, valid_to, union_geom geometry", pk: "(tenant_id, urn, valid_from)", indexes: ["gist(union_geom)"]}
+    - {name: territory_assignments, columns: "tenant_id, id, territory, role, party, valid_from, valid_to", pk: "(tenant_id, id)"}
+    - {name: realignments, columns: "tenant_id, id, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Indefinite (historical attribution)."
+
+extensionModel:
+  extensionPoints: ["Territory purposes", "Optimization plugins for territory design (DOM-OPT)"]
+  forbidden: ["Region lists in code"]
+
+certificationCriteria:
+  - {id: CR-TER-01, rule: "Exclusive-set overlap detection catches 100% of seeded overlaps.", level: L1}
+  - {id: CR-TER-02, rule: "Membership resolution matches brute-force evaluation on 10^5 random points/contexts.", level: L1}
+  - {id: CR-TER-03, rule: "Realignment applied at effectiveAt changes resolution exactly at that instant (time-travel tests).", level: L1}
+validationRules:
+  - {id: VR-TER-01, rule: "Every ucos.std.markets term used by tenants maps to a territory in a market-purpose set."}
+  - {id: VR-TER-02, rule: "Coverage-required sets have no uncovered areas in scope at publish."}

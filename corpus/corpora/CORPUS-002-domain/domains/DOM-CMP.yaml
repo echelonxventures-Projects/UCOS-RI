@@ -1,0 +1,211 @@
+header:
+  id: DOM-CMP
+  title: Campaigns Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-011-004, CIC-008-001, CIC-011-001, CIC-002-001]
+  traces: [PRIN-005, PRIN-006, PRIN-016]
+  certification: [CR-CMP-01, CR-CMP-02, CR-CMP-03]
+  validation: [VR-CMP-01, VR-CMP-02]
+
+purpose: >
+  Plan and run commercial campaigns and promotions — discounts, bundles deals, coupons and codes,
+  loyalty multipliers, free trials, gift-with-purchase — with targeting, budgets, redemption limits,
+  and measurement, expressed as price-adjustment and eligibility rules activated within campaign
+  windows and the campaign context dimension.
+
+scope:
+  includes:
+    - Campaign aggregate (objectives, window, audience/targeting, channels, budget)
+    - Promotions within campaigns, compiled to price-adjustment rules (DOM-RUL) and eligibility rules
+    - Coupon/code pools (single-use, multi-use, personalized) and redemption tracking
+    - Budgets with reservation/commit/release (used by DOM-PRC CIC-011-004 §5)
+    - Campaign performance (redemptions, incremental revenue/margin via DOM-PRF)
+  excludes:
+    - Price computation (DOM-PRC), marketing messaging/email delivery (external via DOM-DXC), offers (DOM-OFR)
+
+responsibilities:
+  - Budgets and redemption limits never exceeded under concurrency.
+  - Promotions behave identically in quote, cart, and order via shared rules.
+  - Measurable outcomes per campaign.
+
+principles: [PRIN-005, PRIN-006, PRIN-016]
+
+boundaries:
+  upstream: [DOM-PRC, DOM-OFR, DOM-RUL, DOM-PTY, DOM-TXO, DOM-PRF]
+  downstream: [DOM-PRC, DOM-ORD, DOM-ANL, DOM-RCM, DOM-SRC]
+
+ownership:
+  boundedContext: offer
+  owningRole: Chief Product Architect
+  service: campaign-service
+  schema: ucos_offer
+
+capabilities:
+  - {id: CMP-C1, name: Plan campaigns, description: "Define objectives, windows, targeting, budgets."}
+  - {id: CMP-C2, name: Promotions, description: "Define promotions compiled into rules."}
+  - {id: CMP-C3, name: Codes, description: "Generate and validate coupon codes; track redemptions."}
+  - {id: CMP-C4, name: Budgets, description: "Reserve/commit/release budget consumption."}
+  - {id: CMP-C5, name: Measure, description: "Report redemptions and incremental impact."}
+
+services:
+  - {name: CampaignCommandService, kind: application, operations: [CreateCampaign, AddPromotion, ReviseCampaign, ApproveCampaign, ActivateCampaign, PauseCampaign, EndCampaign, GenerateCodes, ReserveBudget, CommitReservation, ReleaseReservation]}
+  - {name: PromotionCompiler, kind: domain-service, contract: "compile(promotion) -> price-adjustment rules (phase PROMOTION/BUNDLE/LOYALTY, stackingGroup, budgetRef) + eligibility rules scoped by campaign dimension and window"}
+  - {name: CodeValidator, kind: domain-service, contract: "validate(code, party, ctx) -> {valid, promotionRef, reasons}; constant-time comparison on hashed codes; rate-limited"}
+  - {name: CampaignQueryService, kind: application, operations: [GetCampaign, FindCampaigns, ValidateCode, GetBudgetStatus, GetCampaignPerformance]}
+
+aggregates:
+  - name: Campaign
+    identity: "urn:ucos:<tenant>:campaign:<ulid>"
+    invariants:
+      - "INV-CMP-1: promotions' windows within campaign window; compiled rules carry campaign scope (campaign dimension) and validity."
+      - "INV-CMP-2: active campaigns have approved promotions whose margin simulation was attached (DOM-PRF) when policy campaign.margin-check applies."
+    fields:
+      - {name: code, type: string}
+      - {name: objective, type: "acquisition|retention|clearance|launch|loyalty|custom"}
+      - {name: window, type: Interval}
+      - {name: audience, type: "ApplicabilityScope (segments, channels, markets) + eligibility rule refs"}
+      - {name: promotions, type: "Promotion[]"}
+      - {name: budget, type: "Budget?"}
+      - {name: lifecycleState, type: string}
+  - name: Budget
+    identity: "urn:ucos:<tenant>:budget:<ulid>"
+    invariants: ["INV-CMP-3: committed + reserved <= limit at all times (serialized per budget); reservations expire after TTL."]
+    fields:
+      - {name: measure, type: "discount-amount|redemptions|units"}
+      - {name: limit, type: "Money | integer"}
+      - {name: committed, type: "Money | integer"}
+      - {name: reserved, type: "Money | integer"}
+  - name: CodePool
+    identity: "urn:ucos:<tenant>:code-pool:<ulid>"
+    fields:
+      - {name: promotionRef, type: string}
+      - {name: kind, type: "single-use|multi-use|personalized"}
+      - {name: usageLimitPerCode, type: int}
+      - {name: usageLimitPerParty, type: int}
+      - {name: codes, type: "hashed codes (stored separately)"}
+
+entities:
+  - {name: Promotion, within: Campaign, fields: [promotionId, "mechanic (percent-off|amount-off|fixed-price|bogo|bundle-price|free-item|multiplier|trial)", "target (selector over objects/offers)", conditions (CEL), stackingGroup, exclusive, window, "codeRequired"]}
+  - {name: Redemption, within: "CodePool/Budget ledger", fields: [redemptionId, "code?", party, orderRef, amount, at, status]}
+
+valueObjects:
+  - {name: BudgetReservation, definition: "{reservationId, budgetRef, amount, expiresAt, status}"}
+
+commands:
+  - {name: CreateCampaign, input: "{code, objective, window, audience, budget?}", emits: [CampaignCreated]}
+  - {name: AddPromotion, input: "{campaignId, promotion}", emits: [PromotionAdded]}
+  - {name: ReviseCampaign, input: "{id, expectedRevision, patch}", emits: [CampaignRevised]}
+  - {name: ApproveCampaign, input: "{id, approvalRef, marginSimulationRef?}", emits: [CampaignApproved]}
+  - {name: ActivateCampaign, input: "{id}", emits: [CampaignActivated], note: "Publishes compiled rules (DOM-RUL) valid within window"}
+  - {name: PauseCampaign, input: "{id, reason}", emits: [CampaignPaused], note: "Ends rule validity immediately (end-dated)"}
+  - {name: EndCampaign, input: "{id}", emits: [CampaignEnded]}
+  - {name: GenerateCodes, input: "{promotionId, kind, count, pattern?, assignTo?}", emits: [CodesGenerated], async: true}
+  - {name: ReserveBudget, input: "{budgetRef, amount, ttl, idempotencyKey}", emits: [BudgetReserved, BudgetReservationRejected]}
+  - {name: CommitReservation, input: "{reservationId, actualAmount, orderRef}", emits: [BudgetCommitted]}
+  - {name: ReleaseReservation, input: "{reservationId}", emits: [BudgetReleased]}
+
+queries:
+  - {name: GetCampaign, input: "{id}", output: Campaign}
+  - {name: FindCampaigns, input: "{state?, window?, cursor}", output: "page"}
+  - {name: ValidateCode, input: "{code, party?, context}", output: "{valid, promotionRef, reasons}"}
+  - {name: GetBudgetStatus, input: "{budgetRef}", output: Budget}
+  - {name: GetCampaignPerformance, input: "{id}", output: "{redemptions, discountGiven, incrementalRevenue, incrementalMargin}"}
+
+apis:
+  - {style: REST, path: "/v1/campaigns", methods: {POST: CreateCampaign, GET: FindCampaigns}}
+  - {style: REST, path: "/v1/campaigns/{id}", methods: {GET: GetCampaign, PATCH: ReviseCampaign}}
+  - {style: REST, path: "/v1/campaigns/{id}/promotions", methods: {POST: AddPromotion}}
+  - {style: REST, path: "/v1/campaigns/{id}:approve", methods: {POST: ApproveCampaign}}
+  - {style: REST, path: "/v1/campaigns/{id}:activate", methods: {POST: ActivateCampaign}}
+  - {style: REST, path: "/v1/campaigns/{id}:pause", methods: {POST: PauseCampaign}}
+  - {style: REST, path: "/v1/campaigns/{id}:end", methods: {POST: EndCampaign}}
+  - {style: REST, path: "/v1/campaigns/{id}/performance", methods: {GET: GetCampaignPerformance}}
+  - {style: REST, path: "/v1/campaigns/promotions/{promotionId}/codes", methods: {POST: GenerateCodes}}
+  - {style: REST, path: "/v1/campaigns/codes:validate", methods: {POST: ValidateCode}}
+  - {style: REST, path: "/v1/campaigns/budgets/{budgetRef}", methods: {GET: GetBudgetStatus}}
+  - {style: REST, path: "/v1/campaigns/budgets/{budgetRef}/reservations", methods: {POST: ReserveBudget}}
+  - {style: REST, path: "/v1/campaigns/budget-reservations/{reservationId}:commit", methods: {POST: CommitReservation}}
+  - {style: REST, path: "/v1/campaigns/budget-reservations/{reservationId}:release", methods: {POST: ReleaseReservation}}
+
+events:
+  - {type: ucos.offer.campaign.created.v1, payload: "{id, code, objective, window}"}
+  - {type: ucos.offer.campaign.promotion-added.v1, payload: "{id, promotionId, mechanic}"}
+  - {type: ucos.offer.campaign.revised.v1, payload: "{id, revision}"}
+  - {type: ucos.offer.campaign.approved.v1, payload: "{id}"}
+  - {type: ucos.offer.campaign.activated.v1, payload: "{id, ruleRefs}", consumers: [pricing caches, search badges, recommendations]}
+  - {type: ucos.offer.campaign.paused.v1, payload: "{id, reason}"}
+  - {type: ucos.offer.campaign.ended.v1, payload: "{id}"}
+  - {type: ucos.offer.codes.generated.v1, payload: "{promotionId, count}"}
+  - {type: ucos.offer.budget.reserved.v1, payload: "{reservationId, budgetRef, amount}"}
+  - {type: ucos.offer.budget.reservation-rejected.v1, payload: "{budgetRef, amount, remaining}"}
+  - {type: ucos.offer.budget.committed.v1, payload: "{reservationId, amount, orderRef}"}
+  - {type: ucos.offer.budget.released.v1, payload: "{reservationId}"}
+
+stateMachines:
+  - name: CampaignLifecycle
+    initial: draft
+    states: [draft, in-approval, approved, scheduled, active, paused, ended]
+    terminal: [ended]
+    transitions:
+      - {from: draft, to: in-approval, command: submit}
+      - {from: in-approval, to: approved, command: ApproveCampaign}
+      - {from: in-approval, to: draft, command: reject}
+      - {from: approved, to: scheduled, command: ActivateCampaign, guard: "window.from > now"}
+      - {from: approved, to: active, command: ActivateCampaign, guard: "window.from <= now"}
+      - {from: scheduled, to: active, trigger: "window.from reached"}
+      - {from: active, to: paused, command: PauseCampaign}
+      - {from: paused, to: active, command: resume}
+      - {from: [active, paused, scheduled], to: ended, trigger: "window.to reached or budget exhausted or EndCampaign"}
+
+rules:
+  - {id: RUL-CMP-1, statement: "Promotions are never evaluated by campaign code at checkout; they are rules evaluated by DOM-PRC (single pricing truth)."}
+  - {id: RUL-CMP-2, statement: "Budget exhaustion ends affected rules immediately (end-dated) and emits budget events; in-flight reservations honored until TTL."}
+  - {id: RUL-CMP-3, statement: "Code validation is rate-limited per client and party; codes stored only as keyed hashes."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:campaign.margin-check", purpose: "When margin simulation is mandatory before approval"}
+  - {urn: "urn:ucos:ucos.std:policy:campaign.approval", purpose: "Approval plan by discount depth and budget"}
+
+decisions:
+  - {id: DEC-CMP-1, question: "Can budget B absorb amount A now?", algorithm: "INV-CMP-3 serialized check"}
+
+security:
+  permissions: [campaign.read, campaign.manage, campaign.approve, campaign.codes.generate, campaign.budget.reserve]
+  dataClassification: "Internal; personalized codes linked to parties are personal."
+  threats: ["Code brute force -> rate limits + hashed codes", "Promotion abuse -> per-party limits, fraud signals (DOM-FRD)"]
+
+governance:
+  changeControl: "Campaign approval via policy campaign.approval; compiled rules published with campaign ChangeSet."
+  evidence: "Margin simulations attached."
+
+runtimeBehavior:
+  consistency: "Budgets strongly consistent per budget; rules propagate within 5s of activation."
+  slo: {ReserveBudget_p99_ms: 15, ValidateCode_p99_ms: 20, availability: "99.99%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_offer (separate tables)
+  tables:
+    - {name: campaigns, columns: "tenant_id, id, code, body jsonb, state, window_from, window_to, revision", pk: "(tenant_id, id)"}
+    - {name: budgets, columns: "tenant_id, id, measure, limit_value numeric, committed numeric, reserved numeric, version bigint", pk: "(tenant_id, id)"}
+    - {name: budget_reservations, columns: "tenant_id, id, budget_id, amount numeric, expires_at, status", pk: "(tenant_id, id)", indexes: ["(expires_at) WHERE status='active'"]}
+    - {name: codes, columns: "tenant_id, pool_id, code_hash bytea, assigned_party, uses int", pk: "(tenant_id, code_hash)"}
+    - {name: redemptions, columns: "tenant_id, id, pool_id, code_hash, party, order_ref, amount, at, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "redemptions range(at) monthly."
+  retention: "Campaign data 3 years; redemptions financial retention when discount affects invoices."
+
+extensionModel:
+  extensionPoints: ["Promotion mechanics registry (compile templates)", "Audience providers (segmentation plugins)"]
+  forbidden: ["Discount logic outside pricing rules"]
+
+certificationCriteria:
+  - {id: CR-CMP-01, rule: "Budget never exceeded under 1,000 concurrent reservations (race test).", level: L1}
+  - {id: CR-CMP-02, rule: "Promotion compiled rules produce identical prices in quote, cart, and order for 10^4 scenarios.", level: L1}
+  - {id: CR-CMP-03, rule: "Single-use codes cannot be redeemed twice under concurrency.", level: L1}
+validationRules:
+  - {id: VR-CMP-01, rule: "Every promotion mechanic has a compile template targeting a registered price-adjustment effect kind."}
+  - {id: VR-CMP-02, rule: "Every active campaign has a window and approval reference."}

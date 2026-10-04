@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-ucos-id": "urn:ucos:ucos.kernel:schema:decimal@1.0.0",
+  "title": "Decimal",
+  "description": "Exact decimal carried as a string; binary floating point is forbidden for money, quantities, and rates (UCOS-L002).",
+  "type": "string",
+  "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+}

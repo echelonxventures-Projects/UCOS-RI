@@ -1,0 +1,9 @@
+# Toolchain for corpus validation, contract generation/linting, migrations, and conformance suites.
+# Runs only inside the ucos-tools image (tools/Containerfile); never installed on the host.
+pyyaml==6.0.2
+jsonschema==4.23.0
+cel-python==0.5.0
+openapi-spec-validator==0.7.1
+psycopg[binary]==3.2.3
+pytest==8.3.4
+requests==2.32.3

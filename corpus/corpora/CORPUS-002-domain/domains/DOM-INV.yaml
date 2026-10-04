@@ -1,0 +1,242 @@
+header:
+  id: DOM-INV
+  title: Inventory Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Systems Engineer
+  corpus: CORPUS-002
+  dependencies: [CIC-011-006, CIC-003-001, CIC-006-001, CIC-002-001]
+  traces: [PRIN-001, PRIN-006, PRIN-008, PRIN-015, CIC-011-006]
+  certification: [CR-INV-01, CR-INV-02, CR-INV-03, CR-INV-04]
+  validation: [VR-INV-01]
+
+purpose: >
+  Maintain the authoritative quantity and state of stockable and capacity-bound resources at every
+  node — physical goods, serialized items, lots, digital codes, seats, time slots, numbers, and other
+  finite resources — with strongly consistent reservations that prevent overselling.
+
+scope:
+  includes:
+    - Inventory positions per (object, node, stock status) incl. lots/batches and serials
+    - Inventory movements (receipt, issue, transfer, adjustment, count) as an append-only ledger
+    - Reservations (soft/hard), allocations, and releases
+    - Capacity pools (time-slotted capacity for services/experiences) and finite resource pools (codes, numbers, seats)
+    - Safety stock and inbound (expected receipts) for ATP
+  excludes:
+    - Availability resolution and promise dates (DOM-AVL consumes inventory projections)
+    - Warehouse execution (picking/packing) and transport (DOM-FUL, DOM-LOG)
+    - Replenishment planning (DOM-PLN), costing/valuation (DOM-CST/DOM-ACC)
+
+responsibilities:
+  - Never oversell beyond policy (CR-011-006-01).
+  - Complete movement history; positions derivable from ledger.
+  - Publish position changes for ATP projections with bounded lag.
+
+principles: [PRIN-001, PRIN-008, PRIN-015, PRIN-016]
+
+boundaries:
+  upstream: [DOM-COB, DOM-SUPN, DOM-ORD, DOM-FUL, DOM-LOG, DOM-MFG]
+  downstream: [DOM-AVL, DOM-FUL, DOM-CST, DOM-ACC, DOM-PLN, DOM-ANL]
+
+ownership:
+  boundedContext: supply
+  owningRole: Chief Systems Engineer
+  service: inventory-service
+  schema: ucos_supply
+
+capabilities:
+  - {id: INV-C1, name: Record movements, description: "Receipts, issues, transfers, adjustments, counts; idempotent by source document."}
+  - {id: INV-C2, name: Reserve, description: "Reserve quantity at node(s) for an order line with TTL or until fulfilled."}
+  - {id: INV-C3, name: Serial/lot tracking, description: "Track individual serials and lots with status and location."}
+  - {id: INV-C4, name: Capacity pools, description: "Time-slotted capacity (appointments, seats, events) with booking."}
+  - {id: INV-C5, name: Resource pools, description: "Finite unique resources (licence codes, phone numbers, vouchers) with allocation."}
+
+services:
+  - {name: InventoryCommandService, kind: application, operations: [RecordMovement, ReserveInventory, ConfirmReservation, ReleaseReservation, AllocateResource, ReleaseResource, DefineCapacityPool, BookCapacity, CancelCapacityBooking, SetSafetyStock, RecordExpectedReceipt]}
+  - {name: PositionLedger, kind: domain-service, contract: "append(movement) updates positions in the same transaction with version check; positions = Σ ledger by (object, node, status, lot)"}
+  - {name: ReservationAllocator, kind: domain-service, contract: "reserve(requests[], sourcingPlan) -> per-node reservations; all-or-nothing or partial per policy inventory.partial-reservation; strict per-(object,node) serialization via row lock or single-writer partition"}
+  - {name: InventoryQueryService, kind: application, operations: [GetPosition, FindPositions, GetReservation, GetSerial, GetCapacitySlots, GetMovementHistory]}
+
+aggregates:
+  - name: InventoryPosition
+    identity: "(tenant, objectRef, nodeRef, stockStatus, lotRef?)"
+    invariants:
+      - "INV-INV-1: onHand >= 0 unless node policy allows negative (e.g. drop-ship virtual nodes)."
+      - "INV-INV-2: reserved <= onHand + allowedOversell(policy) at commit."
+      - "INV-INV-3: every change has a ledger entry with sourceDocument and idempotency key."
+    fields:
+      - {name: objectRef, type: InstanceUrn}
+      - {name: nodeRef, type: "InstanceUrn (fulfillment node: warehouse, store, DC, virtual)"}
+      - {name: stockStatus, type: "available|quality-hold|damaged|in-transit|returned|reserved-external (extensible)"}
+      - {name: lotRef, type: "string?"}
+      - {name: onHand, type: Quantity}
+      - {name: reserved, type: Quantity}
+      - {name: safetyStock, type: Quantity}
+      - {name: version, type: long}
+  - name: Reservation
+    identity: "urn:ucos:<tenant>:inv-reservation:<ulid>"
+    invariants: ["INV-INV-4: reservation lines reference positions; expired reservations release automatically; confirmed reservations convert to issues on fulfillment."]
+    fields:
+      - {name: sourceRef, type: "orderRef + lineId"}
+      - {name: lines, type: "[{objectRef, nodeRef, quantity, lotRef?, serials[]?}]"}
+      - {name: kind, type: "soft|hard"}
+      - {name: expiresAt, type: "Instant?"}
+      - {name: status, type: "active|confirmed|released|expired|consumed"}
+  - name: CapacityPool
+    identity: "urn:ucos:<tenant>:capacity-pool:<ulid>"
+    invariants: ["INV-INV-5: bookings per slot <= slot capacity (+ overbooking policy)."]
+    fields:
+      - {name: resourceRef, type: "objectRef or resource (room, technician group, venue)"}
+      - {name: slotting, type: "{calendarRef, slotDuration, capacityPerSlot, timezone}"}
+      - {name: exceptions, type: "[{from, to, capacity}]"}
+  - name: ResourcePool
+    identity: "urn:ucos:<tenant>:resource-pool:<ulid>"
+    fields:
+      - {name: kind, type: "license-code|msisdn|voucher|seat-number|custom"}
+      - {name: items, type: "PoolItem[] (stored separately)"}
+      - {name: allocationStrategy, type: "fifo|random|pattern (e.g. vanity numbers)"}
+
+entities:
+  - {name: Movement, within: "PositionLedger", fields: [movementId, "type (receipt|issue|transfer-out|transfer-in|adjustment|count-correction|status-change)", objectRef, nodeRef, quantity, "fromStatus?", "toStatus?", lotRef, "serials[]", sourceDocument, idempotencyKey, occurredAt, reasonCode]}
+  - {name: SerialItem, within: "InventoryPosition", fields: [serial, objectRef, nodeRef, status, lotRef, "reservationRef?", history]}
+  - {name: CapacityBooking, within: CapacityPool, fields: [bookingId, slotStart, quantity, sourceRef, status]}
+  - {name: PoolItem, within: ResourcePool, fields: [value (encrypted when secret), status, allocatedTo, allocatedAt, quarantineUntil]}
+
+valueObjects:
+  - {name: Quantity, definition: "{value: decimal, unit: UCUM}; conversion via unit of measure definitions on the object's type"}
+  - {name: SourcingPlan, definition: "[{nodeRef, quantity}] from DOM-AVL sourcing decision"}
+
+commands:
+  - {name: RecordMovement, input: "Movement", emits: [InventoryMovementRecorded, InventoryPositionChanged]}
+  - {name: ReserveInventory, input: "{sourceRef, lines[], sourcingPlan?, kind, ttl?, idempotencyKey}", emits: [InventoryReserved, InventoryReservationFailed]}
+  - {name: ConfirmReservation, input: "{reservationId}", emits: [InventoryReservationConfirmed]}
+  - {name: ReleaseReservation, input: "{reservationId, reason}", emits: [InventoryReservationReleased]}
+  - {name: AllocateResource, input: "{poolId, sourceRef, pattern?, quantity}", emits: [ResourceAllocated]}
+  - {name: ReleaseResource, input: "{poolId, value, quarantine?}", emits: [ResourceReleased]}
+  - {name: DefineCapacityPool, input: "CapacityPool", emits: [CapacityPoolDefined]}
+  - {name: BookCapacity, input: "{poolId, slotStart, quantity, sourceRef, idempotencyKey}", emits: [CapacityBooked]}
+  - {name: CancelCapacityBooking, input: "{poolId, bookingId}", emits: [CapacityBookingCancelled]}
+  - {name: SetSafetyStock, input: "{objectRef, nodeRef, quantity}", emits: [SafetyStockSet]}
+  - {name: RecordExpectedReceipt, input: "{objectRef, nodeRef, quantity, expectedAt, sourceDocument}", emits: [ExpectedReceiptRecorded]}
+
+queries:
+  - {name: GetPosition, input: "{objectRef, nodeRef, stockStatus?}", output: InventoryPosition}
+  - {name: FindPositions, input: "{objectRef?, nodeRef?, belowSafetyStock?, cursor, limit}", output: "page"}
+  - {name: GetReservation, input: "{id}", output: Reservation}
+  - {name: GetSerial, input: "{serial}", output: SerialItem}
+  - {name: GetCapacitySlots, input: "{poolId, from, to}", output: "[{slotStart, capacity, booked, free}]"}
+  - {name: GetMovementHistory, input: "{objectRef, nodeRef?, from, to, cursor}", output: "page of Movement"}
+
+apis:
+  - {style: REST, path: "/v1/supply/movements", methods: {POST: RecordMovement, GET: GetMovementHistory}}
+  - {style: REST, path: "/v1/supply/positions", methods: {GET: FindPositions}}
+  - {style: REST, path: "/v1/supply/positions/{objectRef}/{nodeRef}", methods: {GET: GetPosition}}
+  - {style: REST, path: "/v1/supply/positions/{objectRef}/{nodeRef}/safety-stock", methods: {PUT: SetSafetyStock}}
+  - {style: REST, path: "/v1/supply/expected-receipts", methods: {POST: RecordExpectedReceipt}}
+  - {style: REST, path: "/v1/supply/reservations", methods: {POST: ReserveInventory}}
+  - {style: REST, path: "/v1/supply/reservations/{id}", methods: {GET: GetReservation}}
+  - {style: REST, path: "/v1/supply/reservations/{id}:confirm", methods: {POST: ConfirmReservation}}
+  - {style: REST, path: "/v1/supply/reservations/{id}:release", methods: {POST: ReleaseReservation}}
+  - {style: REST, path: "/v1/supply/serials/{serial}", methods: {GET: GetSerial}}
+  - {style: REST, path: "/v1/supply/capacity-pools", methods: {POST: DefineCapacityPool}}
+  - {style: REST, path: "/v1/supply/capacity-pools/{id}/slots", methods: {GET: GetCapacitySlots}}
+  - {style: REST, path: "/v1/supply/capacity-pools/{id}/bookings", methods: {POST: BookCapacity}}
+  - {style: REST, path: "/v1/supply/capacity-pools/{id}/bookings/{bookingId}", methods: {DELETE: CancelCapacityBooking}}
+  - {style: REST, path: "/v1/supply/resource-pools/{id}:allocate", methods: {POST: AllocateResource}}
+  - {style: REST, path: "/v1/supply/resource-pools/{id}:release", methods: {POST: ReleaseResource}}
+
+events:
+  - {type: ucos.supply.inventory.movement-recorded.v1, payload: "{movementId, type, objectRef, nodeRef, quantity, sourceDocument}"}
+  - {type: ucos.supply.inventory.position-changed.v1, payload: "{objectRef, nodeRef, stockStatus, onHand, reserved, safetyStock, ucosversion}", consumers: [availability ATP projection, search, planning]}
+  - {type: ucos.supply.inventory.reserved.v1, payload: "{reservationId, sourceRef, lines}"}
+  - {type: ucos.supply.inventory.reservation-failed.v1, payload: "{sourceRef, shortages[]}"}
+  - {type: ucos.supply.inventory.reservation-confirmed.v1, payload: "{reservationId}"}
+  - {type: ucos.supply.inventory.reservation-released.v1, payload: "{reservationId, reason}"}
+  - {type: ucos.supply.inventory.safety-stock-set.v1, payload: "{objectRef, nodeRef, quantity}"}
+  - {type: ucos.supply.inventory.expected-receipt-recorded.v1, payload: "{objectRef, nodeRef, quantity, expectedAt}"}
+  - {type: ucos.supply.resource.allocated.v1, payload: "{poolId, sourceRef, valueRef (not secret value)}"}
+  - {type: ucos.supply.resource.released.v1, payload: "{poolId, valueRef}"}
+  - {type: ucos.supply.capacity.pool-defined.v1, payload: "{poolId, resourceRef}"}
+  - {type: ucos.supply.capacity.booked.v1, payload: "{poolId, bookingId, slotStart, quantity}"}
+  - {type: ucos.supply.capacity.booking-cancelled.v1, payload: "{poolId, bookingId}"}
+
+stateMachines:
+  - name: ReservationLifecycle
+    initial: active
+    states: [active, confirmed, consumed, released, expired]
+    terminal: [consumed, released, expired]
+    transitions:
+      - {from: active, to: confirmed, command: ConfirmReservation}
+      - {from: [active, confirmed], to: released, command: ReleaseReservation}
+      - {from: active, to: expired, trigger: "expiresAt (timer)"}
+      - {from: confirmed, to: consumed, trigger: "issue movement referencing reservation"}
+  - name: SerialStatus
+    initial: received
+    states: [received, available, reserved, issued, returned, quarantined, scrapped]
+    terminal: [scrapped]
+    transitions:
+      - {from: received, to: available, trigger: "quality release"}
+      - {from: available, to: reserved, trigger: "reservation with serial"}
+      - {from: reserved, to: available, trigger: "reservation released/expired"}
+      - {from: [available, reserved], to: issued, trigger: "issue movement"}
+      - {from: issued, to: returned, trigger: "return receipt"}
+      - {from: returned, to: available, trigger: "inspection pass"}
+      - {from: [returned, available], to: quarantined, trigger: "status-change movement"}
+      - {from: [quarantined, returned], to: scrapped, trigger: "adjustment movement"}
+
+rules:
+  - {id: RUL-INV-1, statement: "Reservations against a position are serialized per (tenant, objectRef, nodeRef); hot SKUs use single-writer partitions (consistent-hash routing) instead of row locks above 500 writes/s."}
+  - {id: RUL-INV-2, statement: "Movements are idempotent on (sourceDocument, lineRef, type)."}
+  - {id: RUL-INV-3, statement: "Secret pool values (licence codes) are never emitted in events; delivered only via authorized fulfillment call."}
+  - {id: RUL-INV-4, statement: "Oversell allowance per node/object from policy inventory.oversell (default 0)."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:inventory.oversell", purpose: "Allowed oversell per node class"}
+  - {urn: "urn:ucos:ucos.std:policy:inventory.partial-reservation", purpose: "All-or-nothing vs partial reservation"}
+  - {urn: "urn:ucos:ucos.std:policy:inventory.reservation-ttl", purpose: "Default soft reservation TTL"}
+  - {urn: "urn:ucos:ucos.std:policy:inventory.adjustment-approval", purpose: "Approval thresholds for adjustments (shrinkage control)"}
+
+decisions:
+  - {id: DEC-INV-1, question: "Can quantity q be reserved at node n?", algorithm: "available = onHand - reserved - safetyStock + oversellAllowance >= q, under serialization (RUL-INV-1)"}
+  - {id: DEC-INV-2, question: "Is an adjustment approvable?", inputs: ["value of adjustment (DOM-CST)", "inventory.adjustment-approval"], output: "allow|require-approval"}
+
+security:
+  permissions: [inventory.read, inventory.movement.record, inventory.reserve, inventory.adjust, inventory.pool.manage, inventory.capacity.manage]
+  dataClassification: "Internal; resource pool secret values restricted (encrypted, access audited)."
+  threats: ["Shrinkage concealment via adjustments -> approvals + anomaly monitoring", "Code leakage -> pool values encrypted, never in events/logs"]
+
+governance:
+  changeControl: "Node configuration, oversell and approval policies via ChangeSet."
+  evidence: "Physical count results and adjustment approvals captured as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per position for reservations and movements; ATP projections eventual (p99 2s)."
+  slo: {ReserveInventory_p99_ms: 40, RecordMovement_p99_ms: 30, availability: "99.99%"}
+  scale: "10^9 positions; 20,000 reservations/s per region; hot SKU 2,000 reservations/s."
+
+persistenceModel:
+  store: PostgreSQL schema ucos_supply
+  tables:
+    - {name: positions, columns: "tenant_id uuid, object_ref text, node_ref text, stock_status text, lot_ref text, on_hand numeric(38,9), reserved numeric(38,9), safety_stock numeric(38,9), version bigint", pk: "(tenant_id, object_ref, node_ref, stock_status, lot_ref)"}
+    - {name: movements, columns: "tenant_id, movement_id, type, object_ref, node_ref, quantity, from_status, to_status, lot_ref, serials text[], source_document, idempotency_key, occurred_at", pk: "(tenant_id, movement_id, occurred_at)", indexes: ["unique(tenant_id, idempotency_key, occurred_at)", "(tenant_id, object_ref, node_ref, occurred_at)"]}
+    - {name: reservations, columns: "tenant_id, id, source_ref, kind, lines jsonb, status, expires_at", pk: "(tenant_id, id)", indexes: ["(tenant_id, source_ref)", "(expires_at) WHERE status='active'"]}
+    - {name: serials, columns: "tenant_id, serial, object_ref, node_ref, status, lot_ref, reservation_id", pk: "(tenant_id, serial)"}
+    - {name: capacity_bookings, columns: "tenant_id, pool_id, slot_start, booking_id, quantity, status", pk: "(tenant_id, pool_id, slot_start, booking_id)"}
+    - {name: pool_items, columns: "tenant_id, pool_id, value_enc bytea, value_hash bytea, status, allocated_to, allocated_at", pk: "(tenant_id, pool_id, value_hash)", indexes: ["(tenant_id, pool_id, status)"]}
+    - {name: expected_receipts, columns: "tenant_id, object_ref, node_ref, expected_at, quantity, source_document", pk: "(tenant_id, source_document, object_ref)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "positions hash(tenant_id, object_ref) 128; movements range(occurred_at) monthly."
+  retention: "Movements per financial retention (inventory valuation); serial history life of item + 10 years for regulated goods."
+
+extensionModel:
+  extensionPoints: ["Stock statuses registry", "Node kinds via ontology", "Resource pool kinds and allocation strategies", "External WMS/ERP inventory adapters (ACL via DOM-DXC) as movement sources"]
+  forbidden: ["Direct position updates without ledger movement"]
+
+certificationCriteria:
+  - {id: CR-INV-01, rule: "Passes CR-011-006-01 oversell test under hot-SKU single-writer routing and row-lock modes.", level: L1}
+  - {id: CR-INV-02, rule: "Positions equal ledger aggregation after 10^7 random movements with crashes injected.", level: L1}
+  - {id: CR-INV-03, rule: "Capacity booking never exceeds slot capacity under 5,000 concurrent bookings per slot.", level: L1}
+  - {id: CR-INV-04, rule: "Hot-SKU reservation throughput >= 2,000/s with p99 <= 40ms.", level: L2}
+validationRules:
+  - {id: VR-INV-01, rule: "Every Stockable type has a unit of measure and at least one node class in reference data."}

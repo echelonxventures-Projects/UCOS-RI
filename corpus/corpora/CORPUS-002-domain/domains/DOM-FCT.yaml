@@ -1,0 +1,217 @@
+header:
+  id: DOM-FCT
+  title: Financial Controls Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Governance Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-015-001, CIC-025-001, CIC-010-001, CIC-002-001]
+  traces: [PRIN-011, PRIN-012, PRIN-005]
+  certification: [CR-FCT-01, CR-FCT-02, CR-FCT-03]
+  validation: [VR-FCT-01, VR-FCT-02]
+
+purpose: >
+  Operate the financial control environment of commerce: SOX-style key controls over revenue,
+  billing, payments, settlement, and accounting — automated control tests, financial reconciliations,
+  segregation-of-duties monitoring, revenue assurance (leakage detection), and close checklists —
+  producing evidence auditors can rely on.
+
+scope:
+  includes:
+    - Financial control catalog (subset of DOM-CMPL controls with financial assertions: completeness, accuracy, cut-off, existence, valuation, presentation)
+    - Automated control tests and continuous monitoring (queries over events/projections)
+    - Reconciliations (order↔charge, charge↔invoice, invoice↔tax, payment↔PSP, settlement↔payout, sub-ledger↔GL)
+    - Revenue assurance rules (unbilled delivered services, entitlement without charge, price below floor without approval)
+    - Close checklist management per legal entity and period
+    - SoD conflict monitoring on executed financial actions
+  excludes:
+    - General compliance controls (DOM-CMPL), audit logs (DOM-AUD), ledger itself (DOM-ACC)
+
+responsibilities:
+  - Every key financial control has automated evidence each period.
+  - Reconciliation breaks are detected, owned, and resolved within SLA.
+  - Period close only when required controls pass.
+
+principles: [PRIN-005, PRIN-011, PRIN-012]
+
+boundaries:
+  upstream: [DOM-BIL, DOM-PAY, DOM-STL, DOM-ACC, DOM-REV, DOM-TAX, DOM-ORD, DOM-ENT, DOM-AUTH, DOM-AUD]
+  downstream: [DOM-ACC, DOM-CMPL, DOM-AUD, DOM-GOV]
+
+ownership:
+  boundedContext: finance
+  owningRole: Chief Governance Architect
+  service: financial-controls-service
+  schema: ucos_finance
+
+capabilities:
+  - {id: FCT-C1, name: Controls, description: "Define financial controls with assertions and test procedures."}
+  - {id: FCT-C2, name: Reconcile, description: "Run reconciliations; manage breaks."}
+  - {id: FCT-C3, name: Revenue assurance, description: "Detect leakage patterns."}
+  - {id: FCT-C4, name: Close, description: "Checklists gating period close."}
+  - {id: FCT-C5, name: SoD monitoring, description: "Detect executed SoD conflicts in financial actions."}
+
+services:
+  - {name: ControlService, kind: application, operations: [DefineFinancialControl, RunControlTest, RecordControlResult]}
+  - {name: ReconciliationService, kind: application, operations: [DefineReconciliation, RunReconciliation, AssignBreak, ResolveBreak]}
+  - {name: AssuranceService, kind: application, operations: [DefineAssuranceRule, RunAssuranceScan]}
+  - {name: CloseService, kind: application, operations: [CreateCloseChecklist, CompleteChecklistItem, SignOffClose]}
+  - {name: ControlsQueryService, kind: application, operations: [GetControlStatus, GetReconciliationRun, FindBreaks, GetCloseChecklist]}
+
+aggregates:
+  - name: FinancialControl
+    identity: "urn:ucos:<tenant>:financial-control:<code>"
+    fields:
+      - {name: code, type: string}
+      - {name: assertion, type: "completeness|accuracy|cut-off|existence|valuation|presentation|authorization"}
+      - {name: kind, type: "preventive|detective"}
+      - {name: implementation, type: "policyRef | reconciliationRef | assuranceRuleRef | query"}
+      - {name: frequency, type: "continuous|daily|period-end"}
+      - {name: owner, type: PartyUrn}
+      - {name: keyControl, type: boolean}
+  - name: ReconciliationDefinition
+    identity: "urn:ucos:<tenant>:reconciliation:<code>"
+    invariants: ["INV-FCT-1: left and right sources are registered datasets (DOM-LIN); match keys and tolerances declared; amounts compared per currency."]
+    fields:
+      - {name: left, type: "dataset + query"}
+      - {name: right, type: "dataset + query"}
+      - {name: matchKeys, type: "string[]"}
+      - {name: compare, type: "[{field, tolerance}]"}
+      - {name: schedule, type: cron}
+  - name: ReconciliationRun
+    identity: "urn:ucos:<tenant>:reconciliation-run:<ulid>"
+    fields:
+      - {name: definition, type: string}
+      - {name: asOf, type: Instant}
+      - {name: matched, type: long}
+      - {name: breaks, type: "Break[]"}
+      - {name: status, type: "running|clean|breaks|failed"}
+  - name: CloseChecklist
+    identity: "urn:ucos:<tenant>:close-checklist:<legalEntity>/<period>"
+    invariants: ["INV-FCT-2: sign-off only when all key controls for the period have passing results or approved exceptions."]
+    fields:
+      - {name: items, type: "[{code, controlRef?, owner, status, evidenceRef}]"}
+      - {name: signedOffBy, type: "PartyUrn?"}
+      - {name: status, type: "open|ready|signed-off"}
+
+entities:
+  - {name: Break, within: ReconciliationRun, fields: [breakId, key, leftValue, rightValue, difference, category, assignee, status, resolution, ageDays]}
+
+valueObjects:
+  - {name: ControlResult, definition: "{control, period, outcome: pass|fail|exception, population, exceptions[], evidenceRef}"}
+
+commands:
+  - {name: DefineFinancialControl, input: "FinancialControl + changeSetRef", emits: [FinancialControlDefined]}
+  - {name: RunControlTest, input: "{control, period}", emits: [FinancialControlTested], async: true}
+  - {name: RecordControlResult, input: "ControlResult (manual controls)", emits: [FinancialControlTested]}
+  - {name: DefineReconciliation, input: "ReconciliationDefinition + changeSetRef", emits: [ReconciliationDefined]}
+  - {name: RunReconciliation, input: "{code, asOf}", emits: [ReconciliationRunCompleted], async: true}
+  - {name: AssignBreak, input: "{runId, breakId, assignee}", emits: [ReconciliationBreakAssigned]}
+  - {name: ResolveBreak, input: "{runId, breakId, resolution, evidenceRef}", emits: [ReconciliationBreakResolved]}
+  - {name: DefineAssuranceRule, input: "{code, query, severity}", emits: [AssuranceRuleDefined]}
+  - {name: RunAssuranceScan, input: "{code?, window}", emits: [RevenueLeakageDetected], async: true}
+  - {name: CreateCloseChecklist, input: "{legalEntity, period, template}", emits: [CloseChecklistCreated]}
+  - {name: CompleteChecklistItem, input: "{checklistId, itemCode, evidenceRef}", emits: [CloseChecklistItemCompleted]}
+  - {name: SignOffClose, input: "{checklistId}", emits: [CloseSignedOff], preconditions: ["INV-FCT-2"]}
+
+queries:
+  - {name: GetControlStatus, input: "{period, keyOnly?}", output: "ControlResult[]"}
+  - {name: GetReconciliationRun, input: "{runId}", output: ReconciliationRun}
+  - {name: FindBreaks, input: "{status?, olderThanDays?, assignee?}", output: "Break[]"}
+  - {name: GetCloseChecklist, input: "{legalEntity, period}", output: CloseChecklist}
+
+apis:
+  - {style: REST, path: "/v1/financial-controls/controls", methods: {POST: DefineFinancialControl, GET: GetControlStatus}}
+  - {style: REST, path: "/v1/financial-controls/controls/{code}:test", methods: {POST: RunControlTest}}
+  - {style: REST, path: "/v1/financial-controls/controls/{code}/results", methods: {POST: RecordControlResult}}
+  - {style: REST, path: "/v1/financial-controls/reconciliations", methods: {POST: DefineReconciliation}}
+  - {style: REST, path: "/v1/financial-controls/reconciliations/{code}:run", methods: {POST: RunReconciliation}}
+  - {style: REST, path: "/v1/financial-controls/reconciliation-runs/{runId}", methods: {GET: GetReconciliationRun}}
+  - {style: REST, path: "/v1/financial-controls/breaks", methods: {GET: FindBreaks}}
+  - {style: REST, path: "/v1/financial-controls/reconciliation-runs/{runId}/breaks/{breakId}:assign", methods: {POST: AssignBreak}}
+  - {style: REST, path: "/v1/financial-controls/reconciliation-runs/{runId}/breaks/{breakId}:resolve", methods: {POST: ResolveBreak}}
+  - {style: REST, path: "/v1/financial-controls/assurance-rules", methods: {POST: DefineAssuranceRule}}
+  - {style: REST, path: "/v1/financial-controls/assurance-scans", methods: {POST: RunAssuranceScan}}
+  - {style: REST, path: "/v1/financial-controls/close-checklists", methods: {POST: CreateCloseChecklist, GET: GetCloseChecklist}}
+  - {style: REST, path: "/v1/financial-controls/close-checklists/{id}/items/{itemCode}:complete", methods: {POST: CompleteChecklistItem}}
+  - {style: REST, path: "/v1/financial-controls/close-checklists/{id}:sign-off", methods: {POST: SignOffClose}}
+
+events:
+  - {type: ucos.finance.financial-control.defined.v1, payload: "{code, assertion, keyControl}"}
+  - {type: ucos.finance.financial-control.tested.v1, payload: "{code, period, outcome, exceptions}", consumers: [compliance dashboards, close checklist]}
+  - {type: ucos.finance.reconciliation.defined.v1, payload: "{code}"}
+  - {type: ucos.finance.reconciliation.run-completed.v1, payload: "{runId, code, matched, breaks}"}
+  - {type: ucos.finance.reconciliation.break-assigned.v1, payload: "{runId, breakId, assignee}"}
+  - {type: ucos.finance.reconciliation.break-resolved.v1, payload: "{runId, breakId, resolution}"}
+  - {type: ucos.finance.assurance-rule.defined.v1, payload: "{code, severity}"}
+  - {type: ucos.finance.revenue-leakage.detected.v1, payload: "{rule, count, estimatedAmount, samples}"}
+  - {type: ucos.finance.close-checklist.created.v1, payload: "{id, legalEntity, period}"}
+  - {type: ucos.finance.close-checklist.item-completed.v1, payload: "{id, itemCode}"}
+  - {type: ucos.finance.close.signed-off.v1, payload: "{legalEntity, period, signedOffBy}", consumers: [accounting (period close allowed)]}
+
+stateMachines:
+  - name: BreakLifecycle
+    initial: open
+    states: [open, assigned, resolved, written-off]
+    terminal: [resolved, written-off]
+    transitions:
+      - {from: open, to: assigned, command: AssignBreak}
+      - {from: assigned, to: resolved, command: ResolveBreak, guard: "resolution in [corrected, timing, explained]"}
+      - {from: assigned, to: written-off, command: ResolveBreak, guard: "resolution = write-off with approval"}
+  - name: CloseChecklistLifecycle
+    initial: open
+    states: [open, ready, signed-off]
+    terminal: [signed-off]
+    transitions:
+      - {from: open, to: ready, trigger: "all items complete"}
+      - {from: ready, to: signed-off, command: SignOffClose}
+
+rules:
+  - {id: RUL-FCT-1, statement: "Breaks older than policy financial-controls.break-sla are escalated and block period close for affected legal entities."}
+  - {id: RUL-FCT-2, statement: "Revenue assurance seed rules: delivered service without charge, active entitlement without billing schedule, order line priced below floor without approval decision, credit note without approval when above threshold."}
+  - {id: RUL-FCT-3, statement: "SoD monitoring: the same party executing conflicting financial actions on the same subject (e.g. create vendor payout method and approve payout) raises a control exception."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:financial-controls.break-sla", purpose: "Break resolution SLA by category"}
+
+decisions:
+  - {id: DEC-FCT-1, question: "May period P for legal entity L be closed?", algorithm: "INV-FCT-2 + no breaks beyond SLA + accounting completeness (CR-ACC-02)"}
+
+security:
+  permissions: [financial-controls.read, financial-controls.manage, financial-controls.reconcile, financial-controls.break.resolve, financial-controls.close.signoff]
+  dataClassification: "Confidential financial."
+  threats: ["Self-review of breaks -> resolver != creator of underlying transaction (SoD check)"]
+
+governance:
+  changeControl: "Controls, reconciliations, assurance rules via ChangeSet with Controller/Internal Audit approval."
+  evidence: "Every control test and reconciliation run produces sealed Evidence."
+
+runtimeBehavior:
+  consistency: "Batch/continuous; runs reproducible as of asOf."
+  slo: {daily_reconciliations_complete_by: "06:00 local legal-entity time", availability: "99.9%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_finance (separate tables) + analytics store for large reconciliations
+  tables:
+    - {name: financial_controls, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: control_results, columns: "tenant_id, code, period, outcome, body jsonb, evidence_ref", pk: "(tenant_id, code, period)"}
+    - {name: reconciliation_definitions, columns: "tenant_id, code, body jsonb", pk: "(tenant_id, code)"}
+    - {name: reconciliation_runs, columns: "tenant_id, run_id, code, as_of, matched, status", pk: "(tenant_id, run_id)"}
+    - {name: reconciliation_breaks, columns: "tenant_id, run_id, break_id, key, difference_minor, currency, category, assignee, status", pk: "(tenant_id, run_id, break_id)", indexes: ["(tenant_id, status)"]}
+    - {name: close_checklists, columns: "tenant_id, id, legal_entity, period, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "reconciliation_breaks hash(tenant_id) 16."
+  retention: "7 years (audit evidence)."
+
+extensionModel:
+  extensionPoints: ["Control libraries per framework (SOX, J-SOX, ICFR) in packs", "Reconciliation connectors to bank/ERP data"]
+  forbidden: ["Manual-only key controls where automation is possible without documented rationale"]
+
+certificationCriteria:
+  - {id: CR-FCT-01, rule: "Seeded breaks in each reconciliation pair are detected 100% with correct difference.", level: L1}
+  - {id: CR-FCT-02, rule: "Revenue assurance rules detect seeded leakage scenarios 100%.", level: L1}
+  - {id: CR-FCT-03, rule: "Close sign-off is blocked with failing key controls (negative test).", level: L1}
+validationRules:
+  - {id: VR-FCT-01, rule: "Every reconciliation in CIC-025-001 §7 has a ReconciliationDefinition in ucos.std controls pack."}
+  - {id: VR-FCT-02, rule: "Every key control maps to >= 1 framework requirement in DOM-CMPL."}

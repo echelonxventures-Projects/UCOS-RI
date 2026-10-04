@@ -1,0 +1,158 @@
+header:
+  id: DOM-PKGN
+  title: Packaging Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Systems Engineer
+  corpus: CORPUS-002
+  dependencies: [CIC-002-001, CIC-028-001]
+  traces: [PRIN-001, PRIN-004, PRIN-013]
+  certification: [CR-PKGN-01, CR-PKGN-02, CR-PKGN-03]
+  validation: [VR-PKGN-01, VR-PKGN-02]
+
+plugin:
+  id: ucos.ext.packaging
+  isolation: I4
+  consumesPorts: [EventBusPort]
+  providesApis: ["/v1/packaging/*"]
+  requiredPacks: ["ucos.std@^1.0"]
+
+purpose: >
+  Model physical packaging of goods — packaging hierarchies (each, inner, case, pallet), materials and
+  weights, recyclability, labeling requirements, and extended producer responsibility (EPR) reporting —
+  so fulfillment, logistics, sustainability, and compliance use one packaging truth.
+
+scope:
+  includes:
+    - Packaging specifications per object (levels, quantities, dimensions, weights, GTINs per level)
+    - Packaging materials and composition (for EPR and recyclability)
+    - Cartonization rules (which boxes fit which orders) as recommendations to fulfillment
+    - EPR reporting per jurisdiction (material weights placed on market)
+  excludes:
+    - Commercial "Package" bundles (DOM-COB type Package), shipments (DOM-LOG)
+
+responsibilities:
+  - Packaging data consistent across levels (case = n x inner).
+  - EPR reports derived from actual sales/shipment quantities.
+
+principles: [PRIN-001, PRIN-004, PRIN-013]
+
+boundaries:
+  upstream: [DOM-COB, DOM-REF, DOM-ORD, DOM-LOG]
+  downstream: [DOM-FUL, DOM-LOG, DOM-SUS, DOM-CMPL]
+
+ownership:
+  boundedContext: supply
+  owningRole: Chief Systems Engineer
+  service: packaging-service
+  schema: ucos_supply
+
+capabilities:
+  - {id: PKGN-C1, name: Specifications, description: "Packaging hierarchies and dimensions."}
+  - {id: PKGN-C2, name: Materials, description: "Material composition and recyclability."}
+  - {id: PKGN-C3, name: Cartonization, description: "Box recommendations for shipments."}
+  - {id: PKGN-C4, name: EPR, description: "Jurisdictional EPR reporting."}
+
+services:
+  - {name: PackagingCommandService, kind: application, operations: [DefinePackagingSpec, DefineBoxCatalog, GenerateEprReport]}
+  - {name: Cartonizer, kind: domain-service, contract: "recommend(items with dimensions/weights, boxCatalog) -> packages minimizing boxes/void fill; 3D bin-packing heuristic, deterministic"}
+  - {name: PackagingQueryService, kind: application, operations: [GetPackagingSpec, RecommendCartonization, GetEprReport]}
+
+aggregates:
+  - name: PackagingSpec
+    identity: "urn:ucos:<tenant>:packaging-spec:<objectUlid>@<version>"
+    invariants: ["INV-PKGN-1: level quantities multiply consistently; GTINs per level validated via DOM-REF scheme gs1:gtin."]
+    fields:
+      - {name: objectRef, type: InstanceUrn}
+      - {name: levels, type: "[{level: each|inner|case|pallet, quantity, dimensions, grossWeight, gtin?, materials: [{material, weightG, recyclable}]}]"}
+      - {name: labelingRequirements, type: "[{jurisdiction, mark}]"}
+  - name: BoxCatalog
+    identity: "urn:ucos:<tenant>:box-catalog:<nodeRef>"
+    fields:
+      - {name: boxes, type: "[{code, innerDimensions, maxWeight, tareWeight, materials}]"}
+  - name: EprReport
+    identity: "urn:ucos:<tenant>:epr-report:<jurisdiction>/<period>"
+    fields:
+      - {name: jurisdiction, type: string}
+      - {name: period, type: Interval}
+      - {name: materialWeights, type: "map<material, kg>"}
+      - {name: status, type: "generated|submitted"}
+
+entities: []
+
+valueObjects:
+  - {name: CartonizationResult, definition: "[{boxCode, items, fillRatio, weight}]"}
+
+commands:
+  - {name: DefinePackagingSpec, input: "PackagingSpec", emits: [PackagingSpecDefined]}
+  - {name: DefineBoxCatalog, input: "BoxCatalog", emits: [BoxCatalogDefined]}
+  - {name: GenerateEprReport, input: "{jurisdiction, period}", emits: [EprReportGenerated], async: true}
+
+queries:
+  - {name: GetPackagingSpec, input: "{objectRef}", output: PackagingSpec}
+  - {name: RecommendCartonization, input: "{nodeRef, items}", output: CartonizationResult}
+  - {name: GetEprReport, input: "{jurisdiction, period}", output: EprReport}
+
+apis:
+  - {style: REST, path: "/v1/packaging/specs", methods: {POST: DefinePackagingSpec, GET: GetPackagingSpec}}
+  - {style: REST, path: "/v1/packaging/box-catalogs", methods: {POST: DefineBoxCatalog}}
+  - {style: REST, path: "/v1/packaging:cartonize", methods: {POST: RecommendCartonization}}
+  - {style: REST, path: "/v1/packaging/epr-reports", methods: {POST: GenerateEprReport, GET: GetEprReport}}
+
+events:
+  - {type: ucos.supply.packaging-spec.defined.v1, payload: "{objectRef, version}"}
+  - {type: ucos.supply.box-catalog.defined.v1, payload: "{nodeRef, boxes}"}
+  - {type: ucos.supply.epr-report.generated.v1, payload: "{jurisdiction, period}"}
+
+stateMachines:
+  - name: EprReportLifecycle
+    initial: generated
+    states: [generated, submitted]
+    terminal: [submitted]
+    transitions:
+      - {from: generated, to: submitted, command: submit}
+
+rules:
+  - {id: RUL-PKGN-1, statement: "EPR quantities derive from shipped quantities per jurisdiction (DOM-LOG/DOM-FUL events) x packaging material weights at time of shipment."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:packaging.epr-scope", purpose: "Jurisdictions and material categories for EPR"}
+
+decisions:
+  - {id: DEC-PKGN-1, question: "Which boxes for this shipment?", algorithm: "Cartonizer over node box catalog"}
+
+security:
+  permissions: [packaging.read, packaging.manage, packaging.epr.report]
+  dataClassification: "Internal."
+  threats: ["Misreported EPR -> derived from shipment events, reconciled"]
+
+governance:
+  changeControl: "EPR scope via ChangeSet."
+  evidence: "Submitted EPR reports as Evidence."
+
+runtimeBehavior:
+  consistency: "Strong per spec."
+  slo: {RecommendCartonization_p99_ms: 100, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_supply (separate tables)
+  tables:
+    - {name: packaging_specs, columns: "tenant_id, object_ref, version, body jsonb", pk: "(tenant_id, object_ref, version)"}
+    - {name: box_catalogs, columns: "tenant_id, node_ref, body jsonb", pk: "(tenant_id, node_ref)"}
+    - {name: epr_reports, columns: "tenant_id, jurisdiction, period, body jsonb, status", pk: "(tenant_id, jurisdiction, period)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "None."
+  retention: "EPR reports 10 years."
+
+extensionModel:
+  extensionPoints: ["Cartonization algorithms", "EPR report formats per jurisdiction"]
+  forbidden: ["Packaging data duplicated in shipments beyond references"]
+
+certificationCriteria:
+  - {id: CR-PKGN-01, rule: "Level consistency validation catches seeded inconsistencies.", level: L1}
+  - {id: CR-PKGN-02, rule: "EPR report reconciles to shipped quantities x material weights.", level: L1}
+  - {id: CR-PKGN-03, rule: "Plugin deploys as I4 with only declared ports.", level: L2}
+validationRules:
+  - {id: VR-PKGN-01, rule: "Every Shippable object sold in EPR jurisdictions has a packaging spec."}
+  - {id: VR-PKGN-02, rule: "Every material maps to an EPR category."}

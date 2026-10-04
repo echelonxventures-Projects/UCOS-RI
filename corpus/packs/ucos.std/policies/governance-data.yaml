@@ -1,0 +1,92 @@
+# Policies for DOM-GOV, CRT, CMPL, AUD, TRC, EVO, SOV, MDM, DQL, DXC, FED, IOP.
+defaults: &cfg
+  kind: configuration
+  layer: platform
+  scope: {}
+
+policies:
+  - <<: *cfg
+    name: governance.risk-classification
+    layer: constitutional
+    outputSchema: {type: object, required: [rules, default], properties: {rules: {type: array, items: {type: object, required: [when, riskClass], properties: {when: {type: string}, riskClass: {enum: [low, medium, high, critical]}}}}, default: {enum: [low, medium, high, critical]}}}
+    body:
+      language: static
+      source: &govRisk
+        default: low
+        rules:
+          - {when: "items.exists(i, i.layer in ['constitutional', 'regulatory'] || i.subjectKind == 'kernel')", riskClass: critical}
+          - {when: "items.exists(i, i.compatibility == 'MAJOR') || impact.regulatedFactKinds > 0 || impact.securityPolicies > 0", riskClass: high}
+          - {when: "impact.simulation.changedRatio > 0.01 || impact.pinnedInstances > 10000 || impact.monetaryDeltaAbsMinor > 10000000", riskClass: medium}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *govRisk}]
+
+  - <<: *cfg
+    name: governance.freeze-windows
+    outputSchema: {type: object, required: [recurring], properties: {recurring: {type: array, items: {type: object, required: [name, rrule, duration], properties: {name: {type: string}, rrule: {type: string}, duration: {type: string, pattern: "^P"}}}}, emergencyRiskClass: {enum: [critical]}}}
+    body: {language: static, source: &govFreeze {recurring: [{name: month-end-close, rrule: "FREQ=MONTHLY;BYMONTHDAY=-1;BYHOUR=0", duration: P3D}], emergencyRiskClass: critical}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *govFreeze}]
+
+  - <<: *cfg
+    name: certification.validity
+    outputSchema: {type: object, required: [byLevel], properties: {byLevel: {type: object, required: [L1, L2, L3], additionalProperties: {type: string, pattern: "^P"}}}}
+    body: {language: static, source: &crtValidity {byLevel: {L0: P365D, L1: P365D, L2: P365D, L3: P180D}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *crtValidity}]
+
+  - <<: *cfg
+    name: compliance.scope
+    outputSchema: {type: object, required: [platform], properties: {platform: {type: array, items: {type: string}}, byJurisdiction: {type: object, additionalProperties: {type: array, items: {type: string}}}}}
+    body: {language: static, source: &cmplScope {platform: [iso27001-2022, soc2-tsc-2017], byJurisdiction: {EU: [gdpr, en16931-einvoicing], US: [sox-itgc]}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *cmplScope}]
+
+  - <<: *cfg
+    name: audit.retention
+    outputSchema: {type: object, required: [hot, archive], properties: {hot: {type: string, pattern: "^P"}, archive: {type: object, additionalProperties: {type: string, pattern: "^P"}}}}
+    body: {language: static, source: &audRet {hot: P24M, archive: {default: P7Y, financial: P10Y, security: P7Y}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *audRet}]
+
+  - <<: *cfg
+    name: traceability.release-gates
+    outputSchema: {type: object, required: [byEnvironment], properties: {byEnvironment: {type: object, additionalProperties: {type: object, required: [maxRulesWithoutTests, minCertifiedPct], properties: {maxRulesWithoutTests: {type: integer, minimum: 0}, minCertifiedPct: {type: number, minimum: 0, maximum: 100}}}}}}
+    body: {language: static, source: &trcGates {byEnvironment: {staging: {maxRulesWithoutTests: 0, minCertifiedPct: 90}, prod: {maxRulesWithoutTests: 0, minCertifiedPct: 100}}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *trcGates}]
+
+  - <<: *cfg
+    name: evolution.release-cadence
+    outputSchema: {type: object, required: [minorTrain, majorProgramMinDuration], properties: {minorTrain: {type: string}, majorProgramMinDuration: {type: string, pattern: "^P"}}}
+    body: {language: static, source: &evoCadence {minorTrain: "FREQ=WEEKLY;BYDAY=TU", majorProgramMinDuration: P12M}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *evoCadence}]
+
+  - <<: *cfg
+    name: sovereignty.default-profile
+    outputSchema: {type: object, required: [default], properties: {default: {type: string}, byJurisdiction: {type: object, additionalProperties: {type: string}}}}
+    body: {language: static, source: &sovDefault {default: "urn:ucos:ucos.std:sovereignty-profile:standard", byJurisdiction: {EU: "urn:ucos:ucos.std:sovereignty-profile:eu-resident"}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *sovDefault}]
+
+  - <<: *cfg
+    name: mdm.match-thresholds
+    outputSchema: {type: object, required: [default], properties: {default: {type: object, required: [autoConfirm, review], properties: {autoConfirm: {type: number}, review: {type: number}}}, byEntityKind: {type: object}}}
+    body: {language: static, source: &mdmThr {default: {autoConfirm: 0.97, review: 0.85}, byEntityKind: {}}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *mdmThr}]
+
+  - <<: *cfg
+    name: data-quality.gates
+    outputSchema: {type: object, required: [gates], properties: {gates: {type: array, items: {type: object, required: [type, transition, minCompleteness], properties: {type: {type: string}, transition: {type: string}, minCompleteness: {type: integer, minimum: 0, maximum: 100}, blockOn: {type: array}}}}}}
+    body: {language: static, source: &dqlGates {gates: [{type: CommercialObject, transition: approve, minCompleteness: 95, blockOn: [blocker]}, {type: CommercialObject, transition: activate, minCompleteness: 100, blockOn: [blocker, error]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *dqlGates}]
+
+  - <<: *cfg
+    name: data-exchange.error-thresholds
+    outputSchema: {type: object, required: [failingErrorRate, stopRunErrorRate, window], properties: {failingErrorRate: {type: number}, stopRunErrorRate: {type: number}, window: {type: string, pattern: "^PT"}}}
+    body: {language: static, source: &dxcThr {failingErrorRate: 0.05, stopRunErrorRate: 0.2, window: PT15M}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *dxcThr}]
+
+  - <<: *cfg
+    name: federation.share-approval
+    outputSchema: {$ref: approval-plan}
+    body: {language: static, source: &fedApproval {measure: classificationRank, tiers: [{upTo: 1, stages: [{approverRoles: [data-steward], quorum: 1}]}, {upTo: unbounded, stages: [{approverRoles: [data-steward], quorum: 1}, {approverRoles: [compliance-officer], quorum: 1}]}]}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *fedApproval}]
+
+  - <<: *cfg
+    name: interop.min-fidelity
+    outputSchema: {type: object, required: [minExactRatio], properties: {minExactRatio: {type: number, minimum: 0, maximum: 1}}}
+    body: {language: static, source: &iopFid {minExactRatio: 0.9}}
+    testVectors: [{name: default, input: {}, context: {}, expectedOutput: *iopFid}]

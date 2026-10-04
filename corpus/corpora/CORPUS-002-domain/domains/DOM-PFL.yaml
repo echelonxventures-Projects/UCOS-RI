@@ -1,0 +1,179 @@
+header:
+  id: DOM-PFL
+  title: Portfolios Domain Specification
+  version: 1.0.0
+  status: normative
+  authority: Chief Product Architect
+  corpus: CORPUS-002
+  dependencies: [CIC-007-001, CIC-015-001, CIC-002-001]
+  traces: [PRIN-007, PRIN-017, PRIN-011]
+  certification: [CR-PFL-01, CR-PFL-02, CR-PFL-03]
+  validation: [VR-PFL-01, VR-PFL-02]
+
+purpose: >
+  Manage commercial objects and offers as portfolios: product lines and families, ownership and
+  accountability, lifecycle roadmaps (launch, end-of-sale, end-of-life plans), portfolio health
+  (performance, overlap, cannibalization), and rationalization decisions — the planning layer above
+  individual objects and offers.
+
+scope:
+  includes:
+    - Portfolio aggregate (hierarchical portfolios via HIER relationships; members: objects, offers, bundles)
+    - Roadmap items (planned lifecycle transitions with dates and dependencies)
+    - Portfolio KPIs (revenue, margin, growth, attach rate) from DOM-PRF/DOM-ANL
+    - Rationalization proposals (retire, merge, reposition) as draft ChangeSets
+  excludes:
+    - Catalog presentation (DOM-CAT), object definitions (DOM-COB), offers (DOM-OFR)
+
+responsibilities:
+  - Every active commercial object belongs to at least one portfolio with an accountable owner.
+  - Roadmap transitions executed through owning domains' commands via governed ChangeSets.
+  - Portfolio health visible from source-of-truth metrics.
+
+principles: [PRIN-007, PRIN-011, PRIN-017]
+
+boundaries:
+  upstream: [DOM-COB, DOM-OFR, DOM-REL, DOM-PRF, DOM-ANL, DOM-KGR]
+  downstream: [DOM-GOV, DOM-COB, DOM-OFR, DOM-CAT]
+
+ownership:
+  boundedContext: catalog
+  owningRole: Chief Product Architect
+  service: portfolio-service
+  schema: ucos_catalog
+
+capabilities:
+  - {id: PFL-C1, name: Portfolios, description: "Define portfolios and membership; assign owners."}
+  - {id: PFL-C2, name: Roadmaps, description: "Plan lifecycle transitions with dependencies."}
+  - {id: PFL-C3, name: Health, description: "KPIs and overlap/cannibalization analysis."}
+  - {id: PFL-C4, name: Rationalize, description: "Propose retire/merge/reposition as draft ChangeSets."}
+
+services:
+  - {name: PortfolioCommandService, kind: application, operations: [CreatePortfolio, AddPortfolioMembers, RemovePortfolioMembers, AssignPortfolioOwner, PlanRoadmapItem, ReviseRoadmapItem, ExecuteRoadmapItem, ProposeRationalization]}
+  - {name: OverlapAnalyzer, kind: domain-service, contract: "analyze(portfolio) -> pairs with attribute similarity, shared customers, substitution edges (KG), price-band overlap; scores 0..1"}
+  - {name: PortfolioQueryService, kind: application, operations: [GetPortfolio, GetRoadmap, GetPortfolioHealth, FindOrphanObjects]}
+
+aggregates:
+  - name: Portfolio
+    identity: "urn:ucos:<tenant>:portfolio:<ulid>"
+    invariants: ["INV-PFL-1: portfolio hierarchy acyclic (PART_OF-like HIER reltype); owner assigned for active portfolios."]
+    fields:
+      - {name: code, type: string}
+      - {name: label, type: LocalizedText}
+      - {name: parent, type: "PortfolioUrn?"}
+      - {name: owner, type: PartyUrn}
+      - {name: members, type: "Urn[] (objects, offers)"}
+      - {name: strategy, type: "{positioning, targetSegments[], kpiTargets}"}
+      - {name: status, type: "active|archived"}
+  - name: RoadmapItem
+    identity: "urn:ucos:<tenant>:roadmap-item:<ulid>"
+    invariants: ["INV-PFL-2: planned transition exists in the subject's lifecycle model; dependencies acyclic."]
+    fields:
+      - {name: subject, type: Urn}
+      - {name: plannedTransition, type: "lifecycle transition code"}
+      - {name: plannedAt, type: Date}
+      - {name: dependsOn, type: "RoadmapItemUrn[]"}
+      - {name: changeSetRef, type: "InstanceUrn?"}
+      - {name: status, type: "planned|ready|executed|slipped|cancelled"}
+
+entities: []
+
+valueObjects:
+  - {name: PortfolioHealth, definition: "{revenue, margin, growth, attachRate, activeObjects, endOfSaleSoon, overlaps[]}"}
+
+commands:
+  - {name: CreatePortfolio, input: "{code, label, parent?, owner, strategy}", emits: [PortfolioCreated]}
+  - {name: AddPortfolioMembers, input: "{id, members[]}", emits: [PortfolioMembersAdded]}
+  - {name: RemovePortfolioMembers, input: "{id, members[]}", emits: [PortfolioMembersRemoved]}
+  - {name: AssignPortfolioOwner, input: "{id, owner}", emits: [PortfolioOwnerAssigned]}
+  - {name: PlanRoadmapItem, input: "RoadmapItem", emits: [RoadmapItemPlanned]}
+  - {name: ReviseRoadmapItem, input: "{id, plannedAt?, dependsOn?}", emits: [RoadmapItemRevised]}
+  - {name: ExecuteRoadmapItem, input: "{id}", emits: [RoadmapItemExecuted], note: "Creates ChangeSet invoking owning domain transition (e.g. COB TransitionLifecycle end-sale); executes on approval"}
+  - {name: ProposeRationalization, input: "{portfolioId, proposals[]}", emits: [RationalizationProposed], note: "Draft ChangeSet with impact analysis"}
+
+queries:
+  - {name: GetPortfolio, input: "{id}", output: Portfolio}
+  - {name: GetRoadmap, input: "{portfolioId, from, to}", output: "RoadmapItem[]"}
+  - {name: GetPortfolioHealth, input: "{id, period}", output: PortfolioHealth}
+  - {name: FindOrphanObjects, input: "{}", output: "active objects without portfolio membership"}
+
+apis:
+  - {style: REST, path: "/v1/portfolios", methods: {POST: CreatePortfolio}}
+  - {style: REST, path: "/v1/portfolios/{id}", methods: {GET: GetPortfolio}}
+  - {style: REST, path: "/v1/portfolios/{id}/members", methods: {POST: AddPortfolioMembers, DELETE: RemovePortfolioMembers}}
+  - {style: REST, path: "/v1/portfolios/{id}:assign-owner", methods: {POST: AssignPortfolioOwner}}
+  - {style: REST, path: "/v1/portfolios/{id}/health", methods: {GET: GetPortfolioHealth}}
+  - {style: REST, path: "/v1/portfolios/{id}/roadmap", methods: {GET: GetRoadmap}}
+  - {style: REST, path: "/v1/portfolios/{id}/rationalizations", methods: {POST: ProposeRationalization}}
+  - {style: REST, path: "/v1/portfolios/roadmap-items", methods: {POST: PlanRoadmapItem}}
+  - {style: REST, path: "/v1/portfolios/roadmap-items/{id}", methods: {PATCH: ReviseRoadmapItem}}
+  - {style: REST, path: "/v1/portfolios/roadmap-items/{id}:execute", methods: {POST: ExecuteRoadmapItem}}
+  - {style: REST, path: "/v1/portfolios:orphans", methods: {GET: FindOrphanObjects}}
+
+events:
+  - {type: ucos.catalog.portfolio.created.v1, payload: "{id, code, owner}"}
+  - {type: ucos.catalog.portfolio.members-added.v1, payload: "{id, members}"}
+  - {type: ucos.catalog.portfolio.members-removed.v1, payload: "{id, members}"}
+  - {type: ucos.catalog.portfolio.owner-assigned.v1, payload: "{id, owner}"}
+  - {type: ucos.catalog.roadmap-item.planned.v1, payload: "{id, subject, plannedTransition, plannedAt}"}
+  - {type: ucos.catalog.roadmap-item.revised.v1, payload: "{id}"}
+  - {type: ucos.catalog.roadmap-item.executed.v1, payload: "{id, changeSetRef}"}
+  - {type: ucos.catalog.portfolio.rationalization-proposed.v1, payload: "{portfolioId, changeSetRef}"}
+
+stateMachines:
+  - name: RoadmapItemLifecycle
+    initial: planned
+    states: [planned, ready, executed, slipped, cancelled]
+    terminal: [executed, cancelled]
+    transitions:
+      - {from: planned, to: ready, trigger: "dependencies executed"}
+      - {from: [planned, ready], to: slipped, trigger: "plannedAt passed without execution (timer)"}
+      - {from: slipped, to: planned, command: ReviseRoadmapItem}
+      - {from: ready, to: executed, command: ExecuteRoadmapItem}
+      - {from: [planned, ready, slipped], to: cancelled, command: cancel}
+
+rules:
+  - {id: RUL-PFL-1, statement: "End-of-sale roadmap items warn when active contracts/entitlements reference the subject; end-of-life requires migration offers (DOM-OFR transitions) or policy override."}
+  - {id: RUL-PFL-2, statement: "Orphan objects (active, no portfolio) are reported daily to catalog governance."}
+
+policies:
+  - {urn: "urn:ucos:ucos.std:policy:portfolio.end-of-life", purpose: "Conditions required before end-of-life execution"}
+
+decisions:
+  - {id: DEC-PFL-1, question: "Which products overlap or cannibalize?", algorithm: "OverlapAnalyzer"}
+
+security:
+  permissions: [portfolio.read, portfolio.manage, portfolio.roadmap.execute]
+  dataClassification: "Confidential (strategy, roadmaps)."
+  threats: ["Roadmap leakage -> internal audiences only"]
+
+governance:
+  changeControl: "Roadmap execution and rationalization only via ChangeSets in owning domains."
+  evidence: "Impact analyses attached."
+
+runtimeBehavior:
+  consistency: "Strong per portfolio; health metrics eventual (daily)."
+  slo: {GetPortfolioHealth_p95_s: 3, availability: "99.5%"}
+
+persistenceModel:
+  store: PostgreSQL schema ucos_catalog (separate tables)
+  tables:
+    - {name: portfolios, columns: "tenant_id, id, code, parent_id, owner, body jsonb, status", pk: "(tenant_id, id)"}
+    - {name: portfolio_members, columns: "tenant_id, portfolio_id, member_urn", pk: "(tenant_id, portfolio_id, member_urn)", indexes: ["(tenant_id, member_urn)"]}
+    - {name: roadmap_items, columns: "tenant_id, id, subject, planned_transition, planned_at, depends_on text[], status, change_set_ref", pk: "(tenant_id, id)"}
+    - {name: event_store, columns: "standard"}
+    - {name: outbox, columns: "standard"}
+  partitioning: "Hash(tenant_id) 16."
+  retention: "Indefinite (strategy history)."
+
+extensionModel:
+  extensionPoints: ["Portfolio KPI definitions", "Overlap analysis plugins"]
+  forbidden: ["Direct lifecycle mutation bypassing owning domains"]
+
+certificationCriteria:
+  - {id: CR-PFL-01, rule: "Roadmap execution produces ChangeSets that, when applied, perform exactly the planned transitions.", level: L1}
+  - {id: CR-PFL-02, rule: "Orphan detection matches recomputation.", level: L1}
+  - {id: CR-PFL-03, rule: "Dependency cycles in roadmap items rejected.", level: L1}
+validationRules:
+  - {id: VR-PFL-01, rule: "Every planned transition exists in the subject's lifecycle model."}
+  - {id: VR-PFL-02, rule: "Every active portfolio has an owner."}
