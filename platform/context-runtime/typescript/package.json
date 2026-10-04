@@ -1,0 +1,10 @@
+{
+  "name": "@ucos/context-runtime",
+  "version": "1.0.0",
+  "description": "TypeScript implementation of ucos-context-runtime (contracts/context-runtime/semantics.md). No dependencies; runs on Node 24 native type stripping.",
+  "type": "module",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": { "node": ">=24" },
+  "scripts": { "test": "node --test \"test/*.test.ts\"" }
+}

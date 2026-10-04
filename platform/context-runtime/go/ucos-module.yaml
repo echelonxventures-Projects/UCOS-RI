@@ -1,0 +1,13 @@
+# Platform library: ucos-context-runtime, Go implementation (CIC-001-001 §1.1 rule 4).
+module: ucos-context-runtime-go
+context: context
+slice: S1
+domains: [DOM-CTX]
+traces: [CIC-011-001, CIC-011-003, CR-011-001-01, CR-011-001-02, CR-011-001-03, CR-011-001-04, CR-CTX-01]
+ports: {consumes: [], provides: [ContextRuntime]}
+api: {semantics: contracts/context-runtime/semantics.md}
+runtime:
+  language: go
+  image: "golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"   # golang:1.25-alpine
+conformanceRunner: true
+certificationLevel: L1

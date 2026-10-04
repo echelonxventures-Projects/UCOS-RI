@@ -1,0 +1,16 @@
+# ucos-context-runtime (TypeScript) — Node 24 native type stripping, zero dependencies (CIC-001-001 §1.1).
+FROM node@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS build
+WORKDIR /app
+COPY package.json ./
+COPY src ./src
+COPY test ./test
+
+FROM build AS test
+RUN node --test "test/*.test.ts"
+
+FROM node@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS runtime
+WORKDIR /app
+COPY --from=build /app/package.json ./
+COPY --from=build /app/src ./src
+USER node
+ENTRYPOINT ["node", "src/runner.ts"]

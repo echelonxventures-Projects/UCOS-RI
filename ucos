@@ -6,8 +6,33 @@ cd "$(dirname "$0")"
 OCI="${UCOS_OCI:-docker}"
 UCOS_UID="$(id -u)"; UCOS_GID="$(id -g)"; export UCOS_UID UCOS_GID
 compose() { "$OCI" compose "$@"; }
-tools() { compose --profile tools run --rm --no-deps tools "$@"; }
-modules() { for m in domains/*/ucos-module.yaml; do dirname "$m"; done; }
+tools() { compose --profile tools run --rm --no-deps -T tools "$@"; }
+modules() { for m in domains/*/ucos-module.yaml platform/*/*/ucos-module.yaml; do [ -f "$m" ] && dirname "$m"; done; }
+runners() { for m in platform/*/*/ucos-module.yaml; do grep -q "^conformanceRunner: true" "$m" && dirname "$m"; done; }
+img() { echo "ucos-$(echo "$1" | cut -d/ -f2)-$(basename "$1"):local"; }
+
+ctx_conformance() {
+  n="${1:-20000}"; w=.work/ctxrt; mkdir -p "$w"
+  compose --profile tools build tools
+  for r in $(runners); do "$OCI" build -q --target runtime -t "$(img "$r")" -f "$r/Containerfile" "$r" >/dev/null; done
+  tools python tools/ctxrt_suite.py golden-input > "$w/golden.in"
+  tools python tools/ctxrt_suite.py bench-input > "$w/bench.in"
+  outs=""; benches=""; hashes=""
+  for r in $(runners); do
+    b="$(basename "$r")"
+    "$OCI" run --rm -i "$(img "$r")" < "$w/golden.in" > "$w/golden.$b.out"; outs="$outs $w/golden.$b.out"
+    "$OCI" run --rm -i "$(img "$r")" < "$w/bench.in" > "$w/bench.$b.out"; benches="$benches $w/bench.$b.out"
+    echo "== differential: $n generated cases through $b"
+    tools python tools/ctxrt_suite.py gen "$n" | "$OCI" run --rm -i "$(img "$r")" \
+      | tools python tools/ctxrt_suite.py digest > "$w/gen.$b.hashes"; hashes="$hashes $w/gen.$b.hashes"
+  done
+  # shellcheck disable=SC2086
+  tools python tools/ctxrt_suite.py golden-check $outs
+  # shellcheck disable=SC2086
+  tools python tools/ctxrt_suite.py compare "$n" $hashes
+  # shellcheck disable=SC2086
+  tools python tools/ctxrt_suite.py bench-check $benches
+}
 
 usage() {
   cat <<USAGE
@@ -18,6 +43,8 @@ usage: ./ucos <command>
   test          run every module's unit/architecture tests (Containerfile 'test' stage)
   up | down     start / stop and wipe the ucos-lite profile
   conformance   start ucos-lite and run the black-box conformance suites
+  ctx-conformance [N]   context-runtime suites: golden + fallback order, N-case differential across
+                        every runtime implementation (default 20000; certification: 1000000), benchmark
   ci            verify, test, conformance, down
   corpus-lock <tag> <commit>   rewrite corpus.lock after vendoring a new corpus release
 USAGE
@@ -41,9 +68,10 @@ case "$cmd" in
     compose up -d echo
     compose --profile test run --rm conformance ;;
   ci)
-    "$0" verify && "$0" test && status=0 && "$0" conformance || status=$?
+    "$0" verify && "$0" test && "$0" ctx-conformance && status=0 && "$0" conformance || status=$?
     [ "${status:-1}" -ne 0 ] && compose logs echo migrate 2>/dev/null | tail -100 || true
     "$0" down; exit "${status:-1}" ;;
+  ctx-conformance) ctx_conformance "$@" ;;
   corpus-lock) tools python tools/corpus_lock.py write "$@" ;;
   *) usage; [ -z "$cmd" ] || exit 2 ;;
 esac

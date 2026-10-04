@@ -14,6 +14,7 @@ The RI is **contract-first, polyglot, and container-only** (AMD-0001, CIC-001-00
 ./ucos verify        # corpus lock + corpus validation + contract drift + contract lint + module manifests
 ./ucos test          # every module's unit + architecture tests (in its build container)
 ./ucos conformance   # start ucos-lite and run the black-box conformance suites
+./ucos ctx-conformance [N]   # context-runtime suites across every runtime implementation (default N = 20000)
 ./ucos ci            # all of the above, then tear down
 ```
 
@@ -35,7 +36,10 @@ contracts/              language-neutral contracts
   <context>/DOM-*.yaml  OpenAPI 3.1 + AsyncAPI 3.0 generated from every specified DOM spec (do not edit)
   echo/                 hand-authored S0 echo contracts
   persistence/          standard tables + tenancy contract (CIC-003-001 §4–5)
+  context-runtime/      executable semantics of CIC-011-001 + runner protocol (semantics.md)
 conformance/            black-box suites (HTTP, CloudEvents, SQL only; never import implementation code)
+  context-resolution/   golden vectors + fixture hierarchies for the context runtime
+platform/context-runtime/{go,typescript}   two independent ucos-context-runtime implementations
 domains/echo/           S0 echo context (Go): api / domain / application / infrastructure / service / cmd
 deploy/lite/            ucos-lite database roles
 tools/                  containerized toolchain: contract generator + linter, migrator, corpus lock, manifest checks
@@ -56,5 +60,12 @@ S0 exit demonstration (CIC-030-001 §3): **echo context with event round-trip, p
 | Conformance | 13 black-box tests: round-trip, idempotency, redelivery, problems, API tenant hiding, RLS catalog/data/write/fail-closed/grants, standard tables |
 | Interim adapters | Dev-header security, HTTP bus, static tenant directory (ADR 0003). Each is replaced behind its port in a later slice |
 
-Next: slice S1 (metadata kernel: ONT, CTX, POL, LFC, EVT registry, EVD, GOV ChangeSets). Its exit criteria are
+## Status: slice S1 (metadata kernel), in progress
+
+| Batch | State |
+|-------|-------|
+| S1a context runtime | Done. CIC-011-001 is specified as executable semantics (AR-0002 lists the 13 clarifications). There are two implementations, Go and TypeScript. Results: 328/328 golden and fallback-order vectors, a byte-identical 10⁶-case differential, metamorphic twins, and p99 < 0.6 ms with 1,000 candidates (limit 2 ms). The suite catches injected bugs. |
+| S1b metadata service | Next: ONT + GOV ChangeSets installing `ucos.std`, the POL PDP (CEL), LFC, the EVT registry, and the EVD ledger |
+
+Remaining for S1 (metadata kernel: ONT, CTX, POL, LFC, EVT registry, EVD, GOV ChangeSets). Its exit criteria are
 that `ucos.std` installs via ChangeSet and the context-resolution conformance suite is green.

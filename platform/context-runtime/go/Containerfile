@@ -1,0 +1,15 @@
+# ucos-context-runtime (Go) — container-only build (CIC-001-001 §1.1).
+FROM golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS build
+WORKDIR /src
+ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly
+COPY go.mod ./
+COPY . .
+RUN go build -trimpath -ldflags="-s -w" -o /out/ctxrt-runner ./cmd/ctxrt-runner
+
+FROM build AS test
+RUN go vet ./... && go test -count=1 ./...
+
+FROM gcr.io/distroless/static-debian12@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS runtime
+COPY --from=build /out/ctxrt-runner /ctxrt-runner
+USER nonroot:nonroot
+ENTRYPOINT ["/ctxrt-runner"]

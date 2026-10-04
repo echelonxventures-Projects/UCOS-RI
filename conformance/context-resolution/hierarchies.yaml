@@ -1,0 +1,20 @@
+# Fixture hierarchies (child: parent) for every hierarchical ucos.std dimension, plus normalization and
+# allowed values used by the S1 context-resolution suites. The pack defines dimensions; term data lives in
+# taxonomies/registries, so the suite supplies representative trees here.
+jurisdiction: {US-CA-SF: US-CA, US-CA: US, US-NY: US, FR: EU, DE: EU, DE-BY: DE}
+organization: {org-sales-emea: org-sales, org-sales: org-acme, org-it: org-acme}
+party-segment: {gold: loyal, silver: loyal, loyal: all-customers, new: all-customers}
+market: {fr-retail: eu-market, de-retail: eu-market, eu-market: global, us-retail: na-market, na-market: global}
+territory: {FR: EU, DE: EU, EU: EMEA, US: NA, CA: NA, NA: AMER, EMEA: WORLD, AMER: WORLD}
+geo: {FR-75056: FR-IDF, FR-IDF: FR, FR: EU, DE-11000: DE-BE, DE-BE: DE, DE: EU}
+sales-org: {emea-north: emea, emea-south: emea, emea: global-sales, amer: global-sales}
+channel: {web-shop: digital, mobile-app: digital, digital: all, store: physical, physical: all, partner-api: b2b, b2b: all}
+touchpoint: {checkout: web, pdp: web, web: online, app-home: app, app: online}
+fulfillment-node: {dc-paris: region-fr, dc-lyon: region-fr, region-fr: network, dc-berlin: region-de, region-de: network}
+locale: {fr-CA: fr, fr-FR: fr, fr: und, en-GB: en, en-US: en, en: und, pt-BR: pt, pt: und, zh-Hant-TW: zh-Hant, zh-Hant: zh, zh: und}
+normalize: {locale: bcp47, territory: upper, geo: upper, jurisdiction: upper, currency: upper}
+values:
+  currency: [EUR, USD, GBP, CAD, JPY]
+  price-list-tier: [list, wholesale, partner]
+  role: [buyer, seller, admin, agent]
+  device: [desktop, mobile, tablet, kiosk]

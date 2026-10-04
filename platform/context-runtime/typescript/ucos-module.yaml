@@ -1,0 +1,14 @@
+# Platform library: ucos-context-runtime, TypeScript implementation — the second-language implementation
+# required by CR-030-001-05 (differentially tested against the Go implementation, CR-011-001-01).
+module: ucos-context-runtime-ts
+context: context
+slice: S1
+domains: [DOM-CTX]
+traces: [CIC-011-001, CIC-011-003, CR-011-001-01, CR-011-001-02, CR-011-001-03, CR-011-001-04, CR-CTX-01, CR-030-001-05]
+ports: {consumes: [], provides: [ContextRuntime]}
+api: {semantics: contracts/context-runtime/semantics.md}
+runtime:
+  language: typescript
+  image: "node@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1"   # node:24-alpine
+conformanceRunner: true
+certificationLevel: L1

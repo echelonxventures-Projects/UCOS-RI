@@ -19,3 +19,25 @@ to the corpus repository as an amendment.
 - Proposed amendment: in CIC-003-001 §5, state that the rule applies to tables holding tenant data. Name
   `outbox` and `processed_messages` as platform bookkeeping governed by role grants. Alternatively, add
   `tenant_id` to both tables.
+
+## AR-0002: Executable precision for context resolution (CIC-011-001 §1.2, §3, §6)
+
+- Raised: 2026-10-05, slice S1 (context runtime)
+- Problem: CR-011-001-01 requires byte-identical Resolutions across implementations in any language.
+  CIC-011-001 leaves several details open that change the bytes. `contracts/context-runtime/semantics.md`
+  pins each one, and every clarification below is labelled there:
+  - **C1–C3:** canonical JSON (JCS), integer-only numbers, and fixed-width instants compared as strings.
+  - **C4–C5:** hierarchy cycle handling and value normalization rules.
+  - **C6:** fallback relaxations are **not cumulative**. The corpus wording "yield ctx[d := a]" / "yield ctx \ {d}"
+    allows either reading.
+  - **C7:** the precedence order used for the reverse-precedence drop is `dimensionPrecedence`, followed by the other
+    dimensions by `defaultPrecedence` and then code.
+  - **C8:** specificity is computed with binary64 terms summed in scope order, truncated once, and no FMA.
+    (The corpus says "multiplying by 10⁶ and truncating" without fixing an evaluation order.)
+  - **C9:** for `descendant-of` with several matching values, the deepest match determines DepthFactor.
+  - **C10:** the tie-break is by ascending id (−Ordinal).
+  - **C11:** `policy:` strategies need the PDP and return `E-CTX-POLICY-DELEGATION-UNAVAILABLE` standalone.
+  - **C12:** contextDigest is formatted as `hex:bucket`, with 60 s default granularity.
+  - **C13:** table-driven derivations stand in until the rule engine lands.
+- Proposed amendment: adopt the semantics document as a normative annex of CIC-011-001 (version 1.2.0), and
+  publish the golden vectors (`conformance/context-resolution/`) as the CR-011-001-01 reference.

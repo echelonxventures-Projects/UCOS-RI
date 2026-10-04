@@ -32,7 +32,8 @@ def corpus_ids():
 def main():
     ids = corpus_ids()
     errors, count = [], 0
-    for mf in sorted(ROOT.glob("domains/*/ucos-module.yaml")) + sorted(ROOT.glob("kernel/*/ucos-module.yaml")):
+    for mf in (sorted(ROOT.glob("domains/*/ucos-module.yaml")) + sorted(ROOT.glob("kernel/*/ucos-module.yaml"))
+               + sorted(ROOT.glob("platform/*/*/ucos-module.yaml"))):
         count += 1
         rel = mf.relative_to(ROOT)
         m = yaml.safe_load(mf.read_text())

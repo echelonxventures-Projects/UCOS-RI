@@ -1,0 +1,176 @@
+# Golden vectors for ucos-context-runtime (CR-011-001-01, CR-CTX-01). Expectations are hand-derived from
+# CIC-011-001 + contracts/context-runtime/semantics.md; `world: std` = ucos.std dimensions + hierarchies.yaml.
+# Each case lists only the fields it asserts. Candidate ids are ULIDs (ascending = earlier ordinal).
+defaults:
+  asOf: "2026-06-15T12:00:00.000Z"
+  validFrom: "2026-01-01T00:00:00.000Z"
+  config: {conflictStrategy: error, cardinality: one, relaxationAllowed: false}
+cases:
+  - id: G01-universal-only
+    ctx: {channel: web-shop}
+    candidates: [{id: 01J00000000000000000000001, scope: []}]
+    expect: {status: one, selected: [01J00000000000000000000001], topSpecificity: 0}
+  - id: G02-eq-beats-universal
+    ctx: {channel: web-shop}
+    candidates:
+      - {id: 01J00000000000000000000001, scope: []}
+      - {id: 01J00000000000000000000002, scope: [{dimension: channel, op: eq, values: [web-shop]}]}
+    expect: {status: one, selected: [01J00000000000000000000002], topSpecificity: 180000000}
+  - id: G03-in-factor
+    ctx: {channel: web-shop}
+    candidates: [{id: 01J00000000000000000000001, scope: [{dimension: channel, op: in, values: [web-shop, store]}]}]
+    expect: {status: one, topSpecificity: 127279220}
+  - id: G04-descendant-depth-factor
+    ctx: {geo: FR-75056}
+    candidates:
+      - {id: 01J00000000000000000000001, scope: [{dimension: geo, op: descendant-of, values: [FR]}]}
+      - {id: 01J00000000000000000000002, scope: [{dimension: geo, op: descendant-of, values: [FR-IDF]}]}
+    expect: {status: one, selected: [01J00000000000000000000002], ranking: [[01J00000000000000000000002, 105000000], [01J00000000000000000000001, 70000000]]}
+  - id: G05-descendant-deepest-match
+    ctx: {geo: FR-75056}
+    candidates: [{id: 01J00000000000000000000001, scope: [{dimension: geo, op: descendant-of, values: [EU, FR-IDF]}]}]
+    expect: {status: one, topSpecificity: 105000000}
+  - id: G06a-weights-without-precedence
+    ctx: {contract: K1, party: P1, organization: org-acme, channel: web-shop}
+    candidates:
+      - {id: 01J00000000000000000000001, scope: [{dimension: contract, op: eq, values: [K1]}]}
+      - {id: 01J00000000000000000000002, scope: [{dimension: party, op: eq, values: [P1]}, {dimension: organization, op: eq, values: [org-acme]}, {dimension: channel, op: eq, values: [web-shop]}]}
+    expect: {status: one, selected: [01J00000000000000000000002], topSpecificity: 1780000000}
+  - id: G06b-dimension-precedence-overrides-weights
+    ctx: {contract: K1, party: P1, organization: org-acme, channel: web-shop}
+    config: {dimensionPrecedence: [contract, party, organization]}
+    candidates:
+      - {id: 01J00000000000000000000001, scope: [{dimension: contract, op: eq, values: [K1]}]}
+      - {id: 01J00000000000000000000002, scope: [{dimension: party, op: eq, values: [P1]}, {dimension: organization, op: eq, values: [org-acme]}, {dimension: channel, op: eq, values: [web-shop]}]}
+    expect: {status: one, selected: [01J00000000000000000000001], topSpecificity: 850000000}
+  - id: G07-priority-breaks-specificity-tie
+    ctx: {channel: web-shop}
+    candidates:
+      - {id: 01J00000000000000000000001, scope: [{dimension: channel, op: eq, values: [web-shop]}]}
+      - {id: 01J00000000000000000000002, priority: 5, scope: [{dimension: channel, op: eq, values: [web-shop]}]}
+    expect: {status: one, selected: [01J00000000000000000000002]}
+  - id: G08-conflict-error
+    ctx: {channel: web-shop}
+    candidates: &tie
+      - {id: 01J00000000000000000000001, scope: [{dimension: channel, op: eq, values: [web-shop]}], value: 10}
+      - {id: 01J00000000000000000000002, validFrom: "2026-02-01T00:00:00.000Z", scope: [{dimension: channel, op: eq, values: [web-shop]}], value: 20}
+    expect: {status: error, code: E-CTX-AMBIGUOUS, selected: [], tied: [01J00000000000000000000002, 01J00000000000000000000001]}
+  - id: G09-most-recent-validfrom
+    ctx: {channel: web-shop}
+    config: {conflictStrategy: most-recent}
+    candidates: *tie
+    expect: {status: one, selected: [01J00000000000000000000002], value: 20}
+  - id: G10-most-recent-same-validfrom-greatest-id
+    ctx: {channel: web-shop}
+    config: {conflictStrategy: most-recent}
+    candidates:
+      - {id: 01J00000000000000000000003, scope: [{dimension: channel, op: eq, values: [web-shop]}]}
+      - {id: 01J00000000000000000000009, scope: [{dimension: channel, op: eq, values: [web-shop]}]}
+      - {id: 01J00000000000000000000005, scope: [{dimension: channel, op: eq, values: [web-shop]}]}
+    expect: {status: one, selected: [01J00000000000000000000009]}
+  - id: G11a-lowest-value-money
+    ctx: {channel: web-shop}
+    config: {conflictStrategy: lowest-value}
+    candidates: &money
+      - {id: 01J00000000000000000000001, scope: [{dimension: channel, op: eq, values: [web-shop]}], value: {amountMinor: "1999", currency: EUR, scale: 2}}
+      - {id: 01J00000000000000000000002, scope: [{dimension: channel, op: eq, values: [web-shop]}], value: {amountMinor: "20", currency: EUR, scale: 0}}
+    expect: {status: one, selected: [01J00000000000000000000001]}
+  - id: G11b-highest-value-money
+    ctx: {channel: web-shop}
+    config: {conflictStrategy: highest-value}
+    candidates: *money
+    expect: {status: one, selected: [01J00000000000000000000002]}
+  - id: G12-incomparable-currencies
+    ctx: {channel: web-shop}
+    config: {conflictStrategy: lowest-value}
+    candidates:
+      - {id: 01J00000000000000000000001, scope: [{dimension: channel, op: eq, values: [web-shop]}], value: {amountMinor: "100", currency: EUR, scale: 2}}
+      - {id: 01J00000000000000000000002, scope: [{dimension: channel, op: eq, values: [web-shop]}], value: {amountMinor: "100", currency: USD, scale: 2}}
+    expect: {status: error, code: E-CTX-INCOMPARABLE}
+  - id: G13-merge-first-wins
+    ctx: {channel: web-shop}
+    config: {conflictStrategy: merge}
+    candidates:
+      - {id: 01J00000000000000000000001, scope: [{dimension: channel, op: eq, values: [web-shop]}], value: {a: 1, n: {x: 1}, l: [1]}}
+      - {id: 01J00000000000000000000002, scope: [{dimension: channel, op: eq, values: [web-shop]}], value: {a: 2, b: 3, n: {y: 2}, l: [2, 3]}}
+    expect: {status: one, selected: [01J00000000000000000000001, 01J00000000000000000000002], value: {a: 1, b: 3, n: {x: 1, y: 2}, l: [1]}}
+  - id: G14-all-returns-tied
+    ctx: {channel: web-shop}
+    config: {conflictStrategy: all}
+    candidates: *tie
+    expect: {status: many, selected: [01J00000000000000000000002, 01J00000000000000000000001]}
+  - id: G15-cardinality-many-rank-order
+    ctx: {channel: web-shop}
+    config: {cardinality: many}
+    candidates:
+      - {id: 01J00000000000000000000001, scope: []}
+      - {id: 01J00000000000000000000002, scope: [{dimension: channel, op: eq, values: [web-shop]}]}
+      - {id: 01J00000000000000000000003, scope: [{dimension: channel, op: descendant-of, values: [digital]}]}
+    expect: {status: many, selected: [01J00000000000000000000002, 01J00000000000000000000003, 01J00000000000000000000001]}
+  - id: G16-temporal-half-open
+    ctx: {channel: web-shop}
+    candidates:
+      - {id: 01J00000000000000000000001, validTo: "2026-06-15T12:00:00.000Z", scope: [{dimension: channel, op: eq, values: [web-shop]}]}
+      - {id: 01J00000000000000000000002, validFrom: "2026-06-15T12:00:00.000Z", scope: []}
+    expect: {status: one, selected: [01J00000000000000000000002], afterTemporal: 1}
+  - id: G17-fallback-locale-chain
+    ctx: {locale: fr-CA}
+    config: {relaxationAllowed: true, fallbackChains: [locale]}
+    candidates: [{id: 01J00000000000000000000001, scope: [{dimension: locale, op: eq, values: [fr]}]}]
+    expect: {status: one, fallbackPath: ["locale:fr-CA→fr"], topSpecificity: 100000000}
+  - id: G18-fallback-drop-reverse-precedence
+    ctx: {channel: web-shop, device: mobile}
+    config: {relaxationAllowed: true}
+    candidates: [{id: 01J00000000000000000000001, scope: [{dimension: device, op: eq, values: [mobile]}, {dimension: channel, op: not-in, values: [web-shop]}]}]
+    expect: {status: one, fallbackPath: ["channel:web-shop→*"]}
+  - id: G19-fallback-exhausted
+    ctx: {locale: fr-CA}
+    config: {relaxationAllowed: true, fallbackChains: [locale], maxFallbackSteps: 1}
+    candidates: [{id: 01J00000000000000000000001, scope: [{dimension: locale, op: eq, values: [und]}]}]
+    expect: {status: not-found, code: E-CTX-FALLBACK-EXHAUSTED}
+  - id: G20-no-relaxation-not-found
+    ctx: {locale: fr-CA}
+    candidates: [{id: 01J00000000000000000000001, scope: [{dimension: locale, op: eq, values: [fr]}]}]
+    expect: {status: not-found, code: E-CTX-NOT-FOUND, fallbackPath: []}
+  - id: G21-range-on-time
+    ctx: {time: "2026-06-15T12:00:00.000Z"}
+    candidates: [{id: 01J00000000000000000000001, scope: [{dimension: time, op: range, values: ["2026-01-01T00:00:00.000Z", "2027-01-01T00:00:00.000Z"]}]}]
+    expect: {status: one, topSpecificity: 37500000}
+  - id: G22-exists
+    ctx: {campaign: C1}
+    candidates: [{id: 01J00000000000000000000001, scope: [{dimension: campaign, op: exists, values: []}]}]
+    expect: {status: one, topSpecificity: 22500000}
+  - id: G23-not-in-absent-dimension-matches
+    ctx: {channel: web-shop}
+    candidates: [{id: 01J00000000000000000000001, scope: [{dimension: role, op: not-in, values: [admin]}]}]
+    expect: {status: one, topSpecificity: 9000000}
+  - id: G24-eq-is-type-strict
+    ctx: {campaign: "1"}
+    candidates: [{id: 01J00000000000000000000001, scope: [{dimension: campaign, op: eq, values: [1]}]}]
+    expect: {status: not-found, code: E-CTX-NOT-FOUND}
+  - id: G25-policy-delegation-unavailable
+    ctx: {channel: web-shop}
+    config: {conflictStrategy: "policy:urn:ucos:ucos.std:policy:example.tie-break"}
+    candidates: *tie
+    expect: {status: error, code: E-CTX-POLICY-DELEGATION-UNAVAILABLE}
+assemble:
+  - id: A01-explicit-derived-default-normalized
+    explicit: {locale: FR_ca, territory: fr, tenant: acme, jurisdiction: DE}
+    derivations:
+      - {id: derive-currency-from-territory, inputs: [territory], output: currency, authoritative: false, table: {FR: EUR}}
+      - {id: derive-jurisdiction-from-territory, inputs: [territory], output: jurisdiction, authoritative: true, table: {FR: FR}}
+    expect:
+      status: ok
+      exactVector: true
+      vector: {locale: [fr-CA, explicit], territory: [FR, explicit], tenant: [acme, explicit], currency: [EUR, derived],
+               jurisdiction: [FR, derived], market: [global, default], time: ["2026-06-15T12:00:00.000Z", derived]}
+  - id: A02-required-missing
+    explicit: {locale: fr}
+    expect: {status: error, code: E-CTX-REQUIRED-MISSING, dimension: tenant}
+  - id: A03-invalid-value
+    explicit: {tenant: acme, channel: fax, currency: xxx}
+    expect: {status: error, code: E-CTX-INVALID-VALUE, dimension: channel}
+  - id: A04-principal-does-not-override-explicit
+    explicit: {tenant: acme, role: buyer}
+    principal: {role: admin, party: P9}
+    expect: {status: ok, vector: {role: [buyer, explicit], party: [P9, explicit]}}
