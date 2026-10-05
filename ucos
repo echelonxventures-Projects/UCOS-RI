@@ -7,7 +7,7 @@ OCI="${UCOS_OCI:-docker}"
 UCOS_UID="$(id -u)"; UCOS_GID="$(id -g)"; export UCOS_UID UCOS_GID
 compose() { "$OCI" compose "$@"; }
 tools() { compose --profile tools run --rm --no-deps -T tools "$@"; }
-modules() { for m in domains/*/ucos-module.yaml platform/*/*/ucos-module.yaml kernel/ucos-module.yaml; do [ -f "$m" ] && dirname "$m"; done; }
+modules() { for m in domains/*/ucos-module.yaml platform/*/*/ucos-module.yaml kernel/ucos-module.yaml services/*/*/ucos-module.yaml; do [ -f "$m" ] && dirname "$m"; done; }
 runners() { for m in platform/*/*/ucos-module.yaml; do grep -q "^conformanceRunner: true" "$m" && dirname "$m"; done; }
 img() { echo "ucos-$(echo "$1" | cut -d/ -f2)-$(basename "$1"):local"; }
 
@@ -64,13 +64,20 @@ case "$cmd" in
       ctx="$m"; grep -q "^buildContext: \." "$m/ucos-module.yaml" && ctx=.
       echo "== test $m"; "$OCI" build --target test -f "$m/Containerfile" "$ctx"
     done ;;
-  up) compose --profile tools build && compose up -d echo metadata ;;
+  up) compose --profile tools build && compose up -d echo metadata eventing ;;
   down) compose --profile test down -v --remove-orphans ;;
   conformance)
+    # The full black-box suite runs once per event-platform-service implementation, each swapped into a fresh
+    # ucos-lite with no other change (CR-030-001-05).
     compose --profile tools build
     mkdir -p .work && tools python tools/pack_bundle.py corpus/packs/ucos.std > .work/ucos.std.publish.json
-    compose up -d echo metadata
-    compose --profile test run --rm conformance ;;
+    for impl in ${UCOS_EVENTING_IMPLS:-go typescript}; do
+      echo "== conformance with event-platform-service implementation: $impl"
+      compose --profile test down -v --remove-orphans >/dev/null 2>&1 || true
+      UCOS_EVENTING_IMPL=$impl compose build eventing
+      UCOS_EVENTING_IMPL=$impl compose up -d echo metadata eventing
+      UCOS_EVENTING_IMPL=$impl compose --profile test run --rm conformance || exit 1
+    done ;;
   ci)
     "$0" verify && "$0" test && "$0" ctx-conformance && status=0 && "$0" conformance || status=$?
     [ "${status:-1}" -ne 0 ] && compose logs echo migrate 2>/dev/null | tail -100 || true

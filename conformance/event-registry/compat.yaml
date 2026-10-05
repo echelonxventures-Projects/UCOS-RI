@@ -1,0 +1,63 @@
+# Golden compatibility vectors (contracts/eventing-registry/semantics.md §3–4). Each case registers `base` as
+# 1.0.0 then attempts `next` as 1.1.0; `expect` is the resulting status code + problem code (or "ok").
+cases:
+  - {id: C01-annotations-only, expect: ok,
+     base: {type: object, properties: {id: {type: string}}, required: [id], description: a},
+     next: {type: object, properties: {id: {type: string, description: changed, x-ucos-pii: false}}, required: [id], title: T}}
+  - {id: C02-reorder-required-and-enum, expect: ok,
+     base: {type: object, properties: {a: {enum: [x, y]}, b: {type: string}}, required: [a, b]},
+     next: {type: object, properties: {b: {type: string}, a: {enum: [y, x]}}, required: [b, a]}}
+  - {id: C03-add-untyped-property-open-model, expect: ok,
+     base: {type: object, properties: {id: {type: string}}},
+     next: {type: object, properties: {id: {type: string}, note: {description: free-form}}}}
+  - {id: C04-add-typed-optional-open-model, expect: E-EVT-INCOMPATIBLE,
+     base: {type: object, properties: {id: {type: string}}},
+     next: {type: object, properties: {id: {type: string}, count: {type: integer}}}}
+  - {id: C05-add-optional-closed-model, expect: E-EVT-INCOMPATIBLE,
+     base: {type: object, properties: {id: {type: string}}, additionalProperties: false},
+     next: {type: object, properties: {id: {type: string}, count: {type: integer}}, additionalProperties: false}}
+  - {id: C06-add-required, expect: E-EVT-INCOMPATIBLE,
+     base: {type: object, properties: {id: {type: string}}},
+     next: {type: object, properties: {id: {type: string}, rev: {}}, required: [rev]}}
+  - {id: C07-type-change, expect: E-EVT-INCOMPATIBLE,
+     base: {type: object, properties: {qty: {type: integer}}},
+     next: {type: object, properties: {qty: {type: string}}}}
+  - {id: C08-integer-to-number-widening, expect: E-EVT-INCOMPATIBLE,
+     base: {type: object, properties: {qty: {type: integer}}},
+     next: {type: object, properties: {qty: {type: number}}}}
+  - {id: C09-enum-widening, expect: E-EVT-INCOMPATIBLE,
+     base: {type: object, properties: {s: {enum: [a, b]}}},
+     next: {type: object, properties: {s: {enum: [a, b, c]}}}}
+  - {id: C10-close-open-model, expect: E-EVT-INCOMPATIBLE,
+     base: {type: object, properties: {id: {type: string}}},
+     next: {type: object, properties: {id: {type: string}}, additionalProperties: false}}
+  - {id: C11-nested-array-items-change, expect: E-EVT-INCOMPATIBLE,
+     base: {type: object, properties: {lines: {type: array, items: {type: object, properties: {n: {type: integer}}, required: [n]}}}},
+     next: {type: object, properties: {lines: {type: array, items: {type: object, properties: {n: {type: integer}}}}}}}
+  - {id: C12-string-bounds-tightened, expect: E-EVT-INCOMPATIBLE,
+     base: {type: object, properties: {code: {type: string, maxLength: 10}}},
+     next: {type: object, properties: {code: {type: string, maxLength: 5}}}}
+  - {id: C13-identical-bounds-and-pattern, expect: ok,
+     base: {type: object, properties: {code: {type: string, minLength: 1, maxLength: 10, pattern: "^[A-Z]+$"}, n: {type: integer, minimum: 0, maximum: 9}}},
+     next: {type: object, properties: {n: {type: integer, maximum: 9, minimum: 0}, code: {pattern: "^[A-Z]+$", type: string, maxLength: 10, minLength: 1}}}}
+  - {id: C14-profile-ref-rejected, expect: E-EVT-SCHEMA-PROFILE,
+     base: {type: object, properties: {id: {type: string}}},
+     next: {type: object, properties: {id: {$ref: "#/$defs/x"}}}}
+  - {id: C15-profile-oneof-rejected, expect: E-EVT-SCHEMA-PROFILE,
+     base: {type: object},
+     next: {oneOf: [{type: object}, {type: "null"}]}}
+  - {id: C16-pattern-changed, expect: E-EVT-INCOMPATIBLE,
+     base: {type: object, properties: {code: {type: string, pattern: "^[A-Z]+$"}}},
+     next: {type: object, properties: {code: {type: string, pattern: "^[A-Z0-9]+$"}}}}
+  - {id: C17-additional-properties-schema-equal, expect: ok,
+     base: {type: object, additionalProperties: {type: string}},
+     next: {type: object, additionalProperties: {type: string, description: values}}}
+  - {id: C18-const-to-enum-same-set, expect: ok,
+     base: {type: object, properties: {v: {const: 1}}},
+     next: {type: object, properties: {v: {enum: [1]}}}}
+transitive:
+  # FULL_TRANSITIVE: 1.2.0 must be FULL-compatible with both 1.0.0 and 1.1.0.
+  - {id: T01-transitive-chain-ok, expect: ok,
+     versions: [{type: object, properties: {id: {type: string}}},
+                {type: object, properties: {id: {type: string, description: v2}}},
+                {type: object, properties: {id: {type: string}, note: {}}}]}

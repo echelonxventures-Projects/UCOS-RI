@@ -41,3 +41,26 @@ to the corpus repository as an amendment.
   - **C13:** table-driven derivations stand in until the rule engine lands.
 - Proposed amendment: adopt the semantics document as a normative annex of CIC-011-001 (version 1.2.0), and
   publish the golden vectors (`conformance/context-resolution/`) as the CR-011-001-01 reference.
+
+## AR-0003: Decidable FULL_TRANSITIVE compatibility and event-registry scope (CIC-006-001 §3, DOM-EVT)
+
+- Raised: 2026-10-05, slice S1 (event registry)
+- Problem: CIC-006-001 requires FULL_TRANSITIVE schema compatibility within a MAJOR (INV-EVT-2) but does not define
+  it for JSON Schema. Full JSON Schema containment is undecidable in general, and implementations would disagree.
+- RI behaviour (`contracts/eventing-registry/semantics.md`):
+  - **E4:** a restricted event-schema profile. `$ref`, combinators and conditionals are refused.
+  - **E5:** a structural `accepts(reader, writer)` relation, made exact for the profile and identical in Go and
+    TypeScript (golden vectors in `conformance/event-registry/compat.yaml`).
+  - FULL is defined as accepting in both directions.
+  - **E6:** a fixed order of checks, so every implementation returns the same error.
+  - **E1:** event types are platform metadata, outside tenancy.
+  - **E2:** versions only increase.
+  - **E3:** digests are taken over the JCS text.
+- **Consequence the corpus should state.** Strict FULL means adding a typed field is a breaking change: in an open
+  model old writers may already have sent the name; in a closed model old readers reject it. RUL-EVT-1 (a new
+  `.vN+1` type) therefore applies more often than its wording suggests. Section §4.1 of the semantics lists what
+  stays compatible.
+- **Open point.** DOM specs do not give a classification per event (INV-EVT-4). The seed registers `internal`
+  until each event's classification is specified.
+- Proposed amendment: annex the semantics to CIC-006-001 (1.1.0). Add per-event `classification` to the DOM
+  `events` entries, so that VR-EVT-01 can check INV-EVT-4.

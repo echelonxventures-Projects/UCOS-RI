@@ -8,6 +8,8 @@ x-dev-secrets: &dev-secrets
   UCOS_ECHO_RELAY_PASSWORD: ${UCOS_ECHO_RELAY_PASSWORD:-echo-relay-dev}
   UCOS_KERNEL_APP_PASSWORD: ${UCOS_KERNEL_APP_PASSWORD:-kernel-app-dev}
   UCOS_KERNEL_RELAY_PASSWORD: ${UCOS_KERNEL_RELAY_PASSWORD:-kernel-relay-dev}
+  UCOS_EVENTING_APP_PASSWORD: ${UCOS_EVENTING_APP_PASSWORD:-eventing-app-dev}
+  UCOS_EVENTING_RELAY_PASSWORD: ${UCOS_EVENTING_RELAY_PASSWORD:-eventing-relay-dev}
 
 services:
   db:
@@ -41,7 +43,7 @@ services:
     environment:
       UCOS_MIGRATE_DB_URL: postgresql://ucos_owner:${UCOS_OWNER_PASSWORD:-owner-dev}@db:5432/ucos
     command: ["python", "tools/migrate.py", "domains/echo", "kernel/ontology", "kernel/lifecycle", "kernel/contextreg",
-              "kernel/policy", "kernel/governance", "kernel/evidence"]
+              "kernel/policy", "kernel/governance", "kernel/evidence", "services/eventing"]
 
   echo:
     build: {context: domains/echo, dockerfile: Containerfile, target: runtime}
@@ -68,16 +70,31 @@ services:
       UCOS_REGION: lite
     ports: ["127.0.0.1:${UCOS_METADATA_PORT:-18090}:8080"]
 
+  # DOM-EVT event registry. Two implementations of one contract and schema (CR-030-001-05); select with
+  # UCOS_EVENTING_IMPL=go|typescript — no other service changes.
+  eventing:
+    build: {context: ., dockerfile: "services/eventing/${UCOS_EVENTING_IMPL:-go}/Containerfile", target: runtime}
+    image: "ucos-eventing-${UCOS_EVENTING_IMPL:-go}:local"
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    environment:
+      UCOS_EVENTING_DB_URL: postgresql://ucos_eventing_app:${UCOS_EVENTING_APP_PASSWORD:-eventing-app-dev}@db:5432/ucos
+      UCOS_EVENTING_RELAY_DB_URL: postgresql://ucos_eventing_relay:${UCOS_EVENTING_RELAY_PASSWORD:-eventing-relay-dev}@db:5432/ucos
+      UCOS_SECURITY_MODE: dev-header
+    ports: ["127.0.0.1:${UCOS_EVENTING_PORT:-18100}:8080"]
+
   conformance:
     image: ucos-tools:local
     profiles: [test]
-    depends_on: {echo: {condition: service_started}, metadata: {condition: service_started}}
+    depends_on: {echo: {condition: service_started}, metadata: {condition: service_started}, eventing: {condition: service_started}}
     working_dir: /work
     volumes: [".:/work:ro"]
     environment:
       UCOS_BASE_URL: http://echo:8080
       UCOS_CONSUMER_URL: http://echo:8081/events
       UCOS_DB_URL: postgresql://ucos_echo_app:${UCOS_ECHO_APP_PASSWORD:-echo-app-dev}@db:5432/ucos
+      UCOS_EVENTING_URL: http://eventing:8080
+      UCOS_EVENTING_IMPL: ${UCOS_EVENTING_IMPL:-go}
+      UCOS_EVENTING_DB_URL: postgresql://ucos_eventing_app:${UCOS_EVENTING_APP_PASSWORD:-eventing-app-dev}@db:5432/ucos
       UCOS_METADATA_URL: http://metadata:8080
       UCOS_METADATA_ADMIN_URL: http://metadata:8081
       UCOS_KERNEL_DB_URL: postgresql://ucos_kernel_app:${UCOS_KERNEL_APP_PASSWORD:-kernel-app-dev}@db:5432/ucos

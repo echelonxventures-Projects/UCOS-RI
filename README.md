@@ -13,7 +13,7 @@ The RI is **contract-first, polyglot, and container-only** (AMD-0001, CIC-001-00
 ```sh
 ./ucos verify        # corpus lock + corpus validation + contract drift + contract lint + module manifests
 ./ucos test          # every module's unit + architecture tests (in its build container)
-./ucos conformance   # start ucos-lite and run the black-box conformance suites
+./ucos conformance   # ucos-lite + all black-box suites, once per event-platform-service implementation
 ./ucos ctx-conformance [N]   # context-runtime suites across every runtime implementation (default N = 20000)
 ./ucos ci            # all of the above, then tear down
 ```
@@ -40,6 +40,7 @@ contracts/              language-neutral contracts
 conformance/            black-box suites (HTTP, CloudEvents, SQL only; never import implementation code)
   context-resolution/   golden vectors + fixture hierarchies for the context runtime
 platform/context-runtime/{go,typescript}   two independent ucos-context-runtime implementations
+services/eventing/{go,typescript}   event-platform-service (DOM-EVT), two swappable implementations
 kernel/                 S1 metadata-service (Go): ontology, lifecycle, contextreg, policy, governance, evidence,
                         registry contexts + governed ports + platform; one schema per context
 domains/echo/           S0 echo context (Go): api / domain / application / infrastructure / service / cmd
@@ -68,7 +69,13 @@ S0 exit demonstration (CIC-030-001 §3): **echo context with event round-trip, p
 |-------|-------|
 | S1a context runtime | Done. CIC-011-001 is specified as executable semantics (AR-0002 lists the 13 clarifications). There are two implementations, Go and TypeScript. Results: 328/328 golden and fallback-order vectors, a byte-identical 10⁶-case differential, metamorphic twins, and p99 < 0.6 ms with 1,000 candidates (limit 2 ms). The suite catches injected bugs. |
 | S1b metadata service | Done. `kernel/` composes ONT, LFC, CTX, POL (PDP with cel-go), GOV, EVD and META (ADR 0005). **`ucos.std` installs through one governed ChangeSet:** 519 items, risk `critical`, a 2-stage plan from the pack's own policies, SoD and AAL2 approvals with evidence in an RFC 6962 ledger, 24 h cool-off, and a compensating apply saga. 16 black-box tests cover it, and effective schemas are checked against the corpus's own pack checker. |
-| S1c | Next: the EVT registry (event-type schemas, CR-006-001-04 compatibility), LFC instance runtime, and the second-language swap of an S1 module into `ucos-lite` (CR-030-001-05) |
+| S1c event registry | Done. DOM-EVT `event-platform-service` has **two implementations (Go and TypeScript) swapped in `ucos-lite`**: the full 54-test suite passes on each (CR-030-001-05, ADR 0006). FULL_TRANSITIVE compatibility is specified as decidable semantics with golden vectors (AR-0003). All 823 declared event types are seeded (VR-EVT-01/02). |
+
+**S1 is complete.** `ucos.std` installs via ChangeSet, the context-resolution conformance suite is green, and a
+second-language module swaps in with identical results. The lifecycle *instance* runtime arrives with the first
+lifecycle-bearing aggregates in S3. Next is **S2, identity and party**: IDN (OIDC federation, token service), PTY,
+and AUTH (roles and delegation) replacing the dev-header filter. Its exit criteria are login, party creation, a
+PDP-guarded API, and an agent token with an act chain.
 
 Remaining for S1 (metadata kernel: ONT, CTX, POL, LFC, EVT registry, EVD, GOV ChangeSets). Its exit criteria are
 that `ucos.std` installs via ChangeSet and the context-resolution conformance suite is green.

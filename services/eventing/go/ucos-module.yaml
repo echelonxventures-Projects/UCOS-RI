@@ -1,0 +1,15 @@
+# Build manifest (CIC-001-001 §6). One of two implementations of event-platform-service; both pass the identical
+# black-box suite and swap in ucos-lite via UCOS_EVENTING_IMPL (CR-030-001-05).
+module: event-platform-service-go
+context: eventing
+slice: S1
+domains: [DOM-EVT]
+traces: [CIC-006-001, INV-EVT-1, INV-EVT-2, INV-EVT-3, VR-EVT-01, VR-EVT-02, CR-006-001-04, CR-030-001-05, RUL-EVT-1]
+ports: {consumes: [], provides: [EventRegistryApi]}
+api: {openapi: contracts/eventing/DOM-EVT.openapi.yaml, asyncapi: contracts/eventing/DOM-EVT.asyncapi.yaml, semantics: contracts/eventing-registry/semantics.md}
+runtime:
+  language: go
+  image: "golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"   # golang:1.25-alpine
+migrations: [services/eventing/migrations]
+buildContext: .
+certificationLevel: L1

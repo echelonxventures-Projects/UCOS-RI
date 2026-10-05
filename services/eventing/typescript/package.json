@@ -1,0 +1,11 @@
+{
+  "name": "@ucos/event-platform-service",
+  "version": "1.0.0",
+  "description": "TypeScript implementation of the DOM-EVT event registry (contracts/eventing-registry/semantics.md).",
+  "type": "module",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": { "node": ">=24" },
+  "dependencies": { "pg": "8.13.1" },
+  "scripts": { "test": "node --test \"test/*.test.ts\"" }
+}
