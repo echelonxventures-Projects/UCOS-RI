@@ -102,7 +102,7 @@ taxonomies:
 # Role definitions (DOM-AUTH RoleDefinition seeds). Permissions must be declared by some domain
 # spec's security.permissions (VR-AUTH-02); every role tested in CEL policies must be here (VR-AUTH-01).
 roles:
-  - {code: tenant-admin,        sensitivity: privileged, permissions: [packs.install, packs.uninstall, organization.read, authority.role.assign]}
+  - {code: tenant-admin,        sensitivity: privileged, permissions: [packs.install, packs.uninstall, organization.read, authority.read, authority.role.assign, identity.read]}
   - {code: platform-admin,      sensitivity: privileged, permissions: [cob.create, cob.update, organization.tenant.manage]}
   - {code: platform-architect,  sensitivity: privileged, permissions: [ontology.type.author, ontology.type.publish, ontology.namespace.admin]}
   - {code: platform-governance, sensitivity: privileged, permissions: [policy.author.platform, policy.publish, packs.publish]}
@@ -136,6 +136,8 @@ roles:
   - {code: organization-admin,  sensitivity: privileged, permissions: [organization.legal-entity.manage, organization.namespace.manage, organization.operating-role.designate]}
   - {code: governance-viewer,   sensitivity: standard,   permissions: [kg.query, decision.read]}
   - {code: party-viewer,        sensitivity: standard,   permissions: [party.read, kg.query]}
+  - {code: party-steward,       sensitivity: standard,   permissions: [party.read, party.create, party.update, party.consent.record]}
+  - {code: agent-owner,         sensitivity: privileged, permissions: [identity.read, identity.agent.create, party.read]}
   - {code: agent-supervisor,    sensitivity: privileged, permissions: [config.kill-switch.activate, decision.read.trace, decision.override, identity.token.revoke]}
   - {code: gl-accountant,       sensitivity: privileged, permissions: [accounting.read, accounting.entry.manual, accounting.export]}
 

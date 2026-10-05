@@ -1,0 +1,15 @@
+# Build manifest (CIC-001-001 §6): DOM-IDN token service + DOM-PTY + DOM-AUTH (S2).
+module: identity-service
+context: identity
+slice: S2
+domains: [DOM-IDN, DOM-PTY, DOM-AUTH]
+traces: [CIC-014-001, CIC-009-001, CIC-017-001, RUL-IDN-1, RUL-IDN-2, RUL-IDN-3, INV-IDN-1, INV-IDN-3, INV-IDN-4,
+         CR-IDN-03, CR-IDN-05, INV-PTY-1, INV-PTY-5, RUL-AUTH-1, CR-009-001-02]
+ports: {consumes: [EventBusPort, ClockPort], provides: [TokenService, PartyApi, AuthorityApi]}
+api: {openapi: contracts/identity/DOM-IDN.openapi.yaml, asyncapi: contracts/identity/DOM-IDN.asyncapi.yaml}
+runtime:
+  language: go
+  image: "golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"   # golang:1.25-alpine
+migrations: [services/identity/migrations]
+buildContext: .
+certificationLevel: L1

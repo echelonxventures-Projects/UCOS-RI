@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "corpus/tools"))
 from pack_checks import PackChecker  # noqa: E402  — the corpus's own checker is the independent oracle
 
 PACK = ROOT / "corpus/packs/ucos.std"
+PACK_VERSION = yaml.safe_load((PACK / "pack.yaml").read_text())["version"]
 
 
 @pytest.fixture(scope="module")
@@ -123,7 +124,7 @@ def test_effective_schemas_match_corpus_oracle(installed):
     """SchemaCompiler output equals the corpus pack checker's C3 linearization and effective attribute sets."""
     t, pc = installed["tenant"], oracle()
     for name in pc.types:
-        es = ok(call("GET", f"/v1/ontology/types/urn:ucos:ucos.std:type:{name}@1.0.0/effective-schema", t))
+        es = ok(call("GET", f"/v1/ontology/types/urn:ucos:ucos.std:type:{name}@{PACK_VERSION}/effective-schema", t))
         assert es["linearization"] == pc.linear[name], name
         all_attrs, _ = pc.effective(name, pc.optional_facets(name))
         required, _ = pc.effective(name)
@@ -138,7 +139,7 @@ def test_schema_compilation_is_deterministic(installed, bundle):
     t2 = tenant("det")
     install(t2)
     for ty in bundle["types"]:
-        path = f"/v1/ontology/types/urn:ucos:ucos.std:type:{ty['name']}@1.0.0/effective-schema"
+        path = f"/v1/ontology/types/urn:ucos:ucos.std:type:{ty['name']}@{PACK_VERSION}/effective-schema"
         d1 = {ok(call("GET", path, t1))["digest"] for _ in range(3)}
         d2 = ok(call("GET", path, t2))["digest"]
         assert len(d1) == 1 and d1 == {d2}, ty["name"]

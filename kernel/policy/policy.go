@@ -10,22 +10,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	"math"
 	"net/http"
-	"reflect"
-	"sort"
-	"strings"
 	"sync"
 
-	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/common/types"
-	"github.com/google/cel-go/common/types/ref"
-	"github.com/google/cel-go/common/types/traits"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"ucos.dev/ri/kernel/governed"
 	"ucos.dev/ri/kernel/platform"
+	"ucos.dev/ri/pdp/pdp"
 )
 
 // Schema is the policy context's database schema.
@@ -41,7 +33,7 @@ type Policy struct {
 	Store *governed.Store
 	Gate  governed.Gate
 	mu    sync.Mutex
-	progs map[string]cel.Program
+	eng   *pdp.Engine
 }
 
 // Kinds lists the governed kinds owned here.
@@ -143,68 +135,30 @@ func mapOf(v any) map[string]any {
 	return m
 }
 
-// eval evaluates the policy body for input and ctx.
+// eval evaluates the policy body for input and ctx through the shared embeddable PDP engine.
 func (p *Policy) eval(d governed.Definition, input, ctxv map[string]any) (any, error) {
 	body, _ := d.Body["body"].(map[string]any)
-	switch governed.Str(body, "language") {
-	case "static":
-		return body["source"], nil
-	case "cel":
-		vars := map[string]any{}
-		for k, v := range input {
-			vars[k] = v
-		}
-		vars["ctx"] = ctxv
-		return p.EvalCEL(governed.Str(body, "source"), vars)
-	}
-	return nil, fmt.Errorf("unsupported body language %q", governed.Str(body, "language"))
+	return p.engine().Evaluate(body, input, ctxv)
 }
 
-// EvalCEL compiles (cached per expression and variable set) and evaluates expr over vars.
-func (p *Policy) EvalCEL(expr string, vars map[string]any) (any, error) {
-	names := make([]string, 0, len(vars))
-	for k := range vars {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	key := strings.Join(names, ",") + "\x00" + expr
+func (p *Policy) engine() *pdp.Engine {
 	p.mu.Lock()
-	if p.progs == nil {
-		p.progs = map[string]cel.Program{}
+	defer p.mu.Unlock()
+	if p.eng == nil {
+		p.eng = &pdp.Engine{}
 	}
-	prg, ok := p.progs[key]
-	p.mu.Unlock()
-	if !ok {
-		var opts []cel.EnvOption
-		for _, n := range names {
-			opts = append(opts, cel.Variable(n, cel.DynType))
-		}
-		env, err := cel.NewEnv(opts...)
-		if err != nil {
-			return nil, err
-		}
-		ast, iss := env.Compile(expr)
-		if iss != nil && iss.Err() != nil {
-			return nil, fmt.Errorf("CEL does not compile: %v", iss.Err())
-		}
-		prg, err = env.Program(ast, cel.CostLimit(100000))
-		if err != nil {
-			return nil, err
-		}
-		p.mu.Lock()
-		p.progs[key] = prg
-		p.mu.Unlock()
-	}
-	act := map[string]any{}
-	for k, v := range vars {
-		act[k] = toNative(v)
-	}
-	out, _, err := prg.Eval(act)
-	if err != nil {
-		return nil, err
-	}
-	return fromCEL(out), nil
+	return p.eng
 }
+
+// EvalCEL evaluates expr over vars (governed.Decider).
+func (p *Policy) EvalCEL(expr string, vars map[string]any) (any, error) {
+	return p.engine().EvalCEL(expr, vars)
+}
+
+// Equal compares JSON-like values numerically.
+func Equal(a, b any) bool { return pdp.Equal(a, b) }
+
+func toNative(v any) any { return pdp.ToNative(v) }
 
 // jsonDoc converts a value into the document model expected by the JSON Schema validator.
 func jsonDoc(v any) any {
@@ -214,117 +168,6 @@ func jsonDoc(v any) any {
 		return nil
 	}
 	return doc
-}
-
-// toNative converts json.Number trees to int64/float64 for CEL and JSON Schema.
-func toNative(v any) any {
-	switch x := v.(type) {
-	case json.Number:
-		if i, err := x.Int64(); err == nil {
-			return i
-		}
-		f, _ := x.Float64()
-		return f
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, e := range x {
-			out[k] = toNative(e)
-		}
-		return out
-	case []any:
-		out := make([]any, len(x))
-		for i, e := range x {
-			out[i] = toNative(e)
-		}
-		return out
-	}
-	return v
-}
-
-func fromCEL(v ref.Val) any {
-	switch x := v.(type) {
-	case types.Bool:
-		return bool(x)
-	case types.Int:
-		return int64(x)
-	case types.Uint:
-		return int64(x)
-	case types.Double:
-		return float64(x)
-	case types.String:
-		return string(x)
-	case types.Null:
-		return nil
-	}
-	if l, ok := v.(traits.Lister); ok {
-		var out []any
-		it := l.Iterator()
-		for it.HasNext() == types.True {
-			out = append(out, fromCEL(it.Next()))
-		}
-		if out == nil {
-			out = []any{}
-		}
-		return out
-	}
-	if m, ok := v.(traits.Mapper); ok {
-		out := map[string]any{}
-		it := m.Iterator()
-		for it.HasNext() == types.True {
-			k := it.Next()
-			out[fmt.Sprint(fromCEL(k))] = fromCEL(m.Get(k))
-		}
-		return out
-	}
-	nv, err := v.ConvertToNative(reflect.TypeOf((*any)(nil)).Elem())
-	if err != nil {
-		return v.Value()
-	}
-	return nv
-}
-
-// Equal compares JSON-like values numerically (1 == 1.0), as the corpus validator does.
-func Equal(a, b any) bool {
-	a, b = toNative(a), toNative(b)
-	switch x := a.(type) {
-	case int64, float64:
-		fa, ok1 := num(x)
-		fb, ok2 := num(b)
-		return ok1 && ok2 && fa == fb
-	case map[string]any:
-		y, ok := b.(map[string]any)
-		if !ok || len(x) != len(y) {
-			return false
-		}
-		for k, v := range x {
-			if w, ok := y[k]; !ok || !Equal(v, w) {
-				return false
-			}
-		}
-		return true
-	case []any:
-		y, ok := b.([]any)
-		if !ok || len(x) != len(y) {
-			return false
-		}
-		for i := range x {
-			if !Equal(x[i], y[i]) {
-				return false
-			}
-		}
-		return true
-	}
-	return reflect.DeepEqual(a, b)
-}
-
-func num(v any) (float64, bool) {
-	switch x := v.(type) {
-	case int64:
-		return float64(x), true
-	case float64:
-		return x, !math.IsNaN(x)
-	}
-	return 0, false
 }
 
 // Decide is the PDP: evaluate the tenant's published policy `name`, or a bootstrap draft (ADR 0005).
@@ -396,6 +239,24 @@ func (p *Policy) Routes(s *platform.Server) {
 			return err
 		}
 		return platform.JSON(w, 200, d)
+	})
+	// GetBundle (CIC-009-001 §5): the tenant's published policies for embedded PDPs in other services. Bundle
+	// signing (cosign) arrives with the platform signing key (S6); consumers verify the content digest.
+	s.Handle("GET /v1/policy/bundles/{tenant}", func(w http.ResponseWriter, r *http.Request, pr platform.Principal) error {
+		if r.PathValue("tenant") != pr.TenantSlug {
+			return platform.ErrNotFound
+		}
+		defs, err := p.Store.List(r.Context(), governed.TenantOf(r.Context(), pr), "published")
+		if err != nil {
+			return err
+		}
+		items := []map[string]any{}
+		for _, d := range defs {
+			items = append(items, map[string]any{"name": d.Name, "urn": d.URN, "kind": d.Body["kind"],
+				"layer": d.Body["layer"], "body": d.Body["body"], "digest": d.Digest})
+		}
+		return platform.JSON(w, 200, map[string]any{"tenant": pr.TenantSlug, "policies": items,
+			"digest": platform.Digest(items)})
 	})
 	s.Handle("POST /v1/policy:decide", func(w http.ResponseWriter, r *http.Request, pr platform.Principal) error {
 		var in struct {

@@ -41,6 +41,8 @@ conformance/            black-box suites (HTTP, CloudEvents, SQL only; never imp
   context-resolution/   golden vectors + fixture hierarchies for the context runtime
 platform/context-runtime/{go,typescript}   two independent ucos-context-runtime implementations
 services/eventing/{go,typescript}   event-platform-service (DOM-EVT), two swappable implementations
+services/identity/      identity-service (Go): token service, identities, agents, parties, role assignments
+platform/{authn,pdp}/go shared token validation (JWT/JWKS/DPoP) and the embeddable PDP
 kernel/                 S1 metadata-service (Go): ontology, lifecycle, contextreg, policy, governance, evidence,
                         registry contexts + governed ports + platform; one schema per context
 domains/echo/           S0 echo context (Go): api / domain / application / infrastructure / service / cmd
@@ -73,9 +75,14 @@ S0 exit demonstration (CIC-030-001 §3): **echo context with event round-trip, p
 
 **S1 is complete.** `ucos.std` installs via ChangeSet, the context-resolution conformance suite is green, and a
 second-language module swaps in with identical results. The lifecycle *instance* runtime arrives with the first
-lifecycle-bearing aggregates in S3. Next is **S2, identity and party**: IDN (OIDC federation, token service), PTY,
-and AUTH (roles and delegation) replacing the dev-header filter. Its exit criteria are login, party creation, a
-PDP-guarded API, and an agent token with an act chain.
+lifecycle-bearing aggregates in S3. Next is **S2, identity and party**.
+
+## Status: slice S2 (identity and party), in progress
+
+| Batch | State |
+|-------|-------|
+| S2a identity-service | Done (ADR 0007). Federated login through dex: authorization code with PKCE, plus id_token verification. ES256 `at+jwt` tokens are DPoP-bound, and bearer tokens cannot write. Agents get API access only through RFC 8693 exchange, which always carries the act chain and only ever narrows. Party creation is PDP-guarded and ontology-validated, with personal attributes encrypted under a per-party key. The embedded PDP evaluates the tenant policy bundle. **All four S2 exit criteria are demonstrated by 11 black-box tests.** |
+| S2b | Next: move echo, metadata and eventing (Go and TypeScript) from dev headers to token validation plus PEP, with service tokens between services; DOM-AUTH delegations and SoD |
 
 Remaining for S1 (metadata kernel: ONT, CTX, POL, LFC, EVT registry, EVD, GOV ChangeSets). Its exit criteria are
 that `ucos.std` installs via ChangeSet and the context-resolution conformance suite is green.

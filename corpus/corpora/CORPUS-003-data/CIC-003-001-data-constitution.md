@@ -1,7 +1,7 @@
 ---
 id: CIC-003-001
 title: Data Constitution — Models, Storage, Partitioning, Retention
-version: 1.0.0
+version: 1.1.0
 status: normative
 authority: Chief Data Architect
 corpus: CORPUS-003
@@ -109,9 +109,13 @@ Kernel aggregates (K-1) and all financial aggregates (BIL, REV, STL, ACC) MUST b
 
 ## 5. Tenancy and row security
 
-- Every table has `tenant_id` as the first PK column.
-- PostgreSQL RLS policy `tenant_id = current_setting('ucos.tenant_id')::uuid` on every table; service
-  roles do not have `BYPASSRLS`. Platform-wide jobs use a dedicated audited role.
+- Every table holding tenant data has `tenant_id` as the first PK column.
+- PostgreSQL RLS policy `tenant_id = current_setting('ucos.tenant_id')::uuid` on every table holding tenant
+  data; service roles do not have `BYPASSRLS`. Platform-wide jobs use a dedicated audited role.
+- Platform bookkeeping tables without tenant data (`outbox`, `processed_messages`, and platform-wide registries
+  such as published packs and event types) carry no `tenant_id`. They are governed by role grants instead: a
+  service role may only `INSERT` into its `outbox`, and only the dedicated relay role may read or update it
+  (AMD-0002, from RI AR-0001).
 - Very large tenants MAY be placed in a dedicated database (cell) — routing via the tenant directory (DOM-RTM).
 
 ## 6. Index strategy

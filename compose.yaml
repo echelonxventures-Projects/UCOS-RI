@@ -10,6 +10,8 @@ x-dev-secrets: &dev-secrets
   UCOS_KERNEL_RELAY_PASSWORD: ${UCOS_KERNEL_RELAY_PASSWORD:-kernel-relay-dev}
   UCOS_EVENTING_APP_PASSWORD: ${UCOS_EVENTING_APP_PASSWORD:-eventing-app-dev}
   UCOS_EVENTING_RELAY_PASSWORD: ${UCOS_EVENTING_RELAY_PASSWORD:-eventing-relay-dev}
+  UCOS_IDENTITY_APP_PASSWORD: ${UCOS_IDENTITY_APP_PASSWORD:-identity-app-dev}
+  UCOS_IDENTITY_RELAY_PASSWORD: ${UCOS_IDENTITY_RELAY_PASSWORD:-identity-relay-dev}
 
 services:
   db:
@@ -43,7 +45,7 @@ services:
     environment:
       UCOS_MIGRATE_DB_URL: postgresql://ucos_owner:${UCOS_OWNER_PASSWORD:-owner-dev}@db:5432/ucos
     command: ["python", "tools/migrate.py", "domains/echo", "kernel/ontology", "kernel/lifecycle", "kernel/contextreg",
-              "kernel/policy", "kernel/governance", "kernel/evidence", "services/eventing"]
+              "kernel/policy", "kernel/governance", "kernel/evidence", "services/eventing", "services/identity"]
 
   echo:
     build: {context: domains/echo, dockerfile: Containerfile, target: runtime}
@@ -82,10 +84,28 @@ services:
       UCOS_SECURITY_MODE: dev-header
     ports: ["127.0.0.1:${UCOS_EVENTING_PORT:-18100}:8080"]
 
+  dex:
+    image: ghcr.io/dexidp/dex@sha256:bc7cfce7c17f52864e2bb2a4dc1d2f86a41e3019f6d42e81d92a301fad0c8a1d  # v2.41.1
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes: ["./deploy/lite/dex/config.yaml:/etc/dex/config.yaml:ro"]
+
+  # DOM-IDN token service + DOM-PTY + DOM-AUTH (S2). Issuer = UCOS_PUBLIC_URL.
+  identity:
+    build: {context: ., dockerfile: services/identity/go/Containerfile, target: runtime}
+    image: ucos-identity-service:local
+    depends_on: {migrate: {condition: service_completed_successfully}, dex: {condition: service_started}}
+    environment:
+      UCOS_IDENTITY_DB_URL: postgresql://ucos_identity_app:${UCOS_IDENTITY_APP_PASSWORD:-identity-app-dev}@db:5432/ucos
+      UCOS_IDENTITY_RELAY_DB_URL: postgresql://ucos_identity_relay:${UCOS_IDENTITY_RELAY_PASSWORD:-identity-relay-dev}@db:5432/ucos
+      UCOS_IDENTITY_KEK: ${UCOS_IDENTITY_KEK:-6c6974652d6f6e6c792d6465762d6b656b2d6e6f742d666f722d70726f642121}  # lite only; KMS in production
+      UCOS_PUBLIC_URL: http://identity:8080
+      UCOS_METADATA_URL: http://metadata:8080
+    ports: ["127.0.0.1:${UCOS_IDENTITY_PORT:-18110}:8080"]
+
   conformance:
     image: ucos-tools:local
     profiles: [test]
-    depends_on: {echo: {condition: service_started}, metadata: {condition: service_started}, eventing: {condition: service_started}}
+    depends_on: {echo: {condition: service_started}, metadata: {condition: service_started}, eventing: {condition: service_started}, identity: {condition: service_started}}
     working_dir: /work
     volumes: [".:/work:ro"]
     environment:
@@ -95,6 +115,9 @@ services:
       UCOS_EVENTING_URL: http://eventing:8080
       UCOS_EVENTING_IMPL: ${UCOS_EVENTING_IMPL:-go}
       UCOS_EVENTING_DB_URL: postgresql://ucos_eventing_app:${UCOS_EVENTING_APP_PASSWORD:-eventing-app-dev}@db:5432/ucos
+      UCOS_IDENTITY_URL: http://identity:8080
+      UCOS_IDENTITY_ADMIN_URL: http://identity:8081
+      UCOS_IDENTITY_DB_URL: postgresql://ucos_identity_app:${UCOS_IDENTITY_APP_PASSWORD:-identity-app-dev}@db:5432/ucos
       UCOS_METADATA_URL: http://metadata:8080
       UCOS_METADATA_ADMIN_URL: http://metadata:8081
       UCOS_KERNEL_DB_URL: postgresql://ucos_kernel_app:${UCOS_KERNEL_APP_PASSWORD:-kernel-app-dev}@db:5432/ucos

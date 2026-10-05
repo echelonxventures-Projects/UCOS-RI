@@ -3,15 +3,16 @@ module ucos.dev/ri/kernel
 go 1.25
 
 require (
-	github.com/google/cel-go v0.22.1
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.1
 	ucos.dev/ri/contextruntime v0.0.0
+	ucos.dev/ri/pdp v0.0.0
 )
 
 require (
 	cel.dev/expr v0.18.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
+	github.com/google/cel-go v0.22.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
@@ -26,3 +27,5 @@ require (
 )
 
 replace ucos.dev/ri/contextruntime => ../platform/context-runtime/go
+
+replace ucos.dev/ri/pdp => ../platform/pdp/go

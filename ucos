@@ -54,7 +54,7 @@ cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   verify)
     compose --profile tools build tools
-    tools sh -c 'python tools/corpus_lock.py check &&
+    tools sh -c 'python tools/check_tree.py && python tools/corpus_lock.py check &&
       (cd corpus && python tools/validate.py) &&
       python tools/gen_contracts.py --check && python tools/lint_contracts.py && python tools/check_modules.py' ;;
   gen) compose --profile tools build tools && tools python tools/gen_contracts.py ;;
@@ -64,7 +64,7 @@ case "$cmd" in
       ctx="$m"; grep -q "^buildContext: \." "$m/ucos-module.yaml" && ctx=.
       echo "== test $m"; "$OCI" build --target test -f "$m/Containerfile" "$ctx"
     done ;;
-  up) compose --profile tools build && compose up -d echo metadata eventing ;;
+  up) compose --profile tools build && compose up -d echo metadata eventing identity ;;
   down) compose --profile test down -v --remove-orphans ;;
   conformance)
     # The full black-box suite runs once per event-platform-service implementation, each swapped into a fresh
@@ -75,7 +75,7 @@ case "$cmd" in
       echo "== conformance with event-platform-service implementation: $impl"
       compose --profile test down -v --remove-orphans >/dev/null 2>&1 || true
       UCOS_EVENTING_IMPL=$impl compose build eventing
-      UCOS_EVENTING_IMPL=$impl compose up -d echo metadata eventing
+      UCOS_EVENTING_IMPL=$impl compose up -d echo metadata eventing identity identity
       UCOS_EVENTING_IMPL=$impl compose --profile test run --rm conformance || exit 1
     done ;;
   ci)

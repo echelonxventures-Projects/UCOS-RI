@@ -5,6 +5,8 @@ to the corpus repository as an amendment.
 
 ## AR-0001 — Tenant column on platform bookkeeping tables (CIC-003-001 §4 vs §5)
 
+- **Status: adopted** in corpus 1.2.0 (AMD-0002, CIC-003-001 1.1.0 §5).
+
 - Raised: 2026-10-05, slice S0
 - Conflict:
   - CIC-003-001 §5 says "Every table has `tenant_id` as the first PK column", and CR-003-001-01 applies RLS

@@ -1,0 +1,29 @@
+# dex: the federated corporate OpenID Provider of the ucos-lite profile (S2). identity-service federates with it;
+# users log in with the local password connector. Development credentials only (passwords: <name>-dev-password).
+issuer: http://dex:5556/dex
+storage:
+  type: memory
+web:
+  http: 0.0.0.0:5556
+oauth2:
+  skipApprovalScreen: true
+  responseTypes: [code]
+staticClients:
+  - id: ucos-identity
+    name: UCOS identity-service
+    secret: ucos-identity-dev-secret
+    redirectURIs: ["http://identity:8080/oauth2/callback"]
+enablePasswordDB: true
+staticPasswords:
+  - email: "alice@acme.example"
+    hash: "$2a$10$O6HN7zuCxEA2KGV8p.v3r.XQc8V3PVf1MKITSP3VhKKOEJIHhnoCa"
+    username: "alice"
+    userID: "alice-0001"
+  - email: "bob@acme.example"
+    hash: "$2a$10$mmkF4j9HO/1g2pYPNe19tuIXyS414U21FyAQfHSCI/fR5YgX5.Nau"
+    username: "bob"
+    userID: "bob-0001"
+  - email: "carol@acme.example"
+    hash: "$2a$10$q2h/SzWqoZFcIWTkbCAyZ.UudJ3hcQMQe7diW47eZvASJh/YvJOAq"
+    username: "carol"
+    userID: "carol-0001"

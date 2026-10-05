@@ -244,7 +244,7 @@ func jsonSchema(es EffectiveSchema, v governed.View) map[string]any {
 		}
 	}
 	sort.Strings(required)
-	out := map[string]any{"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": es.URN + "#effective",
+	out := map[string]any{"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": es.URN + "/effective-schema",
 		"title": es.Type, "type": "object", "properties": props}
 	if len(required) > 0 {
 		out["required"] = required
@@ -290,6 +290,9 @@ func datatypeSchema(attr map[string]any) map[string]any {
 		s = map[string]any{}
 	default:
 		s = map[string]any{"x-ucos-datatype": governed.Str(attr, "datatype")}
+	}
+	if sens := governed.Str(attr, "sensitivity"); sens != "" {
+		s["x-ucos-sensitivity"] = sens // consumers encrypt personal values at rest (INV-PTY-5) and redact them in telemetry
 	}
 	for _, c := range governed.Maps(attr, "constraints") {
 		expr := governed.Str(c, "expression")
