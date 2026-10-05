@@ -40,6 +40,8 @@ contracts/              language-neutral contracts
 conformance/            black-box suites (HTTP, CloudEvents, SQL only; never import implementation code)
   context-resolution/   golden vectors + fixture hierarchies for the context runtime
 platform/context-runtime/{go,typescript}   two independent ucos-context-runtime implementations
+kernel/                 S1 metadata-service (Go): ontology, lifecycle, contextreg, policy, governance, evidence,
+                        registry contexts + governed ports + platform; one schema per context
 domains/echo/           S0 echo context (Go): api / domain / application / infrastructure / service / cmd
 deploy/lite/            ucos-lite database roles
 tools/                  containerized toolchain: contract generator + linter, migrator, corpus lock, manifest checks
@@ -65,7 +67,8 @@ S0 exit demonstration (CIC-030-001 §3): **echo context with event round-trip, p
 | Batch | State |
 |-------|-------|
 | S1a context runtime | Done. CIC-011-001 is specified as executable semantics (AR-0002 lists the 13 clarifications). There are two implementations, Go and TypeScript. Results: 328/328 golden and fallback-order vectors, a byte-identical 10⁶-case differential, metamorphic twins, and p99 < 0.6 ms with 1,000 candidates (limit 2 ms). The suite catches injected bugs. |
-| S1b metadata service | Next: ONT + GOV ChangeSets installing `ucos.std`, the POL PDP (CEL), LFC, the EVT registry, and the EVD ledger |
+| S1b metadata service | Done. `kernel/` composes ONT, LFC, CTX, POL (PDP with cel-go), GOV, EVD and META (ADR 0005). **`ucos.std` installs through one governed ChangeSet:** 519 items, risk `critical`, a 2-stage plan from the pack's own policies, SoD and AAL2 approvals with evidence in an RFC 6962 ledger, 24 h cool-off, and a compensating apply saga. 16 black-box tests cover it, and effective schemas are checked against the corpus's own pack checker. |
+| S1c | Next: the EVT registry (event-type schemas, CR-006-001-04 compatibility), LFC instance runtime, and the second-language swap of an S1 module into `ucos-lite` (CR-030-001-05) |
 
 Remaining for S1 (metadata kernel: ONT, CTX, POL, LFC, EVT registry, EVD, GOV ChangeSets). Its exit criteria are
 that `ucos.std` installs via ChangeSet and the context-resolution conformance suite is green.

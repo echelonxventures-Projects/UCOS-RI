@@ -16,6 +16,7 @@ DEF_PATTERNS = [
     re.compile(r"\*\*((?:CR|VR)-[A-Z0-9-]+)\*\*"),                     # markdown rule definitions
     re.compile(r"\{id:\s*((?:CR|VR|RUL|INV|DEC)-[A-Z0-9-]+)\s*,"),     # yaml rule definitions
     re.compile(r"^\|\s*(PRIN-\d{3})\s*\|", re.M),                      # principle table rows
+    re.compile(r"[\"'](INV-[A-Z]+-\d+):"),                              # invariants defined inline in DOM specs
 ]
 
 
@@ -33,7 +34,7 @@ def main():
     ids = corpus_ids()
     errors, count = [], 0
     for mf in (sorted(ROOT.glob("domains/*/ucos-module.yaml")) + sorted(ROOT.glob("kernel/*/ucos-module.yaml"))
-               + sorted(ROOT.glob("platform/*/*/ucos-module.yaml"))):
+               + sorted(ROOT.glob("platform/*/*/ucos-module.yaml")) + sorted(ROOT.glob("kernel/ucos-module.yaml"))):
         count += 1
         rel = mf.relative_to(ROOT)
         m = yaml.safe_load(mf.read_text())

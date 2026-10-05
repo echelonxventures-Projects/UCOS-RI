@@ -7,7 +7,7 @@ OCI="${UCOS_OCI:-docker}"
 UCOS_UID="$(id -u)"; UCOS_GID="$(id -g)"; export UCOS_UID UCOS_GID
 compose() { "$OCI" compose "$@"; }
 tools() { compose --profile tools run --rm --no-deps -T tools "$@"; }
-modules() { for m in domains/*/ucos-module.yaml platform/*/*/ucos-module.yaml; do [ -f "$m" ] && dirname "$m"; done; }
+modules() { for m in domains/*/ucos-module.yaml platform/*/*/ucos-module.yaml kernel/ucos-module.yaml; do [ -f "$m" ] && dirname "$m"; done; }
 runners() { for m in platform/*/*/ucos-module.yaml; do grep -q "^conformanceRunner: true" "$m" && dirname "$m"; done; }
 img() { echo "ucos-$(echo "$1" | cut -d/ -f2)-$(basename "$1"):local"; }
 
@@ -60,12 +60,16 @@ case "$cmd" in
   gen) compose --profile tools build tools && tools python tools/gen_contracts.py ;;
   build) compose --profile tools build ;;
   test)
-    for m in $(modules); do echo "== test $m"; "$OCI" build --target test -f "$m/Containerfile" "$m"; done ;;
-  up) compose --profile tools build && compose up -d echo ;;
+    for m in $(modules); do
+      ctx="$m"; grep -q "^buildContext: \." "$m/ucos-module.yaml" && ctx=.
+      echo "== test $m"; "$OCI" build --target test -f "$m/Containerfile" "$ctx"
+    done ;;
+  up) compose --profile tools build && compose up -d echo metadata ;;
   down) compose --profile test down -v --remove-orphans ;;
   conformance)
     compose --profile tools build
-    compose up -d echo
+    mkdir -p .work && tools python tools/pack_bundle.py corpus/packs/ucos.std > .work/ucos.std.publish.json
+    compose up -d echo metadata
     compose --profile test run --rm conformance ;;
   ci)
     "$0" verify && "$0" test && "$0" ctx-conformance && status=0 && "$0" conformance || status=$?

@@ -1,0 +1,19 @@
+# metadata-service (S1 kernel contexts) — container-only build; context = repository root (.dockerignore).
+FROM golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS build
+WORKDIR /src
+ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly
+COPY platform/context-runtime/go /src/platform/context-runtime/go
+COPY kernel/go.mod kernel/go.sum /src/kernel/
+WORKDIR /src/kernel
+RUN go mod download && go mod verify
+COPY kernel /src/kernel
+RUN go build -trimpath -ldflags="-s -w" -o /out/metadata-service ./cmd/metadata-service
+
+FROM build AS test
+RUN go vet ./... && go test -count=1 ./...
+
+FROM gcr.io/distroless/static-debian12@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS runtime
+COPY --from=build /out/metadata-service /metadata-service
+USER nonroot:nonroot
+EXPOSE 8080 8081
+ENTRYPOINT ["/metadata-service"]

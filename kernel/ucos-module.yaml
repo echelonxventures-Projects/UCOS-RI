@@ -1,0 +1,19 @@
+# Build manifest (CIC-001-001 §6): the S1 kernel contexts composed into one ucos-lite deployable.
+module: metadata-service
+context: kernel
+slice: S1
+domains: [DOM-ONT, DOM-LFC, DOM-CTX, DOM-POL, DOM-GOV, DOM-EVD, DOM-META]
+traces: [CIC-015-001, CIC-029-001, CIC-009-001, CIC-007-001, CIC-011-001, CIC-004-001,
+         CR-015-001-01, CR-015-001-02, CR-015-001-03, CR-015-001-04, CR-029-001-01, CR-029-001-03, CR-029-001-04,
+         CR-ONT-01, CR-ONT-03, CR-001-001-01, INV-POL-1, INV-GOV-1, INV-GOV-2, INV-EVD-1, INV-EVD-2]
+ports: {consumes: [EventBusPort, ClockPort], provides: [OntologyApi, GovernanceApi, PolicyDecisionApi, EvidenceApi, RegistryApi]}
+api:
+  openapi: contracts/ontology/DOM-ONT.openapi.yaml
+  asyncapi: contracts/ontology/DOM-ONT.asyncapi.yaml
+runtime:
+  language: go
+  image: "golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"   # golang:1.25-alpine
+migrations: [kernel/ontology/migrations, kernel/lifecycle/migrations, kernel/contextreg/migrations,
+             kernel/policy/migrations, kernel/governance/migrations, kernel/evidence/migrations]
+buildContext: .
+certificationLevel: L1

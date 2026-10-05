@@ -32,11 +32,12 @@ def set_tenant(conn, slug):
     conn.execute("SELECT set_config('ucos.tenant_id', %s, false)", (tenant_id(slug),))
 
 
-def test_service_roles_cannot_bypass_rls(app_db, relay_db):
-    for conn in (app_db, relay_db):
-        su, bypass = conn.execute(
-            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user").fetchone()
-        assert not su and not bypass
+def test_service_roles_cannot_bypass_rls(app_db):
+    roles = app_db.execute("""SELECT rolname, rolsuper, rolbypassrls FROM pg_roles
+                               WHERE rolname LIKE 'ucos\\_%\\_app' OR rolname LIKE 'ucos\\_%\\_relay'""").fetchall()
+    assert len(roles) >= 2
+    for name, su, bypass in roles:
+        assert not su and not bypass, name
 
 
 def test_every_tenant_table_has_forced_rls(app_db):
@@ -96,16 +97,26 @@ def test_no_tenant_setting_fails_closed(app_db):
         pass  # unset or empty ucos.tenant_id raises: fails closed
 
 
-def test_bookkeeping_tables_not_readable_by_service_role(app_db, relay_db):
-    # Checked on grants, not by querying: the planner pre-evaluates the RLS setting before privileges.
-    def can(conn, table, priv):
-        return conn.execute("SELECT has_table_privilege(current_user, %s, %s)", (table, priv)).fetchone()[0]
-
-    for schema in [r[0] for r in app_db.execute(
-            "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'ucos\\_%' AND nspname <> 'ucos_meta'")]:
-        outbox = f"{schema}.outbox"
-        assert not can(app_db, outbox, "SELECT") and can(app_db, outbox, "INSERT"), f"{outbox}: service role grants"
-        assert can(relay_db, outbox, "SELECT") and can(relay_db, outbox, "UPDATE"), f"{outbox}: relay role grants"
-    for (table, *_rest) in tenant_tables(app_db):
-        for priv in ("SELECT", "INSERT", "UPDATE", "DELETE"):
-            assert not can(relay_db, table, priv), f"relay role must not have {priv} on tenant table {table}"
+def test_bookkeeping_tables_not_readable_by_service_role(app_db):
+    """Per schema, every service role with USAGE may only INSERT into the outbox; every relay role may only read and
+    mark the outbox and has no privilege on tenant tables. Checked on grants by OID (no schema privileges needed)."""
+    q = lambda sql, *a: app_db.execute(sql, a or None).fetchall()  # noqa: E731
+    roles = [r[0] for r in q("SELECT rolname FROM pg_roles WHERE rolname LIKE 'ucos\\_%\\_app' OR rolname LIKE 'ucos\\_%\\_relay'")]
+    checked = 0
+    for nsp_oid, schema in q("SELECT oid, nspname FROM pg_namespace WHERE nspname LIKE 'ucos\\_%' AND nspname <> 'ucos_meta'"):
+        outbox = q("SELECT c.oid FROM pg_class c WHERE c.relnamespace = %s AND c.relname = 'outbox'", nsp_oid)[0][0]
+        tenant_oids = [r[0] for r in q("""SELECT c.oid FROM pg_class c WHERE c.relnamespace = %s AND c.relkind IN ('r','p')
+            AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'tenant_id')""", nsp_oid)]
+        for role in roles:
+            if not q("SELECT has_schema_privilege(%s, %s, 'USAGE')", role, nsp_oid)[0][0]:
+                continue
+            can = lambda oid, priv: q("SELECT has_table_privilege(%s, %s, %s)", role, oid, priv)[0][0]  # noqa: E731
+            if role.endswith("_app"):
+                assert not can(outbox, "SELECT") and can(outbox, "INSERT"), f"{schema}.outbox grants for {role}"
+            else:
+                assert can(outbox, "SELECT") and can(outbox, "UPDATE"), f"{schema}.outbox grants for {role}"
+                for oid in tenant_oids:
+                    for priv in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                        assert not can(oid, priv), f"relay role {role} has {priv} on a tenant table in {schema}"
+            checked += 1
+    assert checked >= 4

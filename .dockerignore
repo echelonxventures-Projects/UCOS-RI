@@ -1,0 +1,7 @@
+.git
+.work
+corpus
+contracts
+conformance
+docs
+**/__pycache__
