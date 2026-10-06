@@ -44,6 +44,8 @@ conformance/            black-box suites (HTTP, CloudEvents, SQL only; never imp
 platform/context-runtime/{go,typescript}   two independent ucos-context-runtime implementations
 services/eventing/{go,typescript}   event-platform-service (DOM-EVT), two swappable implementations
 services/identity/      identity-service (Go): token service, identities, agents, parties, role assignments
+services/commerce/      commerce-service (Go): commercial core (S3) — COB; REL, CAT, PRC, OFR to follow
+platform/svckit/go      shared service kit; platform/lifecycle/go  lifecycle-instance runtime
 platform/authn/{go,typescript}  token validation (JWT/JWKS/DPoP), Go and TypeScript
 platform/pdp/go         the embeddable PDP
 kernel/                 S1 metadata-service (Go): ontology, lifecycle, contextreg, policy, governance, evidence,
@@ -88,6 +90,13 @@ lifecycle-bearing aggregates in S3. Next is **S2, identity and party**.
 | S2b tokens everywhere | Done (ADR 0008). echo, metadata and eventing (Go and TypeScript) validate DPoP-bound tokens and enforce the PEP: scope, then permission from a route table that refuses to start with an uncovered route, checked against the role catalog. Service-to-service reads use platform service tokens. Corpus 1.3.0 (AMD-0003) grants every declared permission through some role. **70 conformance tests run on real tokens**, including the deny-all PEP coverage test. |
 | S2c authority | Done (ADR 0009, AR-0004). DOM-AUTH is specified as executable semantics. Role assignments carry scope and validity and are checked for SoD under a per-party lock: 25 concurrent conflicting pairs give exactly one winner each (CR-AUTH-01). Delegations only narrow, are re-validated at use, are depth- and cycle-bounded, and revoke in cascade; a property test runs random grant/revoke sequences (CR-AUTH-02). Revocation reaches every service within 10 s through per-party cut-offs in the revocation feed (CR-AUTH-03). SoD sets and authority limits change only through governed ChangeSets via a remote owner protocol. Mandates are backed by signed evidence (INV-AUTH-6). CheckSigningAuthority decides over limits, delegations and mandates. Agents act for non-owners only within a delegation. **14 black-box tests.** |
 | S2d lifecycle | Done (ADR 0010, corpus 1.4.0 / AMD-0004). Tenant role definitions are governed through ChangeSets, with includes flattened into every service's catalog. Roles that require approval go through an approval workflow with distinct AAL2 approvers, and SoD is re-checked at approval. Access reviews certify or revoke assignments; uncertified assignments are suspended per `authority.review-interval` (CR-AUTH-04). Mandate usage is idempotent, limited and exhausts the mandate under concurrency (CR-AUTH-05). Idempotency-Key replay covers identity-service commands, with sealed responses. Revocation cut-offs are exact to the millisecond: a token issued right after a change is never rejected, and agent actor tokens are unaffected. **7 more black-box tests (91 per eventing implementation).** |
+
+## Status: slice S3 (commercial core), in progress
+
+| Batch | State |
+|-------|-------|
+| S3a commercial objects | Done (ADR 0011, AR-0005). New shared modules: `platform/svckit/go` (route-table PEP, metadata client, relay, Idempotency-Key replay) and `platform/lifecycle/go` (lifecycle-instance runtime per CIC-007-001 §2.1). `commerce-service` composes the commercial core for ucos-lite, with DOM-COB first. Every concrete ucos.std commercial type instantiates from metadata alone, and the full lifecycle runs with SoD, approval evidence and policy (CR-COB-01). Resolution is checked against an independent oracle on 1,000 random contexts (CR-COB-02), and concurrent overlapping writes never overlap (mutation-checked). Composition, variants, find with CEL filter, and idempotent create are implemented. **13 black-box tests.** |
+| S3b | Next: DOM-REL relationships (VARIANT_OF, COMPOSED_OF, REQUIRES …) |
 
 Remaining for S1 (metadata kernel: ONT, CTX, POL, LFC, EVT registry, EVD, GOV ChangeSets). Its exit criteria are
 that `ucos.std` installs via ChangeSet and the context-resolution conformance suite is green.

@@ -1,0 +1,15 @@
+# Build manifest (CIC-001-001 §6): commercial core (S3), composed for ucos-lite. S3a: DOM-COB.
+module: commerce-service
+context: commercial-object
+slice: S3
+domains: [DOM-COB]
+traces: [DOM-COB, INV-COB-1, INV-COB-2, INV-COB-3, INV-COB-4, INV-COB-5, INV-COB-6, RUL-COB-1, RUL-COB-2, RUL-COB-3, RUL-COB-4,
+         DEC-COB-1, DEC-COB-2, CR-COB-01, CR-COB-02, CR-COB-04, CIC-011-001, CIC-007-001, CR-009-001-02]
+ports: {consumes: [EventBusPort, ClockPort, MetadataPort], provides: [CommercialObjectApi]}
+api: {openapi: contracts/commercial-object/DOM-COB.openapi.yaml, asyncapi: contracts/commercial-object/DOM-COB.asyncapi.yaml}
+runtime:
+  language: go
+  image: "golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"   # golang:1.25-alpine
+migrations: [services/commerce/commerce-service, services/commerce/cob]
+buildContext: .
+certificationLevel: L1

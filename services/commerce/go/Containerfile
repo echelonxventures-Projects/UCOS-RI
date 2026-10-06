@@ -1,0 +1,22 @@
+# commerce-service (Go) — context = repository root (.dockerignore).
+FROM golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS build
+ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly
+COPY platform/authn/go /src/platform/authn/go
+COPY platform/pdp/go /src/platform/pdp/go
+COPY platform/context-runtime/go /src/platform/context-runtime/go
+COPY platform/lifecycle/go /src/platform/lifecycle/go
+COPY platform/svckit/go /src/platform/svckit/go
+COPY services/commerce/go/go.mod services/commerce/go/go.sum /src/services/commerce/go/
+WORKDIR /src/services/commerce/go
+RUN go mod download && go mod verify
+COPY services/commerce/go /src/services/commerce/go
+RUN go build -trimpath -ldflags="-s -w" -o /out/commerce-service ./cmd/commerce-service
+
+FROM build AS test
+RUN go vet ./... && go test -count=1 ./... && cd /src/platform/lifecycle/go && go test -count=1 ./...
+
+FROM gcr.io/distroless/static-debian12@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS runtime
+COPY --from=build /out/commerce-service /commerce-service
+USER nonroot:nonroot
+EXPOSE 8080 8081
+ENTRYPOINT ["/commerce-service"]

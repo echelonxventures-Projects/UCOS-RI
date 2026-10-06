@@ -112,3 +112,20 @@ to the corpus repository as an amendment.
 - Proposed amendment: annex the semantics to DOM-AUTH (1.2.0). Add the action → permission mapping to the
   AuthorityLimit definition. State in CIC-015-001 §1 that governed definitions may be owned by any context through
   the remote owner protocol.
+
+## AR-0005: DOM-COB and ucos.std gaps found by S3a
+
+- Raised: 2026-10-06, slice S3a (ADR 0011)
+- **G1, `launchAt`.** The `commercial-object` lifecycle guard of `activate` is
+  `!has(aggregate.launchAt) || now >= aggregate.launchAt`, and DOM-COB's state machine names the same guard. No
+  ucos.std attribute `launchAt` exists, so the guard can never fail and scheduled launches cannot be expressed.
+  Proposal: add attribute `launchAt` (datetime, optional) to facet `Identifiable`, or to a `Launchable` facet.
+- **G2, `reject`.** Policy `cob.transition` lists no role for transition `reject`, so `in-review → draft` is denied
+  for every principal. Proposal: allow `reject` for `product-approver`, with the same author ≠ approver condition as
+  `approve`.
+- **G3, missing API paths.** GenerateVariants and RetypeCommercialObject are commands without `apis` entries. RI
+  behaviour: `POST /v1/commercial-objects/{id}:generate-variants` and `…:retype`. Proposal: add both paths to
+  DOM-COB `apis`.
+- **G4, transition permissions.** DOM-COB declares `cob.approve` but does not say which transitions need it. RI
+  behaviour: `approve` and `reject` need `cob.approve`; every other transition needs `cob.transition`. Proposal:
+  state it in DOM-COB `security`.

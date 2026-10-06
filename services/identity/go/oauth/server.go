@@ -1115,9 +1115,13 @@ func (s *Server) MintTest(in TestTokenRequest) (map[string]any, error) {
 	if in.Audience == "" {
 		in.Audience = APIAudience
 	}
+	var extra map[string]any
+	if in.Organization != "" {
+		extra = map[string]any{"ucos_org": in.Organization}
+	}
 	return s.issue(tokenSpec{tenant: in.Tenant, identity: in.Subject, party: in.Party, clientID: "lite-test-tokens",
 		acr: in.Acr, amr: []string{"test"}, roles: in.Roles, delegated: in.Delegated, limit: in.Limit, scope: in.Scopes,
-		aud: in.Audience, jkt: in.JKT, act: in.Act, lifetime: 10 * time.Minute})
+		aud: in.Audience, jkt: in.JKT, act: in.Act, extra: extra, lifetime: 10 * time.Minute})
 }
 
 // TestTokenRequest is the lite test-token input.
@@ -1134,6 +1138,8 @@ type TestTokenRequest struct {
 	Delegated []string       `json:"delegated"`
 	Limit     []string       `json:"limit"`
 	Act       map[string]any `json:"act"`
+	// Organization becomes the optional ucos_org claim (DOM-IDN AccessTokenClaims).
+	Organization string `json:"organization"`
 }
 
 // ServiceToken mints this service's own platform service token (no network hop: it is the issuer).

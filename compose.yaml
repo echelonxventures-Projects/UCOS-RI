@@ -12,6 +12,8 @@ x-dev-secrets: &dev-secrets
   UCOS_EVENTING_RELAY_PASSWORD: ${UCOS_EVENTING_RELAY_PASSWORD:-eventing-relay-dev}
   UCOS_IDENTITY_APP_PASSWORD: ${UCOS_IDENTITY_APP_PASSWORD:-identity-app-dev}
   UCOS_IDENTITY_RELAY_PASSWORD: ${UCOS_IDENTITY_RELAY_PASSWORD:-identity-relay-dev}
+  UCOS_COMMERCE_APP_PASSWORD: ${UCOS_COMMERCE_APP_PASSWORD:-commerce-app-dev}
+  UCOS_COMMERCE_RELAY_PASSWORD: ${UCOS_COMMERCE_RELAY_PASSWORD:-commerce-relay-dev}
 
 services:
   db:
@@ -45,7 +47,8 @@ services:
     environment:
       UCOS_MIGRATE_DB_URL: postgresql://ucos_owner:${UCOS_OWNER_PASSWORD:-owner-dev}@db:5432/ucos
     command: ["python", "tools/migrate.py", "domains/echo", "kernel/ontology", "kernel/lifecycle", "kernel/contextreg",
-              "kernel/policy", "kernel/governance", "kernel/evidence", "services/eventing", "services/identity"]
+              "kernel/policy", "kernel/governance", "kernel/evidence", "services/eventing", "services/identity",
+              "services/commerce/commerce-service", "services/commerce/cob"]
 
   echo:
     build: {context: ., dockerfile: domains/echo/Containerfile, target: runtime}
@@ -110,16 +113,33 @@ services:
       UCOS_IDENTITY_KEK: ${UCOS_IDENTITY_KEK:-6c6974652d6f6e6c792d6465762d6b656b2d6e6f742d666f722d70726f642121}  # lite only; KMS in production
       UCOS_PUBLIC_URL: http://identity:8080
       UCOS_METADATA_URL: http://metadata:8080
-      UCOS_SERVICE_CLIENTS: event-platform-service:${UCOS_EVENTING_CLIENT_SECRET:-eventing-client-dev-secret},metadata-service:${UCOS_METADATA_CLIENT_SECRET:-metadata-client-dev-secret}
+      UCOS_SERVICE_CLIENTS: event-platform-service:${UCOS_EVENTING_CLIENT_SECRET:-eventing-client-dev-secret},metadata-service:${UCOS_METADATA_CLIENT_SECRET:-metadata-client-dev-secret},commerce-service:${UCOS_COMMERCE_CLIENT_SECRET:-commerce-client-dev-secret}
       UCOS_GOVERNANCE_CLIENTS: metadata-service   # may obtain ucos:platform:admin (remote owner protocol, ADR 0009)
       UCOS_TEST_TOKENS: enabled   # ucos-lite only: conformance suites mint tokens for arbitrary principals (ADR 0008)
       UCOS_CLOCK: adjustable      # ucos-lite only: authority clock for review-interval suites (ADR 0010)
     ports: ["127.0.0.1:${UCOS_IDENTITY_PORT:-18110}:8080"]
 
+  # Commercial core (S3): DOM-COB (S3a), then REL, CAT, PRC, OFR — one deployable in ucos-lite, a schema per context.
+  commerce:
+    build: {context: ., dockerfile: services/commerce/go/Containerfile, target: runtime}
+    image: ucos-commerce-service:local
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    environment:
+      UCOS_COMMERCE_DB_URL: postgresql://ucos_commerce_app:${UCOS_COMMERCE_APP_PASSWORD:-commerce-app-dev}@db:5432/ucos
+      UCOS_COMMERCE_RELAY_DB_URL: postgresql://ucos_commerce_relay:${UCOS_COMMERCE_RELAY_PASSWORD:-commerce-relay-dev}@db:5432/ucos
+      UCOS_TOKEN_ISSUER: http://identity:8080
+      UCOS_PUBLIC_URL: http://commerce:8080
+      UCOS_METADATA_URL: http://metadata:8080
+      UCOS_SERVICE_CLIENT_ID: commerce-service
+      UCOS_SERVICE_CLIENT_SECRET: ${UCOS_COMMERCE_CLIENT_SECRET:-commerce-client-dev-secret}
+      UCOS_CLOCK: adjustable     # ucos-lite only
+      UCOS_REGION: lite
+    ports: ["127.0.0.1:${UCOS_COMMERCE_PORT:-18120}:8080"]
+
   conformance:
     image: ucos-tools:local
     profiles: [test]
-    depends_on: {echo: {condition: service_started}, metadata: {condition: service_started}, eventing: {condition: service_started}, identity: {condition: service_started}}
+    depends_on: {echo: {condition: service_started}, metadata: {condition: service_started}, eventing: {condition: service_started}, identity: {condition: service_started}, commerce: {condition: service_started}}
     working_dir: /work
     volumes: [".:/work:ro"]
     environment:
@@ -134,6 +154,9 @@ services:
       UCOS_IDENTITY_DB_URL: postgresql://ucos_identity_app:${UCOS_IDENTITY_APP_PASSWORD:-identity-app-dev}@db:5432/ucos
       UCOS_METADATA_URL: http://metadata:8080
       UCOS_METADATA_ADMIN_URL: http://metadata:8081
+      UCOS_COMMERCE_URL: http://commerce:8080
+      UCOS_COMMERCE_ADMIN_URL: http://commerce:8081
+      UCOS_COMMERCE_DB_URL: postgresql://ucos_commerce_app:${UCOS_COMMERCE_APP_PASSWORD:-commerce-app-dev}@db:5432/ucos
       UCOS_KERNEL_DB_URL: postgresql://ucos_kernel_app:${UCOS_KERNEL_APP_PASSWORD:-kernel-app-dev}@db:5432/ucos
       UCOS_RELAY_DB_URL: postgresql://ucos_echo_relay:${UCOS_ECHO_RELAY_PASSWORD:-echo-relay-dev}@db:5432/ucos
       PYTHONDONTWRITEBYTECODE: "1"
