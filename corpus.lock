@@ -1,8 +1,8 @@
 # Vendored corpus pin (CIC-030-001 §5). Regenerate only with: ./ucos corpus-lock <tag> <commit>
 source: https://github.com/echelonxventures-Projects/UCOS-COM
-tag: cic-1.2.0
-commit: 7fec69747ba0485552999d254775d4a66be5833a
-version: 1.2.0
+tag: cic-1.3.0
+commit: 27b218d56b7e655ba0cce00e67399d6d3583989f
+version: 1.3.0
 excluded:
 - .github
-contentHash: sha256:4711fa18362cb8804da2595295e2bf38da4f4dd1ad412eb589cd7c9324ea5e54
+contentHash: sha256:afaa5fa2a16be5408170ee3f2a45c22b21420b35d8c46591a1c171a6deda9ffa

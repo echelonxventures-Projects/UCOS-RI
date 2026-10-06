@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -96,6 +97,26 @@ func run(log *slog.Logger) error {
 	srv := &oauth.Server{DB: db, KEK: kek, Keys: keys, Issuer: issuer, Parties: partyAdapter{pty, meta}, Roles: auth,
 		Policies: meta, Self: self, SelfActor: selfActor, Log: log, Source: src}
 	srv.Init()
+	if err := srv.RegisterServiceClients(ctx, os.Getenv("UCOS_SERVICE_CLIENTS")); err != nil {
+		return err
+	}
+	var svcTok struct {
+		sync.Mutex
+		tok string
+		exp time.Time
+	}
+	meta.Token = func() (string, error) {
+		svcTok.Lock()
+		defer svcTok.Unlock()
+		if time.Until(svcTok.exp) < time.Minute {
+			t, err := srv.ServiceToken("identity-service")
+			if err != nil {
+				return "", err
+			}
+			svcTok.tok, svcTok.exp = t, time.Now().Add(9*time.Minute)
+		}
+		return svcTok.tok, nil
+	}
 	guard := &pep.Guard{V: self, PublicBase: issuer, Meta: meta}
 
 	mux := http.NewServeMux()
@@ -264,6 +285,21 @@ func run(log *slog.Logger) error {
 	})
 
 	admin := http.NewServeMux()
+	if env("UCOS_TEST_TOKENS", "") == "enabled" {
+		admin.HandleFunc("POST /internal/test-tokens", func(w http.ResponseWriter, r *http.Request) {
+			var in oauth.TestTokenRequest
+			if err := kit.ReadJSON(r, &in); err != nil {
+				kit.WriteProblem(w, r, kit.ULID(), err, log)
+				return
+			}
+			out, err := srv.MintTest(in)
+			if err != nil {
+				kit.WriteProblem(w, r, kit.ULID(), err, log)
+				return
+			}
+			_ = kit.JSON(w, 200, out)
+		})
+	}
 	admin.HandleFunc("POST /internal/tenants", func(w http.ResponseWriter, r *http.Request) {
 		var in oauth.BootstrapRequest
 		if err := kit.ReadJSON(r, &in); err != nil {

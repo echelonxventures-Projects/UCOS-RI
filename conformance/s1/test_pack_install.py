@@ -48,15 +48,19 @@ def installed(bundle):
 
 
 def test_publish_pack_is_content_addressed(bundle):
+    import tokens
+    from kernelclient import BASE
     body = (ROOT / ".work/ucos.std.publish.json").read_bytes()
     tampered = body.replace(b'"title":"UCOS Standard Commercial Pack"', b'"title":"Tampered"', 1)
     assert tampered != body
-    r = call("POST", "/v1/packs", None)  # no role
-    assert r.status_code in (400, 403)
-    import requests
-    from kernelclient import BASE
-    r = requests.post(f"{BASE}/v1/packs", data=tampered, headers={"UCOS-Roles": "pack-publisher"}, timeout=30)
+    problem(call("POST", "/v1/packs", None), 401, "E-IDN-AUTHENTICATION-REQUIRED")
+    publisher = tokens.token("platform", "urn:ucos:platform:party:pack-publisher", roles=("platform-governance",),
+                             scopes=("ucos:ontology:write",), acr="AAL2")
+    r = tokens.request("POST", f"{BASE}/v1/packs", publisher, data=tampered, headers={"Content-Type": "application/json"})
     problem(r, 422, "E-META-DIGEST-MISMATCH")
+    tenant_tok = tokens.token(tenant("x"), "urn:ucos:x:party:p", roles=("tenant-admin",), scopes=("ucos:ontology:write",))
+    r = tokens.request("POST", f"{BASE}/v1/packs", tenant_tok, data=body, headers={"Content-Type": "application/json"})
+    problem(r, 403, "E-API-FORBIDDEN")  # packs are platform metadata: tenant tokens cannot publish
 
 
 def test_installation_flow_and_governance_rules(bundle):
@@ -78,7 +82,8 @@ def test_installation_flow_and_governance_rules(bundle):
     # CR-015-001-02 separation of duties + assurance
     problem(approve(t, ulid, author, stage1), 403, "E-GOV-SOD-AUTHOR")
     problem(approve(t, ulid, f"urn:ucos:{t}:party:x", stage1, acr="AAL1"), 403, "E-GOV-ASSURANCE-TOO-LOW")
-    problem(approve(t, ulid, f"urn:ucos:{t}:party:x", ["product-manager"]), 403, "E-GOV-NOT-AN-APPROVER")
+    problem(approve(t, ulid, f"urn:ucos:{t}:party:x", ["product-manager"]), 403, "E-API-FORBIDDEN")  # PEP: no approve permission
+    problem(approve(t, ulid, f"urn:ucos:{t}:party:x", ["governance"]), 403, "E-GOV-NOT-AN-APPROVER")  # permitted, not this stage
     ok(approve(t, ulid, f"urn:ucos:{t}:party:p1", [stage1[0]], identity=f"urn:ucos:{t}:identity:p1-laptop"))
     # same person (party) through a second identity is counted once
     problem(approve(t, ulid, f"urn:ucos:{t}:party:p1", [stage1[1]], identity=f"urn:ucos:{t}:identity:p1-phone"),
@@ -305,7 +310,9 @@ def test_uninstall_leaves_no_residue(bundle):
     for path in ("/v1/ontology/types", "/v1/ontology/attributes", "/v1/ontology/facets", "/v1/ontology/relationship-types",
                  "/v1/lifecycle/models", "/v1/context/dimensions", "/v1/policy/policies"):
         assert ok(call("GET", path, t))["items"] == [], path
-    assert ok(call("GET", "/v1/registry/roles", t))["items"] == []
+    assert ok(call("GET", "/v1/registry/reasonCodes", t))["items"] == []
+    roles = ok(call("GET", "/v1/registry/roles", t))["items"]  # falls back to the platform catalog, never tenant residue
+    assert roles and all(e["contributedBy"] == "platform-catalog" for e in roles)
     problem(call("GET", "/v1/pack-installations/ucos.std", t), 404, "E-API-NOT-FOUND")
     install(t)  # reinstallable after uninstall
 

@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/jackc/pgx/v5 v5.7.2
+	ucos.dev/ri/authn v0.0.0
 	ucos.dev/ri/contextruntime v0.0.0
 )
 
@@ -16,4 +17,7 @@ require (
 	golang.org/x/text v0.21.0 // indirect
 )
 
-replace ucos.dev/ri/contextruntime => ../../../platform/context-runtime/go
+replace (
+	ucos.dev/ri/authn => ../../../platform/authn/go
+	ucos.dev/ri/contextruntime => ../../../platform/context-runtime/go
+)

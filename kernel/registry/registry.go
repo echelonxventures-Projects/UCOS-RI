@@ -453,9 +453,6 @@ func mustJSON(v any) []byte {
 // Routes registers the registry and pack API.
 func (g *Registry) Routes(s *platform.Server) {
 	s.HandlePlatform("POST /v1/packs", func(w http.ResponseWriter, r *http.Request, p platform.Principal) error {
-		if !p.HasRole("pack-publisher") {
-			return platform.Errf(403, "E-API-FORBIDDEN", "publishing packs requires the pack-publisher role")
-		}
 		var in struct {
 			Bundle json.RawMessage `json:"bundle"`
 			Digest string          `json:"digest"`
@@ -509,6 +506,85 @@ func (g *Registry) Routes(s *platform.Server) {
 					"urn": d.URN, "contributedBy": d.ChangeSetRef})
 			}
 		}
+		if r.PathValue("registry") == "roles" && len(items) == 0 {
+			// No pack installed yet (or the platform tenant): serve the catalog the PEP itself uses.
+			cat, err := g.RoleCatalog(r.Context(), p.TenantSlug)
+			if err != nil {
+				return err
+			}
+			keys := make([]string, 0, len(cat))
+			for k := range cat {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				items = append(items, map[string]any{"key": k, "definition": map[string]any{"code": k, "permissions": cat[k]},
+					"urn": nil, "contributedBy": "platform-catalog"})
+			}
+		}
 		return platform.JSON(w, 200, map[string]any{"items": items, "nextCursor": nil})
 	})
+}
+
+// SeedPlatformRoles is the kernel seed (CIC-029-001 §1) used only before any pack has been published: it lets the
+// platform publish the first pack. Every other permission comes from published role registries.
+var SeedPlatformRoles = map[string][]string{"platform-governance": {"packs.publish"}}
+
+// RoleCatalog returns role → permissions for a tenant: its installed role registry, or — for the platform tenant
+// and for tenants that have not installed a pack yet — the role catalog of the newest published ucos.std pack.
+func (g *Registry) RoleCatalog(ctx context.Context, tenantSlug string) (map[string][]string, error) {
+	out := map[string][]string{}
+	if tenantSlug != "platform" {
+		t := governed.Tenant{ID: tenantID(tenantSlug), Slug: tenantSlug}
+		defs, err := g.Store.List(ctx, t, "published")
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range defs {
+			if governed.Str(d.Body, "registry") == "roles" {
+				def, _ := d.Body["definition"].(map[string]any)
+				out[governed.Str(d.Body, "key")] = governed.Strs(def, "permissions")
+			}
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+	}
+	var raw []byte
+	ptid, _ := platform.TenantID("platform")
+	err := g.Store.DB.InTenantTx(ctx, ptid, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT bundle FROM `+Schema+`.packs WHERE id = 'ucos.std'
+			ORDER BY string_to_array(version, '.')::int[] DESC LIMIT 1`).Scan(&raw)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SeedPlatformRoles, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var b struct {
+		Registries struct {
+			Roles []struct {
+				Code        string   `json:"code"`
+				Permissions []string `json:"permissions"`
+			} `json:"roles"`
+		} `json:"registries"`
+	}
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return nil, err
+	}
+	for _, r := range b.Registries.Roles {
+		out[r.Code] = r.Permissions
+	}
+	for k, v := range SeedPlatformRoles {
+		if _, ok := out[k]; !ok {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
+func tenantID(slug string) string {
+	id, _ := platform.TenantID(slug)
+	return id
 }

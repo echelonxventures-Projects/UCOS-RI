@@ -11,4 +11,5 @@ runtime:
   language: go
   image: "golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"   # golang:1.25-alpine
 migrations: domains/echo/migrations
+buildContext: .
 certificationLevel: L1

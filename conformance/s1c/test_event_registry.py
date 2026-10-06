@@ -20,8 +20,20 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import evt_seed  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "conformance"))
+import tokens  # noqa: E402
+
 BASE = os.environ.get("UCOS_EVENTING_URL", "http://eventing:8080").rstrip("/")
-ADMIN = {"UCOS-Roles": "eventing-admin", "UCOS-Principal": "urn:ucos:platform:party:conformance"}
+OPERATOR = ("eventing-operator",)  # ucos.std 1.2.0: grants eventing.registry.write (AMD-0003)
+
+
+def tok(roles=OPERATOR, tenant="platform"):
+    return tokens.token(tenant, f"urn:ucos:{tenant}:party:conformance", roles=roles,
+                        scopes=("ucos:eventing:read", "ucos:eventing:write"), acr="AAL2")
+
+
+def get(path, **kw):
+    return tokens.request("GET", BASE + path, tok(), **kw)
 VECTORS = yaml.safe_load((ROOT / "conformance/event-registry/compat.yaml").read_text())
 
 
@@ -39,13 +51,13 @@ def ready():
         except requests.RequestException:
             pass
         time.sleep(0.5)
-    impl = requests.get(f"{BASE}/v1/eventing/event-types", timeout=10).headers.get("UCOS-Implementation")
+    impl = get("/v1/eventing/event-types").headers.get("UCOS-Implementation")
     assert impl == os.environ.get("UCOS_EVENTING_IMPL", impl), "deployed implementation differs from the selected one"
     print(f"\nevent-platform-service implementation under test: {impl}")
 
 
 def post(path, body, admin=True):
-    return requests.post(BASE + path, json=body, headers=ADMIN if admin else {}, timeout=30)
+    return tokens.request("POST", BASE + path, tok() if admin else tok(roles=("eventing-reader",)), json=body)
 
 
 def problem(r, status, code):
@@ -68,17 +80,17 @@ def register(typ, ctx="conformance"):
 def test_seed_registers_every_declared_event_type():
     """VR-EVT-01/02: every event type declared in the corpus (and the RI's own contracts) is registered with its
     owning context and at least one schema version; seeding is idempotent."""
-    stats = evt_seed.seed(BASE)
-    again = evt_seed.seed(BASE)
+    stats = evt_seed.seed(BASE, tok)
+    again = evt_seed.seed(BASE, tok)
     assert stats == again and stats["types"] >= 821
     declared = {t: ctx for t, ctx, _ in evt_seed.declared()}
-    items = requests.get(f"{BASE}/v1/eventing/event-types", timeout=60).json()["items"]
+    items = get("/v1/eventing/event-types").json()["items"]
     served = {e["type"]: e for e in items}
     for typ, ctx in declared.items():
         assert typ in served, typ
         assert served[typ]["owningContext"] == ctx and served[typ]["versions"], typ
     assert [e["type"] for e in items] == sorted(e["type"] for e in items)  # code-point order
-    one = requests.get(f"{BASE}/v1/eventing/event-types?owningContext=governance", timeout=30).json()["items"]
+    one = get("/v1/eventing/event-types?owningContext=governance").json()["items"]
     assert one and all(e["owningContext"] == "governance" for e in one)
 
 
@@ -92,10 +104,10 @@ def test_registered_schema_is_returned_canonically():
     text = jcs(schema)
     assert r.json() == {"type": typ, "semver": "1.0.0", "digest": "sha256:" + hashlib.sha256(text.encode()).hexdigest(),
                         "compatibility": "n/a"}
-    got = requests.get(f"{BASE}/v1/eventing/event-types/{typ}/schemas/1.0.0", timeout=10)
+    got = get(f"/v1/eventing/event-types/{typ}/schemas/1.0.0")
     assert got.status_code == 200 and got.content.decode() == text
     assert post(f"/v1/eventing/event-types/{typ}/schemas", {"semver": "1.0.0", "schema": schema}).status_code == 200
-    et = requests.get(f"{BASE}/v1/eventing/event-types/{typ}", timeout=10).json()
+    et = get(f"/v1/eventing/event-types/{typ}").json()
     assert et["versions"][0]["semver"] == "1.0.0" and et["state"] == "published"
     assert et["retention"] == {"logDays": 30, "compacted": False}
 
@@ -152,8 +164,12 @@ def test_registration_rules():
                                               "classification": "internal"}), 409, "E-EVT-OWNER-CONFLICT")
     problem(post("/v1/eventing/event-types", {"type": fresh_type(), "owningContext": "conformance", "category": "domain",
                                               "classification": "internal"}, admin=False), 403, "E-API-FORBIDDEN")
-    problem(requests.get(f"{BASE}/v1/eventing/event-types/ucos.conformance.missing.none.v1", timeout=10), 404, "E-EVT-TYPE-NOT-FOUND")
-    problem(requests.get(f"{BASE}/v1/eventing/event-types/{typ}/schemas/9.9.9", timeout=10), 404, "E-EVT-SCHEMA-NOT-FOUND")
+    tenant_operator = tokens.request("POST", BASE + "/v1/eventing/event-types", tok(tenant="acme-x"), json={
+        "type": fresh_type(), "owningContext": "conformance", "category": "domain", "classification": "internal"})
+    problem(tenant_operator, 403, "E-API-FORBIDDEN")  # event types are platform metadata
+    problem(requests.get(f"{BASE}/v1/eventing/event-types", timeout=10), 401, "E-IDN-AUTHENTICATION-REQUIRED")
+    problem(get("/v1/eventing/event-types/ucos.conformance.missing.none.v1"), 404, "E-EVT-TYPE-NOT-FOUND")
+    problem(get(f"/v1/eventing/event-types/{typ}/schemas/9.9.9"), 404, "E-EVT-SCHEMA-NOT-FOUND")
 
 
 def test_version_rules():

@@ -2,7 +2,12 @@ module ucos.dev/ri/echo
 
 go 1.25
 
-require github.com/jackc/pgx/v5 v5.7.2
+require (
+	github.com/jackc/pgx/v5 v5.7.2
+	ucos.dev/ri/authn v0.0.0
+)
+
+replace ucos.dev/ri/authn => ../../platform/authn/go
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

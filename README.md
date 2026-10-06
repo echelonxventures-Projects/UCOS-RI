@@ -29,7 +29,7 @@ curl -s -X POST localhost:18080/v1/echo/messages -H 'UCOS-Tenant: acme' -H 'Idem
 
 ```
 ucos                    POSIX sh entry point (drives the OCI runtime only)
-corpus/  corpus.lock    vendored UCOS-COM corpus at cic-1.1.0 (content-hash verified)
+corpus/  corpus.lock    vendored UCOS-COM corpus at cic-1.3.0 (content-hash verified)
 contracts/              language-neutral contracts
   kernel/               shared JSON Schemas: Urn, Ulid, Money, Decimal, Quantity, Interval, LocalizedText,
                         ProblemDetails, CloudEvent envelope, CommandResult, Page; tenancy rules
@@ -42,7 +42,8 @@ conformance/            black-box suites (HTTP, CloudEvents, SQL only; never imp
 platform/context-runtime/{go,typescript}   two independent ucos-context-runtime implementations
 services/eventing/{go,typescript}   event-platform-service (DOM-EVT), two swappable implementations
 services/identity/      identity-service (Go): token service, identities, agents, parties, role assignments
-platform/{authn,pdp}/go shared token validation (JWT/JWKS/DPoP) and the embeddable PDP
+platform/authn/{go,typescript}  token validation (JWT/JWKS/DPoP), Go and TypeScript
+platform/pdp/go         the embeddable PDP
 kernel/                 S1 metadata-service (Go): ontology, lifecycle, contextreg, policy, governance, evidence,
                         registry contexts + governed ports + platform; one schema per context
 domains/echo/           S0 echo context (Go): api / domain / application / infrastructure / service / cmd
@@ -63,7 +64,7 @@ S0 exit demonstration (CIC-030-001 §3): **echo context with event round-trip, p
 | Persistence | Standard tables per context schema, forced RLS on every tenant table, least-privilege roles, checksum-verified migrator |
 | API | `UCOS-Tenant`, `Idempotency-Key` (24 h replay, mismatch → 422), ETag, `UCOS-Correlation-Id`, RFC 9457 problems |
 | Conformance | 13 black-box tests: round-trip, idempotency, redelivery, problems, API tenant hiding, RLS catalog/data/write/fail-closed/grants, standard tables |
-| Interim adapters | Dev-header security, HTTP bus, static tenant directory (ADR 0003). Each is replaced behind its port in a later slice |
+| Interim adapters | HTTP bus, static tenant directory (ADR 0003). Dev-header security was replaced by real tokens in S2 (ADR 0007/0008) |
 
 ## Status: slice S1 (metadata kernel), in progress
 
@@ -82,7 +83,8 @@ lifecycle-bearing aggregates in S3. Next is **S2, identity and party**.
 | Batch | State |
 |-------|-------|
 | S2a identity-service | Done (ADR 0007). Federated login through dex: authorization code with PKCE, plus id_token verification. ES256 `at+jwt` tokens are DPoP-bound, and bearer tokens cannot write. Agents get API access only through RFC 8693 exchange, which always carries the act chain and only ever narrows. Party creation is PDP-guarded and ontology-validated, with personal attributes encrypted under a per-party key. The embedded PDP evaluates the tenant policy bundle. **All four S2 exit criteria are demonstrated by 11 black-box tests.** |
-| S2b | Next: move echo, metadata and eventing (Go and TypeScript) from dev headers to token validation plus PEP, with service tokens between services; DOM-AUTH delegations and SoD |
+| S2b tokens everywhere | Done (ADR 0008). echo, metadata and eventing (Go and TypeScript) validate DPoP-bound tokens and enforce the PEP: scope, then permission from a route table that refuses to start with an uncovered route, checked against the role catalog. Service-to-service reads use platform service tokens. Corpus 1.3.0 (AMD-0003) grants every declared permission through some role. **70 conformance tests run on real tokens**, including the deny-all PEP coverage test. |
+| S2c | Next: DOM-AUTH delegations (INV-AUTH-4/5), SoD conflict sets (CR-AUTH-01), authority limits, mandates; agent delegation through AUTH |
 
 Remaining for S1 (metadata kernel: ONT, CTX, POL, LFC, EVT registry, EVD, GOV ChangeSets). Its exit criteria are
 that `ucos.std` installs via ChangeSet and the context-resolution conformance suite is green.

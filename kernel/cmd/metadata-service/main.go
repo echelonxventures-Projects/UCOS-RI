@@ -3,7 +3,7 @@
 // others only through the governed ports wired here (CIC-030-001 §2: same module boundaries in both profiles).
 //
 // Environment: UCOS_KERNEL_DB_URL, UCOS_KERNEL_RELAY_DB_URL, UCOS_EVENTBUS_HTTP_SINKS, UCOS_HTTP_ADDR (:8080),
-// UCOS_ADMIN_ADDR (:8081, never published), UCOS_SECURITY_MODE=dev-header, UCOS_CLOCK=adjustable (lite only),
+// UCOS_ADMIN_ADDR (:8081, never published), UCOS_TOKEN_ISSUER, UCOS_PUBLIC_URL, UCOS_CLOCK=adjustable (lite only),
 // UCOS_FAULTS=enabled (lite only), UCOS_REGION.
 package main
 
@@ -21,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"ucos.dev/ri/authn/authn"
 	"ucos.dev/ri/kernel/contextreg"
 	"ucos.dev/ri/kernel/evidence"
 	"ucos.dev/ri/kernel/governance"
@@ -31,6 +32,46 @@ import (
 	"ucos.dev/ri/kernel/policy"
 	"ucos.dev/ri/kernel/registry"
 )
+
+// routePermissions is the x-ucos-permission of every route (DOM security.permissions). An empty value means any
+// authenticated principal of the tenant. Registering a route without an entry panics (CR-009-001-02).
+var routePermissions = map[string]string{
+	"GET /v1/ontology/types":                        "ontology.type.read",
+	"GET /v1/ontology/types/{rest}":                 "ontology.type.read",
+	"GET /v1/ontology/types/{urn}/effective-schema": "ontology.type.read",
+	"GET /v1/ontology/attributes":                   "ontology.type.read",
+	"GET /v1/ontology/facets":                       "ontology.type.read",
+	"GET /v1/ontology/relationship-types":           "ontology.type.read",
+	"POST /v1/ontology/types":                       "ontology.type.author",
+	"PATCH /v1/ontology/types/{rest}":               "ontology.type.author",
+	"POST /v1/ontology/types/{rest}:publish":        "ontology.type.publish",
+	"GET /v1/lifecycle/models":                      "lifecycle.model.read",
+	"GET /v1/lifecycle/models/{urn}":                "lifecycle.model.read",
+	"GET /v1/context/dimensions":                    "context.dimension.read",
+	"GET /v1/context/dimensions/{urn}":              "context.dimension.read",
+	"POST /v1/context:assemble":                     "context.dimension.read",
+	"GET /v1/policy/policies":                       "policy.read",
+	"GET /v1/policy/policies/{urn}":                 "policy.read",
+	"GET /v1/policy/bundles/{tenant}":               "policy.read",
+	"POST /v1/policy:decide":                        "policy.read",
+	"GET /v1/evidence/items/{id}":                   "evidence.read",
+	"GET /v1/evidence/items/{id}/inclusion-proof":   "evidence.read",
+	"POST /v1/evidence/items/{rest}:verify":         "evidence.read",
+	"GET /v1/governance/changesets":                 "governance.read",
+	"GET /v1/governance/changesets/{id}":            "governance.read",
+	"GET /v1/governance/changesets/{id}/impact":     "governance.read",
+	"POST /v1/governance/changesets":                "governance.changeset.author",
+	"POST /v1/governance/changesets/{id}/items":     "governance.changeset.author",
+	"POST /v1/governance/changesets/{rest}:submit":  "governance.changeset.author",
+	"POST /v1/governance/changesets/{rest}:cancel":  "governance.changeset.author",
+	"POST /v1/governance/changesets/{rest}:apply":   "governance.changeset.apply",
+	"POST /v1/governance/changesets/{id}/approvals": "governance.changeset.approve",
+	"GET /v1/registry/{registry}":                   "", // role and key catalogs are readable by every tenant principal
+	"GET /v1/pack-installations/{packId}":           "registry.read",
+	"POST /v1/pack-installations":                   "packs.install",
+	"DELETE /v1/pack-installations/{packId}":        "packs.uninstall",
+	"POST /v1/packs":                                "packs.publish",
+}
 
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
@@ -85,9 +126,6 @@ func main() {
 }
 
 func run(log *slog.Logger) error {
-	if env("UCOS_SECURITY_MODE", "") != "dev-header" {
-		return errors.New("UCOS_SECURITY_MODE must be dev-header until S2 (OIDC) lands")
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	appPool, err := pgxpool.New(ctx, os.Getenv("UCOS_KERNEL_DB_URL"))
@@ -128,7 +166,12 @@ func run(log *slog.Logger) error {
 		reg.OnChangeSetFinished(ctx, t, cs.ID, cs.State)
 	})
 
-	srv := platform.NewServer(log)
+	issuer := strings.TrimSuffix(env("UCOS_TOKEN_ISSUER", "http://identity:8080"), "/")
+	validator := &authn.Validator{Issuer: issuer, JWKSURL: issuer + "/.well-known/jwks.json", Audience: "ucos"}
+	go validator.PollRevocations(ctx, issuer+"/oauth2/revocations", 5*time.Second)
+	sec := &platform.Security{Validator: validator, PublicBase: strings.TrimSuffix(env("UCOS_PUBLIC_URL", "http://metadata:8080"), "/"),
+		Permissions: routePermissions, Roles: reg.RoleCatalog}
+	srv := platform.NewServer(log, sec)
 	ont.Routes(srv, gov.View)
 	lfc.Routes(srv)
 	ctxr.Routes(srv)

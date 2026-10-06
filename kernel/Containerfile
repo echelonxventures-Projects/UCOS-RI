@@ -4,6 +4,7 @@ WORKDIR /src
 ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly
 COPY platform/context-runtime/go /src/platform/context-runtime/go
 COPY platform/pdp/go /src/platform/pdp/go
+COPY platform/authn/go /src/platform/authn/go
 COPY kernel/go.mod kernel/go.sum /src/kernel/
 WORKDIR /src/kernel
 RUN go mod download && go mod verify

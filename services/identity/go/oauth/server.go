@@ -632,6 +632,9 @@ func (s *Server) grantClientCredentials(r *http.Request) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
+	if c.Tenant == "platform" && ident.Kind == "service" {
+		roles = []string{"platform-service"} // cross-tenant read principal of platform services (ADR 0008)
+	}
 	return s.issue(tokenSpec{tenant: c.Tenant, identity: ident.ID, party: ident.PartyRef, clientID: c.ID, acr: "AAL2",
 		amr: []string{"client-secret"}, roles: roles, scope: intersect(r.PostForm.Get("scope"), c.AllowedScopes),
 		aud: APIAudience, jkt: jkt, lifetime: s.lifetime(ctx, c.Tenant)})
@@ -993,6 +996,77 @@ type BootstrapRequest struct {
 		Email string   `json:"email"`
 		Roles []string `json:"roles"`
 	} `json:"invitations"`
+}
+
+// MintTest issues a real signed token with caller-chosen claims. It exists only for ucos-lite conformance suites
+// (UCOS_TEST_TOKENS=enabled, internal admin address): S0/S1 suites exercise arbitrary principals (roles, acr,
+// identities) that federated login cannot produce on demand. Never enabled outside ucos-lite.
+func (s *Server) MintTest(in TestTokenRequest) (map[string]any, error) {
+	if in.Tenant == "" || in.Party == "" {
+		return nil, kit.Errf(400, "E-API-VALIDATION", "tenant and party are required")
+	}
+	if in.Subject == "" {
+		in.Subject = "urn:ucos:" + in.Tenant + ":identity:" + kit.ULID()
+	}
+	if in.Acr == "" {
+		in.Acr = "AAL1"
+	}
+	if in.Audience == "" {
+		in.Audience = APIAudience
+	}
+	return s.issue(tokenSpec{tenant: in.Tenant, identity: in.Subject, party: in.Party, clientID: "lite-test-tokens",
+		acr: in.Acr, amr: []string{"test"}, roles: in.Roles, scope: in.Scopes, aud: in.Audience, jkt: in.JKT,
+		lifetime: 10 * time.Minute})
+}
+
+// TestTokenRequest is the lite test-token input.
+type TestTokenRequest struct {
+	Tenant   string   `json:"tenant"`
+	Subject  string   `json:"subject"`
+	Party    string   `json:"party"`
+	Roles    []string `json:"roles"`
+	Scopes   []string `json:"scopes"`
+	Acr      string   `json:"acr"`
+	JKT      string   `json:"jkt"`
+	Audience string   `json:"audience"`
+}
+
+// ServiceToken mints this service's own platform service token (no network hop: it is the issuer).
+func (s *Server) ServiceToken(service string) (string, error) {
+	out, err := s.issue(tokenSpec{tenant: "platform", identity: "urn:ucos:platform:identity:svc-" + service,
+		party: "urn:ucos:platform:party:svc-" + service, clientID: service, acr: "AAL2", amr: []string{"self"},
+		roles: []string{"platform-service"}, scope: []string{"ucos:platform:read"}, aud: APIAudience, lifetime: 10 * time.Minute})
+	if err != nil {
+		return "", err
+	}
+	return out["access_token"].(string), nil
+}
+
+// RegisterServiceClients upserts confidential platform clients for other services (lite: from configuration;
+// production: workload identity, DOM-IDN spiffeId). Their tokens carry role platform-service in tenant platform.
+func (s *Server) RegisterServiceClients(ctx context.Context, spec string) error {
+	for _, entry := range strings.Split(spec, ",") {
+		id, secret, ok := strings.Cut(strings.TrimSpace(entry), ":")
+		if !ok || id == "" || secret == "" {
+			continue
+		}
+		identity := "urn:ucos:platform:identity:svc-" + id
+		err := s.DB.InTenantTx(ctx, "platform", func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO ucos_identity.identities (tenant_id, id, kind, party_ref, binding, status, revision, created_at)
+				VALUES (current_setting('ucos.tenant_id')::uuid, $1, 'service', $2, '{}', 'active', 1, now()) ON CONFLICT DO NOTHING`,
+				identity, "urn:ucos:platform:party:svc-"+id)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := s.DB.Pool.Exec(ctx, `INSERT INTO ucos_identity.oauth_clients (client_id, tenant, kind, secret_hash, redirect_uris,
+			allowed_scopes, identity_ref, created_at) VALUES ($1, 'platform', 'confidential', $2, '{}', '{ucos:platform:read}', $3, now())
+			ON CONFLICT (client_id) DO UPDATE SET secret_hash = EXCLUDED.secret_hash`, id, kit.Hash(secret), identity); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Init prepares the federation HTTP client.

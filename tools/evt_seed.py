@@ -11,12 +11,9 @@ import os
 import pathlib
 import sys
 
-import requests
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-HEADERS = {"UCOS-Roles": "eventing-admin", "UCOS-Principal": "urn:ucos:platform:party:evt-seed",
-           "Content-Type": "application/json"}
 
 
 def declared():
@@ -31,16 +28,18 @@ def declared():
                 yield ch["address"], ctx, msg.get("payload", {})
 
 
-def seed(base: str):
-    s = requests.Session()
-    s.headers.update(HEADERS)
+def seed(base: str, token_for):
+    """Register every declared type; token_for() returns a DPoP-bound platform token with eventing.registry.write."""
+    sys.path.insert(0, str(ROOT / "conformance"))
+    import tokens  # the shared ES256/DPoP client (lite test tokens or a provided token)
     stats = {"types": 0, "schemas": 0}
     for typ, ctx, payload in declared():
-        r = s.post(f"{base}/v1/eventing/event-types", json={"type": typ, "owningContext": ctx, "category": "domain",
-                                                             "classification": "internal"}, timeout=30)
+        r = tokens.request("POST", f"{base}/v1/eventing/event-types", token_for(), json={"type": typ, "owningContext": ctx,
+                           "category": "domain", "classification": "internal"})
         if r.status_code not in (200, 201):
             raise RuntimeError(f"{typ}: {r.status_code} {r.text}")
-        r = s.post(f"{base}/v1/eventing/event-types/{typ}/schemas", json={"semver": "1.0.0", "schema": payload}, timeout=30)
+        r = tokens.request("POST", f"{base}/v1/eventing/event-types/{typ}/schemas", token_for(),
+                           json={"semver": "1.0.0", "schema": payload})
         if r.status_code not in (200, 201):
             raise RuntimeError(f"{typ} schema: {r.status_code} {r.text}")
         stats["types"] += 1
@@ -49,5 +48,9 @@ def seed(base: str):
 
 
 if __name__ == "__main__":
-    print(seed(os.environ.get("UCOS_EVENTING_URL", "http://eventing:8080").rstrip("/")))
+    sys.path.insert(0, str(ROOT / "conformance"))
+    import tokens
+    print(seed(os.environ.get("UCOS_EVENTING_URL", "http://eventing:8080").rstrip("/"),
+               lambda: tokens.token("platform", "urn:ucos:platform:party:evt-seed", roles=("eventing-operator",),
+                                    scopes=("ucos:eventing:write",), acr="AAL2")))
     sys.exit(0)

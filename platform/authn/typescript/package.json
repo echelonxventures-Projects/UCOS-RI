@@ -1,0 +1,10 @@
+{
+  "name": "@ucos/authn",
+  "version": "1.0.0",
+  "description": "UCOS access-token and DPoP validation for TypeScript services (mirrors platform/authn/go).",
+  "type": "module",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": { "node": ">=24" },
+  "scripts": { "test": "node --test \"test/*.test.ts\"" }
+}

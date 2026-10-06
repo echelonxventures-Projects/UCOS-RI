@@ -2,7 +2,8 @@
 // (contracts/eventing-registry/semantics.md). A TypeScript implementation of the same contract lives in
 // ../../typescript; either can be deployed in ucos-lite against the same schema (CR-030-001-05).
 //
-// Environment: UCOS_EVENTING_DB_URL, UCOS_EVENTING_RELAY_DB_URL, UCOS_HTTP_ADDR (:8080), UCOS_SECURITY_MODE=dev-header.
+// Environment: UCOS_EVENTING_DB_URL, UCOS_EVENTING_RELAY_DB_URL, UCOS_HTTP_ADDR (:8080), UCOS_TOKEN_ISSUER,
+// UCOS_PUBLIC_URL, UCOS_METADATA_URL, UCOS_SERVICE_CLIENT_ID/SECRET (platform role catalog lookups).
 package main
 
 import (
@@ -12,15 +13,18 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"ucos.dev/ri/authn/authn"
 	"ucos.dev/ri/eventing/registry"
 )
 
@@ -35,9 +39,6 @@ func main() {
 type handler func(w http.ResponseWriter, r *http.Request, actor string) error
 
 func run(log *slog.Logger) error {
-	if os.Getenv("UCOS_SECURITY_MODE") != "dev-header" {
-		return errors.New("UCOS_SECURITY_MODE must be dev-header until S2")
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	pool, err := pgxpool.New(ctx, os.Getenv("UCOS_EVENTING_DB_URL"))
@@ -53,21 +54,38 @@ func run(log *slog.Logger) error {
 	svc := &registry.Service{Pool: pool, Source: "urn:ucos:svc:event-platform-service:lite"}
 	go relay(ctx, relayPool, log)
 
+	issuer := strings.TrimSuffix(envOr("UCOS_TOKEN_ISSUER", "http://identity:8080"), "/")
+	tokens := &authn.Validator{Issuer: issuer, JWKSURL: issuer + "/.well-known/jwks.json", Audience: "ucos"}
+	go tokens.PollRevocations(ctx, issuer+"/oauth2/revocations", 5*time.Second)
+	publicBase := strings.TrimSuffix(envOr("UCOS_PUBLIC_URL", "http://eventing:8080"), "/")
+	catalog := &roleCatalog{metadata: strings.TrimSuffix(envOr("UCOS_METADATA_URL", "http://metadata:8080"), "/"),
+		tokenURL: issuer + "/oauth2/token", clientID: os.Getenv("UCOS_SERVICE_CLIENT_ID"), secret: os.Getenv("UCOS_SERVICE_CLIENT_SECRET")}
+
 	mux := http.NewServeMux()
-	wrap := func(admin bool, h handler) http.HandlerFunc {
+	// wrap is the PEP (semantics.md §1): reads need any valid UCOS token; writes need a DPoP-bound platform-tenant
+	// token whose roles grant eventing.registry.write in the platform role catalog.
+	wrap := func(write bool, h handler) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			corr := registry.NewULID()
 			w.Header().Set("UCOS-Correlation-Id", corr)
 			w.Header().Set("UCOS-Implementation", "go")
-			actor := r.Header.Get("UCOS-Principal")
-			if actor == "" {
-				actor = "urn:ucos:platform:party:dev"
+			p, err := tokens.Authenticate(r, publicBase+r.URL.RequestURI(), write)
+			if err != nil {
+				ae := err.(*authn.Error)
+				writeProblem(w, r, corr, &registry.Problem{Status: ae.Status, Code: ae.Code, Detail: ae.Detail}, log)
+				return
 			}
-			var err error
-			if admin && !hasRole(r, "eventing-admin") {
-				err = &registry.Problem{Status: 403, Code: "E-API-FORBIDDEN", Detail: "requires the eventing-admin role"}
-			} else {
-				err = h(w, r, actor)
+			if write {
+				if !p.HasScope("ucos:eventing:write") {
+					err = &registry.Problem{Status: 403, Code: "E-API-INSUFFICIENT-SCOPE", Detail: "requires scope ucos:eventing:write"}
+				} else if ok, cerr := catalog.grants(r.Context(), p, "eventing.registry.write"); cerr != nil {
+					err = cerr
+				} else if !ok || p.TenantSlug != "platform" {
+					err = &registry.Problem{Status: 403, Code: "E-API-FORBIDDEN", Detail: "requires permission eventing.registry.write in the platform tenant"}
+				}
+			}
+			if err == nil {
+				err = h(w, r, p.Party)
 			}
 			if err != nil {
 				writeProblem(w, r, corr, err, log)
@@ -149,15 +167,6 @@ func envOr(k, d string) string {
 	return d
 }
 
-func hasRole(r *http.Request, role string) bool {
-	for _, x := range strings.Split(r.Header.Get("UCOS-Roles"), ",") {
-		if strings.TrimSpace(x) == role {
-			return true
-		}
-	}
-	return false
-}
-
 func readObject(r *http.Request) (map[string]any, error) {
 	b, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 	if err != nil {
@@ -215,4 +224,80 @@ func relay(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) {
 			}
 		}
 	}
+}
+
+// roleCatalog resolves the platform role catalog from metadata-service with this service's client-credentials token.
+type roleCatalog struct {
+	metadata, tokenURL, clientID, secret string
+	mu                                   sync.Mutex
+	token                                string
+	tokenExp, fetched                    time.Time
+	roles                                map[string][]string
+}
+
+func (c *roleCatalog) serviceToken(ctx context.Context) (string, error) {
+	if c.token != "" && time.Until(c.tokenExp) > time.Minute {
+		return c.token, nil
+	}
+	form := url.Values{"grant_type": {"client_credentials"}, "scope": {"ucos:platform:read"}}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(c.clientID, c.secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", &registry.Problem{Status: 503, Code: "E-API-DEPENDENCY-UNAVAILABLE", Detail: "token service unavailable"}
+	}
+	defer resp.Body.Close()
+	var out struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int64  `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.AccessToken == "" {
+		return "", &registry.Problem{Status: 503, Code: "E-API-DEPENDENCY-UNAVAILABLE", Detail: "service token refused"}
+	}
+	c.token, c.tokenExp = out.AccessToken, time.Now().Add(time.Duration(out.ExpiresIn)*time.Second)
+	return c.token, nil
+}
+
+func (c *roleCatalog) grants(ctx context.Context, p authn.Principal, perm string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.roles == nil || time.Since(c.fetched) > 30*time.Second {
+		tok, err := c.serviceToken(ctx)
+		if err != nil {
+			return false, err
+		}
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.metadata+"/v1/registry/roles", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("UCOS-Tenant", "platform")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return false, &registry.Problem{Status: 503, Code: "E-API-DEPENDENCY-UNAVAILABLE", Detail: "metadata-service unavailable"}
+		}
+		defer resp.Body.Close()
+		var page struct {
+			Items []struct {
+				Key        string `json:"key"`
+				Definition struct {
+					Permissions []string `json:"permissions"`
+				} `json:"definition"`
+			} `json:"items"`
+		}
+		if resp.StatusCode != 200 || json.NewDecoder(resp.Body).Decode(&page) != nil {
+			return false, &registry.Problem{Status: 503, Code: "E-API-DEPENDENCY-UNAVAILABLE", Detail: "role catalog unavailable"}
+		}
+		c.roles = map[string][]string{}
+		for _, it := range page.Items {
+			c.roles[it.Key] = it.Definition.Permissions
+		}
+		c.fetched = time.Now()
+	}
+	for _, r := range p.Roles {
+		for _, x := range c.roles[r] {
+			if x == perm {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }

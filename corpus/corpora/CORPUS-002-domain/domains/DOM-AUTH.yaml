@@ -1,14 +1,14 @@
 header:
   id: DOM-AUTH
   title: Authority Domain Specification
-  version: 1.0.0
+  version: 1.1.0
   status: normative
   authority: Chief Governance Architect
   corpus: CORPUS-002
   dependencies: [CIC-009-001, CIC-014-001, CIC-015-001, CIC-002-001]
   traces: [PRIN-005, PRIN-010, PRIN-011, DOM-IDN, DOM-PTY]
   certification: [CR-AUTH-01, CR-AUTH-02, CR-AUTH-03]
-  validation: [VR-AUTH-01, VR-AUTH-02]
+  validation: [VR-AUTH-01, VR-AUTH-02, VR-AUTH-03, VR-AUTH-04]
 
 purpose: >
   Own who may act for whom: role assignments, delegations of authority (including to AI agents),
@@ -239,3 +239,5 @@ certificationCriteria:
 validationRules:
   - {id: VR-AUTH-01, rule: "Every role referenced in ucos.std policies (CEL role names) is defined in the ucos.std role registry."}
   - {id: VR-AUTH-02, rule: "Every permission in role definitions matches a permission declared in some DOM spec security.permissions."}
+  - {id: VR-AUTH-03, rule: "Every permission declared in a DOM spec security.permissions is granted by at least one ucos.std role (AMD-0003)."}
+  - {id: VR-AUTH-04, rule: "Every approver role named by a ucos.std policy body (approverRoles) is defined in the ucos.std role registry (AMD-0003)."}

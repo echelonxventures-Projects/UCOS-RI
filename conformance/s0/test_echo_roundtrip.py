@@ -11,6 +11,13 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from conftest import CONTRACTS, contract_schema, unique_tenant, wait_for
+from tokens import request, token
+
+ECHO_SCOPES = ("ucos:echo:read", "ucos:echo:write")
+
+
+def tok(tenant):
+    return token(tenant, f"urn:ucos:{tenant}:party:conformance", scopes=ECHO_SCOPES)
 
 OAS = "echo/echo.openapi.yaml"
 AAS = "echo/echo.asyncapi.yaml"
@@ -22,20 +29,17 @@ PAYLOADS = {m["name"]: Draft202012Validator(contract_schema(AAS, f"/components/m
             for k, m in ASYNC["components"]["messages"].items()}
 
 
-def headers(tenant, key=None):
-    h = {"UCOS-Tenant": tenant}
-    if key:
-        h["Idempotency-Key"] = key
-    return h
-
-
 def accept(base_url, tenant, text="hello", key=None):
-    return requests.post(f"{base_url}/v1/echo/messages", json={"text": text},
-                         headers=headers(tenant, key or f"k-{uuid.uuid4().hex}"), timeout=5)
+    return request("POST", f"{base_url}/v1/echo/messages", tok(tenant), json={"text": text},
+                   headers={"Idempotency-Key": key or f"k-{uuid.uuid4().hex}"})
+
+
+def get(base_url, tenant, path, **kw):
+    return request("GET", f"{base_url}{path}", tok(tenant), **kw)
 
 
 def events(base_url, tenant, agg):
-    r = requests.get(f"{base_url}/v1/echo/events", params={"aggregateId": agg}, headers=headers(tenant), timeout=5)
+    r = get(base_url, tenant, "/v1/echo/events", params={"aggregateId": agg})
     assert r.status_code == 200, r.text
     return r.json()["items"]
 
@@ -67,7 +71,7 @@ def test_event_round_trip_reaches_echoed(base_url):
     mid = post.json()["id"]
 
     def echoed():
-        g = requests.get(f"{base_url}/v1/echo/messages/{mid}", headers=headers(tenant), timeout=5)
+        g = get(base_url, tenant, f"/v1/echo/messages/{mid}")
         return g if g.json().get("status") == "echoed" else None
 
     g = wait_for(echoed, timeout=10)
@@ -116,17 +120,20 @@ def test_consumer_is_idempotent_under_redelivery(base_url, consumer_url):
         assert r.status_code == 204, r.text
     evs = events(base_url, tenant, mid)
     assert len(evs) == 2
-    assert requests.get(f"{base_url}/v1/echo/messages/{mid}", headers=headers(tenant), timeout=5).json()["revision"] == 2
+    assert get(base_url, tenant, f"/v1/echo/messages/{mid}").json()["revision"] == 2
 
 
 def test_validation_problems(base_url):
     tenant = unique_tenant("acme")
-    r = requests.post(f"{base_url}/v1/echo/messages", json={"text": "x"}, headers=headers(tenant), timeout=5)
+    r = request("POST", f"{base_url}/v1/echo/messages", tok(tenant), json={"text": "x"})
     assert_problem(r, 400, "E-API-IDEMPOTENCY-KEY-REQUIRED")
     r = requests.post(f"{base_url}/v1/echo/messages", json={"text": "x"}, headers={"Idempotency-Key": "k-12345678"}, timeout=5)
-    assert_problem(r, 400, "E-API-TENANT-REQUIRED")
-    r = requests.post(f"{base_url}/v1/echo/messages", json={"text": "x", "extra": 1},
-                      headers=headers(tenant, "k-extra-0001"), timeout=5)
+    assert_problem(r, 401, "E-IDN-AUTHENTICATION-REQUIRED")  # the tenant comes only from a token (S2)
+    narrow = token(tenant, f"urn:ucos:{tenant}:party:reader", scopes=("ucos:echo:read",))
+    r = request("POST", f"{base_url}/v1/echo/messages", narrow, json={"text": "x"}, headers={"Idempotency-Key": "k-scope-001"})
+    assert_problem(r, 403, "E-API-INSUFFICIENT-SCOPE")
+    r = request("POST", f"{base_url}/v1/echo/messages", tok(tenant), json={"text": "x", "extra": 1},
+                headers={"Idempotency-Key": "k-extra-0001"})
     assert_problem(r, 400, "E-API-VALIDATION")
     assert_problem(accept(base_url, tenant, "   "), 422, "E-ECHO-TEXT-REQUIRED")
     assert_problem(accept(base_url, tenant, "x" * 281), 422, "E-ECHO-TEXT-TOO-LONG")
@@ -136,6 +143,6 @@ def test_validation_problems(base_url):
 def test_other_tenant_cannot_see_message(base_url):
     owner, other = unique_tenant("acme"), unique_tenant("globex")
     mid = accept(base_url, owner, "private").json()["id"]
-    r = requests.get(f"{base_url}/v1/echo/messages/{mid}", headers=headers(other), timeout=5)
+    r = get(base_url, other, f"/v1/echo/messages/{mid}")
     assert_problem(r, 404, "E-ECHO-NOT-FOUND")
     assert events(base_url, other, mid) == []

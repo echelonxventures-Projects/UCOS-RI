@@ -7,7 +7,7 @@
 //	UCOS_EVENTBUS_HTTP_SINKS   comma-separated CloudEvents HTTP sinks (lite EventBusPort adapter)
 //	UCOS_HTTP_ADDR             public API address (default :8080)
 //	UCOS_ECHO_CONSUMER_ADDR    consumer address, not published outside the network (default :8081)
-//	UCOS_SECURITY_MODE         must be "dev-header" in S0 (OIDC arrives in S2)
+//	UCOS_TOKEN_ISSUER          UCOS token issuer (JWKS + revocations); UCOS_PUBLIC_URL for DPoP htu
 //	UCOS_REGION                home region (default lite)
 package main
 
@@ -24,6 +24,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"ucos.dev/ri/authn/authn"
 	"ucos.dev/ri/echo/application"
 	"ucos.dev/ri/echo/infrastructure"
 	"ucos.dev/ri/echo/service"
@@ -45,9 +46,6 @@ func env(k, def string) string {
 }
 
 func run(log *slog.Logger) error {
-	if mode := env("UCOS_SECURITY_MODE", ""); mode != "dev-header" {
-		return errors.New("UCOS_SECURITY_MODE must be dev-header in slice S0 (production security arrives in S2)")
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -67,7 +65,10 @@ func run(log *slog.Logger) error {
 	app := &application.Service{UoW: &infrastructure.Postgres{Pool: appPool}, Tenants: infrastructure.StaticTenants{},
 		IDs: ids, Clock: infrastructure.UTCClock{}, Source: "urn:ucos:svc:echo-service:" + region, Region: region}
 	metrics := &service.Metrics{}
-	srv := &service.Server{App: app, Authz: service.DevAuthorizer{}, IDs: ids, Log: log, Metrics: metrics,
+	issuer := strings.TrimSuffix(env("UCOS_TOKEN_ISSUER", "http://identity:8080"), "/")
+	tokens := &authn.Validator{Issuer: issuer, JWKSURL: issuer + "/.well-known/jwks.json", Audience: "ucos"}
+	go tokens.PollRevocations(ctx, issuer+"/oauth2/revocations", 5*time.Second)
+	srv := &service.Server{Tokens: tokens, PublicBase: strings.TrimSuffix(env("UCOS_PUBLIC_URL", "http://echo:8080"), "/"), App: app, Authz: service.ScopeAuthorizer{}, IDs: ids, Log: log, Metrics: metrics,
 		Ready: func(c context.Context) error { return appPool.Ping(c) }}
 
 	var sinks []string

@@ -335,7 +335,7 @@ class PackChecker:
             self.err("context derivations contain a cycle (RUL-CTX-1)")
 
     def check_roles(self, declared_permissions: set[str]) -> None:
-        """VR-AUTH-01 (roles used by CEL policies are defined) and VR-AUTH-02 (permissions declared)."""
+        """VR-AUTH-01..04: CEL roles defined, role permissions declared, every declared permission granted, approver roles defined."""
         roles = {r["code"]: r for r in self.registries.get("roles", []) or []}
         for name, p in self.policies.items():
             body = p.get("body", {})
@@ -347,6 +347,21 @@ class PackChecker:
             for perm in r.get("permissions", []):
                 if perm not in declared_permissions:
                     self.err(f"role {code}: permission '{perm}' not declared by any domain spec (VR-AUTH-02)")
+        granted = {perm for r in roles.values() for perm in r.get("permissions", [])}
+        for perm in sorted(declared_permissions - granted):
+            self.err(f"permission '{perm}' is declared by a domain spec but granted by no ucos.std role (VR-AUTH-03)")
+        for name, p in self.policies.items():
+            src = (p.get("body") or {}).get("source")
+            stack = [src]
+            while stack:  # approverRoles anywhere in static bodies (approval plans, approval tiers)
+                node = stack.pop()
+                if isinstance(node, dict):
+                    for role in node.get("approverRoles", []) or []:
+                        if role not in roles:
+                            self.err(f"policy {name}: approver role '{role}' not defined in registries.yaml roles (VR-AUTH-04)")
+                    stack.extend(node.values())
+                elif isinstance(node, list):
+                    stack.extend(node)
 
     def check_registries(self) -> None:
         for key, keyfield in (("factKinds", "code"), ("meters", "code"), ("purposes", "code"),

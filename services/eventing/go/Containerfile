@@ -2,6 +2,7 @@
 FROM golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS build
 ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly
 COPY platform/context-runtime/go /src/platform/context-runtime/go
+COPY platform/authn/go /src/platform/authn/go
 COPY services/eventing/go/go.mod services/eventing/go/go.sum /src/services/eventing/go/
 WORKDIR /src/services/eventing/go
 RUN go mod download && go mod verify

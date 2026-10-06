@@ -7,7 +7,9 @@
 ## 1. Scope and tenancy
 
 Event types are platform metadata, shared by all tenants, keyed by the type string. The registry tables have no
-`tenant_id`. Writes need the platform role `eventing-admin`. Reads are open to every authenticated caller.
+`tenant_id`. Every call needs a valid UCOS access token (DOM-IDN). Reads are open to any authenticated principal of
+any tenant. Writes need a DPoP-bound token of the `platform` tenant with scope `ucos:eventing:write`, whose roles
+grant `eventing.registry.write` in the platform role catalog (for example `eventing-operator`, `ucos.std` 1.2.0).
 Emitted events belong to the `platform` tenant **[E1]**.
 
 ## 2. API
@@ -40,7 +42,8 @@ Errors:
 | 409 | `E-EVT-INCOMPATIBLE` | the schema fails FULL_TRANSITIVE compatibility (§4); `detail` names the prior version and the reason |
 | 409 | `E-EVT-VERSION-ORDER` | the semver is not greater than the latest registered version **[E2]** |
 | 409 | `E-EVT-VERSION-EXISTS` | the semver already exists with a different digest |
-| 403 | `E-API-FORBIDDEN` | the caller lacks the `eventing-admin` role |
+| 401 | `E-IDN-…` | no valid token, or a write without a DPoP-bound token (RUL-IDN-1) |
+| 403 | `E-API-INSUFFICIENT-SCOPE` / `E-API-FORBIDDEN` | missing scope, or no `eventing.registry.write` in the platform tenant |
 
 `RegisterEventSchemaVersion` checks run in this order, and the first failure is returned **[E6]**:
 1. type exists (404);

@@ -1,10 +1,11 @@
-# echo-service — container-only build (CIC-001-001 §1.1). Toolchain images pinned by digest.
+# echo-service — container-only build (CIC-001-001 §1.1); context = repository root (.dockerignore).
 FROM golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS build
-WORKDIR /src
 ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly
-COPY go.mod go.sum ./
+COPY platform/authn/go /src/platform/authn/go
+COPY domains/echo/go.mod domains/echo/go.sum /src/domains/echo/
+WORKDIR /src/domains/echo
 RUN go mod download && go mod verify
-COPY . .
+COPY domains/echo /src/domains/echo
 RUN go build -trimpath -ldflags="-s -w" -o /out/echo-service ./cmd/echo-service
 
 FROM build AS test

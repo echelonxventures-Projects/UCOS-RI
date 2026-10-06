@@ -22,6 +22,7 @@ import (
 
 // Metadata is the client of metadata-service (role registry, policy bundle, effective schemas).
 type Metadata struct {
+	Token  func() (string, error) // service token source (platform-service), sent as Bearer on reads
 	Base   string
 	HTTP   *http.Client
 	mu     sync.Mutex
@@ -44,7 +45,14 @@ func (m *Metadata) get(ctx context.Context, tenant, path string, ttl time.Durati
 		return json.Unmarshal(raw, out)
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, m.Base+path, nil)
-	req.Header.Set("UCOS-Tenant", tenant) // metadata-service is still dev-header in S2a; service tokens in S2b
+	req.Header.Set("UCOS-Tenant", tenant) // target tenant of a platform-service read (ADR 0008)
+	if m.Token != nil {
+		tok, err := m.Token()
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	resp, err := m.HTTP.Do(req)
 	if err != nil {
 		return kit.Errf(503, "E-API-DEPENDENCY-UNAVAILABLE", "metadata-service unavailable")

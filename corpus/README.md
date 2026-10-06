@@ -19,7 +19,7 @@ tools/pack_checks.py            Static Type Pack checks (references, C3 lineariz
                                 dimensions, policy test vectors, fixture instances vs effective schemas)
 ```
 
-## Status (corpus 1.2.0)
+## Status (corpus 1.3.0)
 
 | Measure | Value |
 |---------|-------|
@@ -28,7 +28,7 @@ tools/pack_checks.py            Static Type Pack checks (references, C3 lineariz
 | Tiers | kernel 39/39, core 64/64, pack 5/5, extension 9/9 (extension domains ship as I4 bounded-context plugins, `plugin:` block) |
 | Rules | 763 certification/validation rules, each defined once and traced |
 | `ucos.std` pack | 26 types, 72 attributes, 18 facets, 15 relationship types, 9 lifecycle models, 21 context dimensions, 204 policies (195 referenced by specs), 30 ports, 24 fixture instances |
-| Amendments | AMD-0002 (1.2.0): `ucos.std` 1.1.0 adds roles granting party and agent commands; CIC-003-001 bookkeeping-table tenancy. AMD-0001 (1.1.0): the reference implementation is language- and toolchain-agnostic, contract-first and polyglot, with container-only builds |
+| Amendments | AMD-0003 (1.3.0): every declared permission is granted by some role (generated `<context>-reader` and `<context>-operator` roles), and approver roles are defined (VR-AUTH-03/04). AMD-0002 (1.2.0): `ucos.std` 1.1.0 adds roles granting party and agent commands; CIC-003-001 bookkeeping-table tenancy. AMD-0001 (1.1.0): the reference implementation is language- and toolchain-agnostic, contract-first and polyglot, with container-only builds |
 | Executable checks | CEL policy test vectors executed by the validator (with `cel-python`) |
 
 Domain registry statuses: `specified` (DOM file), `realized` (pack-tier, realized by a pack), `subsumed`

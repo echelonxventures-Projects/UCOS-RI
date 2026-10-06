@@ -11,6 +11,7 @@ import pytest
 import requests
 
 from conftest import tenant_id, unique_tenant, wait_for
+from tokens import request, token
 
 TENANT_TABLES_SQL = """
 SELECT c.oid::regclass::text, c.relrowsecurity, c.relforcerowsecurity,
@@ -52,12 +53,12 @@ def test_every_tenant_table_has_forced_rls(app_db):
 
 def test_tenant_b_sees_zero_rows_of_tenant_a_on_every_table(base_url, app_db):
     a, b = unique_tenant("rls-a"), unique_tenant("rls-b")
-    r = requests.post(f"{base_url}/v1/echo/messages", json={"text": "tenant A data"},
-                      headers={"UCOS-Tenant": a, "Idempotency-Key": "k-rls-a-0001"}, timeout=5)
+    ta = token(a, f"urn:ucos:{a}:party:conformance", scopes=("ucos:echo:read", "ucos:echo:write"))
+    r = request("POST", f"{base_url}/v1/echo/messages", ta, json={"text": "tenant A data"},
+                headers={"Idempotency-Key": "k-rls-a-0001"})
     assert r.status_code == 201
     mid = r.json()["id"]
-    assert wait_for(lambda: requests.get(f"{base_url}/v1/echo/messages/{mid}", headers={"UCOS-Tenant": a},
-                                         timeout=5).json()["status"] == "echoed")
+    assert wait_for(lambda: request("GET", f"{base_url}/v1/echo/messages/{mid}", ta).json()["status"] == "echoed")
     tables = [t[0] for t in tenant_tables(app_db)]
     readable = {}
     for t in tables:

@@ -4,11 +4,12 @@ WORKDIR /repo/services/eventing/typescript
 COPY services/eventing/typescript/package.json services/eventing/typescript/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY platform/context-runtime/typescript/src /repo/platform/context-runtime/typescript/src
+COPY platform/authn/typescript /repo/platform/authn/typescript
 COPY services/eventing/typescript/src ./src
 COPY services/eventing/typescript/test ./test
 
 FROM build AS test
-RUN node --test "test/*.test.ts"
+RUN node --test "test/*.test.ts" && cd /repo/platform/authn/typescript && node --test "test/*.test.ts"
 
 FROM node@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS runtime
 COPY --from=build /repo /repo

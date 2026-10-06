@@ -2,10 +2,14 @@
 import json
 import os
 import pathlib
+import sys
 import time
 import uuid
 
 import requests
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import tokens  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 BASE = os.environ.get("UCOS_METADATA_URL", "http://metadata:8080").rstrip("/")
@@ -29,20 +33,24 @@ def tenant(prefix="s1"):
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
 
 
-def headers(t, party=None, roles=(), acr="AAL1", identity=None):
-    h = {"UCOS-Tenant": t, "UCOS-Principal": party or AUTHOR.format(t=t), "UCOS-Acr": acr,
-         "Content-Type": "application/json"}
-    if roles:
-        h["UCOS-Roles"] = ",".join(roles)
-    if identity:
-        h["UCOS-Identity"] = identity
-    return h
+KERNEL_SCOPES = tuple(f"ucos:{c}:{m}" for c in ("ontology", "lifecycle", "context", "policy", "evidence", "governance")
+                      for m in ("read", "write"))
+# Default principal: the tenant administrator who authors and applies ChangeSets (roles from ucos.std 1.2.0, AMD-0003).
+AUTHOR_ROLES = ("tenant-admin", "governance-operator", "ontology-operator", "lifecycle-operator", "context-operator",
+                "policy-operator", "evidence-operator")
 
 
-def call(method, path, t=None, body=None, **hk):
-    h = headers(t, **hk) if t else {"Content-Type": "application/json"}
-    r = requests.request(method, BASE + path, headers=h, data=None if body is None else json.dumps(body), timeout=120)
-    return r
+def principal_token(t, party=None, roles=None, acr="AAL1", identity=None):
+    party = party or AUTHOR.format(t=t)
+    return tokens.token(t, party, roles=tuple(roles) if roles is not None else AUTHOR_ROLES, scopes=KERNEL_SCOPES,
+                        acr=acr, subject=identity)
+
+
+def call(method, path, t=None, body=None, party=None, roles=None, acr="AAL1", identity=None):
+    """Call metadata-service as a principal of tenant t (a real DPoP-bound token); t=None sends no token."""
+    tok = principal_token(t, party, roles, acr, identity) if t else None
+    return tokens.request(method, BASE + path, tok, data=None if body is None else json.dumps(body),
+                          headers={"Content-Type": "application/json"}, timeout=120)
 
 
 def ok(r, status=200):
@@ -69,9 +77,11 @@ def inject_apply_fault(at_item):
 
 
 def publish_std_pack():
+    """Publish ucos.std as the platform (role platform-governance → packs.publish)."""
     body = (ROOT / ".work/ucos.std.publish.json").read_bytes()
-    r = requests.post(f"{BASE}/v1/packs", data=body, headers={"UCOS-Roles": "pack-publisher",
-                                                                   "Content-Type": "application/json"}, timeout=60)
+    tok = tokens.token("platform", "urn:ucos:platform:party:pack-publisher", roles=("platform-governance",),
+                       scopes=("ucos:ontology:write",), acr="AAL2")
+    r = tokens.request("POST", f"{BASE}/v1/packs", tok, data=body, headers={"Content-Type": "application/json"})
     assert r.status_code == 201, r.text
     return json.loads(body)["bundle"]
 

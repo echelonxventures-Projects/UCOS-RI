@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"ucos.dev/ri/authn/authn"
 	"ucos.dev/ri/echo/api"
 	"ucos.dev/ri/echo/application"
 	"ucos.dev/ri/echo/domain"
@@ -34,12 +35,12 @@ type Authorizer interface {
 	Authorize(ctx context.Context, p application.Principal, permission string) bool
 }
 
-// DevAuthorizer allows every permission. Only the ucos-lite profile with UCOS_SECURITY_MODE=dev-header
-// wires it; S2 replaces it with the PDP client (docs/adr/0003).
-type DevAuthorizer struct{}
+// ScopeAuthorizer admits every principal whose token carried the echo scope: the echo context is a platform
+// demonstration with no corpus permissions, so the scope check in secured() is its whole authorization.
+type ScopeAuthorizer struct{}
 
 // Authorize always permits.
-func (DevAuthorizer) Authorize(context.Context, application.Principal, string) bool { return true }
+func (ScopeAuthorizer) Authorize(context.Context, application.Principal, string) bool { return true }
 
 // Metrics are Prometheus counters exposed on /metrics (names per CIC-001-001 §7).
 type Metrics struct {
@@ -48,12 +49,14 @@ type Metrics struct {
 
 // Server wires HTTP to the application service.
 type Server struct {
-	App     *application.Service
-	Authz   Authorizer
-	IDs     application.IDs
-	Log     *slog.Logger
-	Metrics *Metrics
-	Ready   func(context.Context) error
+	Tokens     *authn.Validator
+	PublicBase string
+	App        *application.Service
+	Authz      Authorizer
+	IDs        application.IDs
+	Log        *slog.Logger
+	Metrics    *Metrics
+	Ready      func(context.Context) error
 }
 
 type ctxKey struct{}
@@ -98,15 +101,33 @@ func (s *Server) correlate(next http.Handler) http.Handler {
 	})
 }
 
-// secured is the security filter: tenant header, (dev) authentication, and the PEP check.
+// secured is the PEP: a valid UCOS access token (DPoP-bound for writes, RUL-IDN-1) with the echo scope; the
+// tenant and principal come only from token claims.
 func (s *Server) secured(permission string, h func(http.ResponseWriter, *http.Request, application.Principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tenant := r.Header.Get("UCOS-Tenant")
-		if !tenantPattern.MatchString(tenant) {
-			s.problem(w, r, 400, "E-API-TENANT-REQUIRED", "UCOS-Tenant header missing or malformed", false)
+		write := r.Method != http.MethodGet
+		ap, err := s.Tokens.Authenticate(r, s.PublicBase+r.URL.RequestURI(), write)
+		if err != nil {
+			ae, _ := err.(*authn.Error)
+			if ae == nil {
+				ae = &authn.Error{Status: 401, Code: "E-IDN-TOKEN-INVALID"}
+			}
+			s.problem(w, r, ae.Status, ae.Code, ae.Detail, false)
 			return
 		}
-		p := application.Principal{Tenant: tenant, Subject: "urn:ucos:" + tenant + ":principal:dev"}
+		scope := "ucos:echo:read"
+		if write {
+			scope = "ucos:echo:write"
+		}
+		if !ap.HasScope(scope) {
+			s.problem(w, r, 403, "E-API-INSUFFICIENT-SCOPE", "operation requires scope "+scope, false)
+			return
+		}
+		if !tenantPattern.MatchString(ap.TenantSlug) {
+			s.problem(w, r, 401, "E-IDN-TOKEN-INVALID", "token carries no tenant", false)
+			return
+		}
+		p := application.Principal{Tenant: ap.TenantSlug, Subject: ap.Party}
 		if !s.Authz.Authorize(r.Context(), p, permission) {
 			s.problem(w, r, 403, "E-API-FORBIDDEN", "", false)
 			return

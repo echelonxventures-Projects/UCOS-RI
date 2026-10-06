@@ -3,11 +3,39 @@ import { STATUS_CODES, createServer, type IncomingMessage, type ServerResponse }
 import pg from "pg";
 import { canonical } from "../../../../platform/context-runtime/typescript/src/jcs.ts";
 import { Problem, Service, parseExact, ulid } from "./service.ts";
+import { AuthnError, Validator, type Principal } from "../../../../platform/authn/typescript/src/authn.ts";
 
-if (process.env.UCOS_SECURITY_MODE !== "dev-header") {
-  console.error("UCOS_SECURITY_MODE must be dev-header until S2");
-  process.exit(1);
+const issuer = (process.env.UCOS_TOKEN_ISSUER ?? "http://identity:8080").replace(/\/$/, "");
+const publicBase = (process.env.UCOS_PUBLIC_URL ?? "http://eventing:8080").replace(/\/$/, "");
+const metadata = (process.env.UCOS_METADATA_URL ?? "http://metadata:8080").replace(/\/$/, "");
+const tokens = new Validator(issuer, "ucos");
+tokens.pollRevocations();
+
+// Platform role catalog from metadata-service, read with this service's client-credentials token.
+let serviceToken = { value: "", exp: 0 };
+let catalog = { roles: new Map<string, string[]>(), at: 0 };
+async function getServiceToken(): Promise<string> {
+  if (serviceToken.value && serviceToken.exp - Date.now() > 60_000) return serviceToken.value;
+  const basic = Buffer.from(`${process.env.UCOS_SERVICE_CLIENT_ID}:${process.env.UCOS_SERVICE_CLIENT_SECRET}`).toString("base64");
+  const r = await fetch(`${issuer}/oauth2/token`, { method: "POST", signal: AbortSignal.timeout(5000),
+    headers: { authorization: `Basic ${basic}`, "content-type": "application/x-www-form-urlencoded" },
+    body: "grant_type=client_credentials&scope=ucos%3Aplatform%3Aread" }).catch(() => null);
+  const out = r && r.ok ? ((await r.json()) as { access_token: string; expires_in: number }) : null;
+  if (!out?.access_token) throw new Problem(503, "E-API-DEPENDENCY-UNAVAILABLE", "service token refused");
+  serviceToken = { value: out.access_token, exp: Date.now() + out.expires_in * 1000 };
+  return serviceToken.value;
 }
+async function grants(p: Principal, permission: string): Promise<boolean> {
+  if (Date.now() - catalog.at > 30_000) {
+    const r = await fetch(`${metadata}/v1/registry/roles`, { signal: AbortSignal.timeout(5000),
+      headers: { authorization: `Bearer ${await getServiceToken()}`, "ucos-tenant": "platform" } }).catch(() => null);
+    if (!r || !r.ok) throw new Problem(503, "E-API-DEPENDENCY-UNAVAILABLE", "role catalog unavailable");
+    const page = (await r.json()) as { items: { key: string; definition: { permissions?: string[] } }[] };
+    catalog = { roles: new Map(page.items.map((i) => [i.key, i.definition.permissions ?? []])), at: Date.now() };
+  }
+  return p.roles.some((role) => (catalog.roles.get(role) ?? []).includes(permission));
+}
+
 
 pg.types.setTypeParser(20, (v: string) => v); // int8 as text
 const pool = new pg.Pool({ connectionString: process.env.UCOS_EVENTING_DB_URL, max: 10 });
@@ -47,8 +75,6 @@ async function readObject(req: IncomingMessage): Promise<Record<string, unknown>
   return v as Record<string, unknown>;
 }
 
-const hasRole = (req: IncomingMessage, role: string) =>
-  String(req.headers["ucos-roles"] ?? "").split(",").map((s) => s.trim()).includes(role);
 
 const server = createServer(async (req, res) => {
   const corr = ulid();
@@ -56,10 +82,26 @@ const server = createServer(async (req, res) => {
   res.setHeader("UCOS-Implementation", "typescript");
   const url = new URL(req.url ?? "/", "http://x");
   const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  const actor = String(req.headers["ucos-principal"] ?? "urn:ucos:platform:party:dev");
-  const admin = () => {
-    if (!hasRole(req, "eventing-admin")) throw new Problem(403, "E-API-FORBIDDEN", "requires the eventing-admin role");
+  let actor = "";
+  // PEP (semantics.md §1): reads need any valid UCOS token; writes a DPoP-bound platform-tenant token whose roles grant
+  // eventing.registry.write in the platform role catalog.
+  const authenticate = async (write: boolean) => {
+    let p: Principal;
+    try {
+      p = await tokens.authenticate(req.headers, req.method ?? "GET", publicBase + (req.url ?? "/"), write);
+    } catch (e) {
+      if (e instanceof AuthnError) throw new Problem(e.status, e.code, e.message);
+      throw e;
+    }
+    actor = p.party;
+    if (write) {
+      if (!p.scopes.includes("ucos:eventing:write")) throw new Problem(403, "E-API-INSUFFICIENT-SCOPE", "requires scope ucos:eventing:write");
+      if (p.tenant !== "platform" || !(await grants(p, "eventing.registry.write"))) {
+        throw new Problem(403, "E-API-FORBIDDEN", "requires permission eventing.registry.write in the platform tenant");
+      }
+    }
   };
+  const admin = () => authenticate(true);
   try {
     if (url.pathname === "/health/live") return void res.writeHead(204).end();
     if (url.pathname === "/health/ready") {
@@ -69,17 +111,18 @@ const server = createServer(async (req, res) => {
     const base = parts.slice(0, 3).join("/") === "v1/eventing/event-types";
     if (!base) throw new Problem(404, "E-API-NOT-FOUND", "not found");
     if (parts.length === 3 && req.method === "POST") {
-      admin();
+      await admin();
       const { et, created } = await svc.registerType(await readObject(req), actor);
       return send(res, created ? 201 : 200, et);
     }
+    if (req.method === "GET") await authenticate(false);
     if (parts.length === 3 && req.method === "GET") {
       const items = await svc.find(url.searchParams.get("owningContext") ?? "", url.searchParams.get("category") ?? "");
       return send(res, 200, { items, nextCursor: null });
     }
     if (parts.length === 4 && req.method === "GET") return send(res, 200, await svc.get(parts[3]));
     if (parts.length === 5 && parts[4] === "schemas" && req.method === "POST") {
-      admin();
+      await admin();
       const body = await readObject(req);
       const { out, created } = await svc.registerSchema(parts[3], body.semver, body.schema, actor);
       return send(res, created ? 201 : 200, out);

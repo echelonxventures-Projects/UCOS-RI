@@ -48,14 +48,15 @@ services:
               "kernel/policy", "kernel/governance", "kernel/evidence", "services/eventing", "services/identity"]
 
   echo:
-    build: {context: domains/echo, dockerfile: Containerfile, target: runtime}
+    build: {context: ., dockerfile: domains/echo/Containerfile, target: runtime}
     image: ucos-echo-service:local
     depends_on: {migrate: {condition: service_completed_successfully}}
     environment:
       UCOS_ECHO_DB_URL: postgresql://ucos_echo_app:${UCOS_ECHO_APP_PASSWORD:-echo-app-dev}@db:5432/ucos
       UCOS_ECHO_RELAY_DB_URL: postgresql://ucos_echo_relay:${UCOS_ECHO_RELAY_PASSWORD:-echo-relay-dev}@db:5432/ucos
       UCOS_EVENTBUS_HTTP_SINKS: http://echo:8081/events
-      UCOS_SECURITY_MODE: dev-header
+      UCOS_TOKEN_ISSUER: http://identity:8080
+      UCOS_PUBLIC_URL: http://echo:8080
       UCOS_REGION: lite
     ports: ["127.0.0.1:${UCOS_ECHO_PORT:-18080}:8080"]
 
@@ -66,7 +67,8 @@ services:
     environment:
       UCOS_KERNEL_DB_URL: postgresql://ucos_kernel_app:${UCOS_KERNEL_APP_PASSWORD:-kernel-app-dev}@db:5432/ucos
       UCOS_KERNEL_RELAY_DB_URL: postgresql://ucos_kernel_relay:${UCOS_KERNEL_RELAY_PASSWORD:-kernel-relay-dev}@db:5432/ucos
-      UCOS_SECURITY_MODE: dev-header
+      UCOS_TOKEN_ISSUER: http://identity:8080
+      UCOS_PUBLIC_URL: http://metadata:8080
       UCOS_CLOCK: adjustable     # ucos-lite only: lets suites exercise cool-off and freeze windows
       UCOS_FAULTS: enabled       # ucos-lite only: apply-saga fault injection (CR-015-001-04)
       UCOS_REGION: lite
@@ -81,7 +83,11 @@ services:
     environment:
       UCOS_EVENTING_DB_URL: postgresql://ucos_eventing_app:${UCOS_EVENTING_APP_PASSWORD:-eventing-app-dev}@db:5432/ucos
       UCOS_EVENTING_RELAY_DB_URL: postgresql://ucos_eventing_relay:${UCOS_EVENTING_RELAY_PASSWORD:-eventing-relay-dev}@db:5432/ucos
-      UCOS_SECURITY_MODE: dev-header
+      UCOS_TOKEN_ISSUER: http://identity:8080
+      UCOS_PUBLIC_URL: http://eventing:8080
+      UCOS_METADATA_URL: http://metadata:8080
+      UCOS_SERVICE_CLIENT_ID: event-platform-service
+      UCOS_SERVICE_CLIENT_SECRET: ${UCOS_EVENTING_CLIENT_SECRET:-eventing-client-dev-secret}
     ports: ["127.0.0.1:${UCOS_EVENTING_PORT:-18100}:8080"]
 
   dex:
@@ -100,6 +106,8 @@ services:
       UCOS_IDENTITY_KEK: ${UCOS_IDENTITY_KEK:-6c6974652d6f6e6c792d6465762d6b656b2d6e6f742d666f722d70726f642121}  # lite only; KMS in production
       UCOS_PUBLIC_URL: http://identity:8080
       UCOS_METADATA_URL: http://metadata:8080
+      UCOS_SERVICE_CLIENTS: event-platform-service:${UCOS_EVENTING_CLIENT_SECRET:-eventing-client-dev-secret}
+      UCOS_TEST_TOKENS: enabled   # ucos-lite only: conformance suites mint tokens for arbitrary principals (ADR 0008)
     ports: ["127.0.0.1:${UCOS_IDENTITY_PORT:-18110}:8080"]
 
   conformance:
