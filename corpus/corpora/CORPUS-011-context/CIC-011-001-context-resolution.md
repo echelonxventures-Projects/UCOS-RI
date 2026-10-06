@@ -1,7 +1,7 @@
 ---
 id: CIC-011-001
 title: Context Model and Context Resolution Algorithm
-version: 1.1.1
+version: 1.2.0
 status: normative
 authority: Chief Architect
 corpus: CORPUS-011
@@ -17,6 +17,11 @@ This is the single algorithm by which UCOS selects *which contextual fact applie
 prices, catalog membership, availability rules, localized text, policies, and rules are all
 "contextual facts" and are all resolved here (PRIN-006). Specialized resolvers (CIC-011-002…006)
 call this algorithm and only add fact-kind-specific post-processing.
+
+Annex CIC-011-007 (normative, AMD-0004) restates this algorithm as executable semantics. It decides the details that
+would otherwise make implementations disagree byte-for-byte: canonical JSON output, integer-only arithmetic,
+instant format, specificity evaluation order, fallback order and the conformance runner protocol. Where this text
+leaves a detail open, the annex governs.
 
 ## 1. Model
 

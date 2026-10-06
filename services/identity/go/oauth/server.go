@@ -38,9 +38,10 @@ type Parties interface {
 type Roles interface {
 	// TokenAuthority is the coarse authority a token for party carries: role codes, permissions received through
 	// delegations, and the instant any of it expires (RUL-AUTH-1, ADR 0009).
-	TokenAuthority(ctx context.Context, tenant, party string) (roles, delegated []string, horizon *time.Time, err error)
+	// authAtMs is when the authority was read (CIC-002-003 §8).
+	TokenAuthority(ctx context.Context, tenant, party string) (roles, delegated []string, horizon *time.Time, authAtMs int64, err error)
 	// AgentLimit is what an agent party may exercise for delegator through DOM-AUTH delegations (empty = nothing).
-	AgentLimit(ctx context.Context, tenant, delegator, agentParty string) ([]string, *time.Time, error)
+	AgentLimit(ctx context.Context, tenant, delegator, agentParty string) ([]string, *time.Time, int64, error)
 	Redeem(ctx context.Context, tenant, email, party, corr string) error
 }
 
@@ -534,6 +535,7 @@ type tokenSpec struct {
 	tenant, identity, party, clientID, acr, jkt string
 	amr, roles, scope, delegated                []string
 	limit                                       []string // nil = no permission limit
+	authAt                                      int64    // ucos_auth_at (ms); 0 = issue instant
 	aud                                         any
 	act                                         map[string]any
 	extra                                       map[string]any
@@ -569,7 +571,11 @@ func (s *Server) issue(t tokenSpec) (map[string]any, error) {
 	if exp <= now.Unix() {
 		return nil, oerr(400, "invalid_grant", "the authority this token would carry has already expired")
 	}
-	claims := map[string]any{"iss": s.Issuer, "sub": t.identity, "aud": t.aud, "iat": now.Unix(), "nbf": now.Unix(),
+	authAt := t.authAt
+	if authAt <= 0 {
+		authAt = now.UnixMilli()
+	}
+	claims := map[string]any{"ucos_auth_at": authAt, "iss": s.Issuer, "sub": t.identity, "aud": t.aud, "iat": now.Unix(), "nbf": now.Unix(),
 		"exp": exp, "jti": kit.ULID(), "client_id": t.clientID, "scope": strings.Join(t.scope, " "),
 		"ucos_tenant": t.tenant, "ucos_party": t.party, "ucos_roles": nonNil(t.roles), "acr": t.acr, "amr": nonNil(t.amr)}
 	for k, v := range t.extra {
@@ -633,12 +639,12 @@ func (s *Server) grantCode(r *http.Request) (map[string]any, error) {
 	if err != nil || ident.Status != "active" {
 		return nil, oerr(400, "invalid_grant", "identity is not active")
 	}
-	roles, delegated, horizon, err := s.Roles.TokenAuthority(ctx, tenant, ident.PartyRef)
+	roles, delegated, horizon, authAt, err := s.Roles.TokenAuthority(ctx, tenant, ident.PartyRef)
 	if err != nil {
 		return nil, err
 	}
 	return s.issue(tokenSpec{tenant: tenant, identity: identity, party: ident.PartyRef, clientID: c.ID, acr: acr, amr: amr,
-		roles: roles, delegated: delegated, scope: strings.Fields(scope), aud: APIAudience, jkt: jkt,
+		roles: roles, delegated: delegated, scope: strings.Fields(scope), aud: APIAudience, jkt: jkt, authAt: authAt,
 		lifetime: s.lifetime(ctx, tenant), notAfter: horizonUnix(horizon)})
 }
 
@@ -669,13 +675,13 @@ func (s *Server) grantClientCredentials(r *http.Request) (map[string]any, error)
 			amr: []string{"client-secret"}, roles: []string{"platform-service"}, scope: intersect(r.PostForm.Get("scope"), c.AllowedScopes),
 			aud: APIAudience, jkt: jkt, lifetime: s.lifetime(ctx, c.Tenant)})
 	}
-	roles, delegated, horizon, err := s.Roles.TokenAuthority(ctx, c.Tenant, ident.PartyRef)
+	roles, delegated, horizon, authAt, err := s.Roles.TokenAuthority(ctx, c.Tenant, ident.PartyRef)
 	if err != nil {
 		return nil, err
 	}
 	return s.issue(tokenSpec{tenant: c.Tenant, identity: ident.ID, party: ident.PartyRef, clientID: c.ID, acr: "AAL2",
 		amr: []string{"client-secret"}, roles: roles, delegated: delegated, scope: intersect(r.PostForm.Get("scope"), c.AllowedScopes),
-		aud: APIAudience, jkt: jkt, lifetime: s.lifetime(ctx, c.Tenant), notAfter: horizonUnix(horizon)})
+		aud: APIAudience, jkt: jkt, authAt: authAt, lifetime: s.lifetime(ctx, c.Tenant), notAfter: horizonUnix(horizon)})
 }
 
 // narrowLimit intersects an existing permission limit (nil = none) with perms: exchange only ever narrows.
@@ -767,11 +773,13 @@ func (s *Server) grantExchange(r *http.Request) (map[string]any, error) {
 	// what that party delegated to the agent through DOM-AUTH (re-validated now; RUL-AUTH-1, ADR 0009).
 	limit := subj.Limit
 	notAfter := int64(intNum(subj.Claims["exp"], 0))
+	authAt := authn.AuthAtMillis(subj.Claims)
 	if owner, _ := agent.AgentProfile["ownerParty"].(string); owner != subj.Party {
-		perms, horizon, err := s.Roles.AgentLimit(ctx, subj.TenantSlug, subj.Party, agent.PartyRef)
+		perms, horizon, readAt, err := s.Roles.AgentLimit(ctx, subj.TenantSlug, subj.Party, agent.PartyRef)
 		if err != nil {
 			return nil, err
 		}
+		authAt = min(authAt, readAt) // stale as soon as either authority it combines is
 		if len(perms) == 0 {
 			return nil, oerr(403, "access_denied", "the agent may act only for its accountable owner or within an active DOM-AUTH delegation")
 		}
@@ -815,7 +823,7 @@ func (s *Server) grantExchange(r *http.Request) (map[string]any, error) {
 	}
 	out, err := s.issue(tokenSpec{tenant: subj.TenantSlug, identity: subj.Subject, party: subj.Party, clientID: c.ID,
 		acr: subj.Acr, amr: []string{"delegated"}, roles: subj.Roles, delegated: subj.Delegated, limit: limit, scope: scope,
-		aud: APIAudience, jkt: jkt, act: act, lifetime: s.lifetime(ctx, subj.TenantSlug), notAfter: notAfter})
+		aud: APIAudience, jkt: jkt, act: act, authAt: authAt, lifetime: s.lifetime(ctx, subj.TenantSlug), notAfter: notAfter})
 	if err != nil {
 		return nil, err
 	}
@@ -833,7 +841,9 @@ func (s *Server) verifyOwn(ctx context.Context, token, aud string) (authn.Princi
 	if err != nil {
 		return p, err
 	}
-	if s.revoked(ctx, p.Claims) {
+	// Actor tokens confer no API authority; the exchange recomputes the agent's authority from current facts, so
+	// party cut-offs do not apply to them (CIC-002-003 §8).
+	if s.revoked(ctx, p.Claims, aud != TokenExchangeAudience) {
 		return p, errors.New("token revoked")
 	}
 	return p, nil
@@ -841,17 +851,20 @@ func (s *Server) verifyOwn(ctx context.Context, token, aud string) (authn.Princi
 
 // revoked reports whether a token is revoked by jti or subject, or stale because the authority of its party or of a
 // party in its act chain narrowed after it was issued (ADR 0009).
-func (s *Server) revoked(ctx context.Context, claims map[string]any) bool {
+func (s *Server) revoked(ctx context.Context, claims map[string]any, partyCutoffs bool) bool {
 	j, _ := claims["jti"].(string)
 	sub, _ := claims["sub"].(string)
 	party, _ := claims["ucos_party"].(string)
 	act, _ := claims["act"].(map[string]any)
 	parties := append([]string{party}, authn.Principal{Act: act}.ActorParties()...)
+	if !partyCutoffs {
+		parties = []string{}
+	}
 	var n int
 	_ = s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM ucos_identity.revocations
 		WHERE (kind IN ('jti','sub') AND (key = $1 OR key = $2))
-		   OR (kind = 'party' AND key = ANY($3) AND floor(extract(epoch FROM revoked_at))::bigint >= $4)`,
-		j, sub, parties, int64(intNum(claims["iat"], 0))).Scan(&n)
+		   OR (kind = 'party' AND key = ANY($3) AND floor(extract(epoch FROM revoked_at) * 1000)::bigint + 1 > $4)`,
+		j, sub, parties, authn.AuthAtMillis(claims)).Scan(&n)
 	return n > 0
 }
 
@@ -883,7 +896,7 @@ func (s *Server) Introspect(w http.ResponseWriter, r *http.Request) {
 	}
 	sub, _ := claims["sub"].(string)
 	tenant, _ := claims["ucos_tenant"].(string)
-	if !ok || int64(intNum(claims["exp"], 0)) < time.Now().Unix() || s.revoked(r.Context(), claims) {
+	if !ok || int64(intNum(claims["exp"], 0)) < time.Now().Unix() || s.revoked(r.Context(), claims, claims["aud"] != TokenExchangeAudience) {
 		_ = kit.JSON(w, 200, inactive)
 		return
 	}
@@ -918,9 +931,9 @@ func (s *Server) Revoke(w http.ResponseWriter, r *http.Request) {
 }
 
 // Revocations is the feed resource-server validators poll (CR-IDN-02, CR-AUTH-03): revoked jti/subject keys of the
-// last 24 h, and per-party cut-offs (unix seconds) at or before which tokens of that party are stale (ADR 0009).
+// last 24 h, and per-party cut-offs (unix ms): tokens of that party whose authority was read before are stale.
 func (s *Server) Revocations(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Pool.Query(r.Context(), `SELECT key, kind, floor(extract(epoch FROM revoked_at))::bigint
+	rows, err := s.DB.Pool.Query(r.Context(), `SELECT key, kind, floor(extract(epoch FROM revoked_at) * 1000)::bigint + 1
 		FROM ucos_identity.revocations WHERE revoked_at > now() - interval '24 hours'`)
 	if err != nil {
 		http.Error(w, "unavailable", 503)
@@ -940,7 +953,7 @@ func (s *Server) Revocations(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rows.Close()
-	_ = kit.JSON(w, 200, map[string]any{"revoked": keys, "notBefore": notBefore})
+	_ = kit.JSON(w, 200, map[string]any{"revoked": keys, "notBeforeMs": notBefore})
 }
 
 // ---------------------------------------------------------------- identity commands (PEP applied by caller)

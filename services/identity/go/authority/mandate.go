@@ -125,7 +125,7 @@ func (a *Authority) RecordMandate(ctx context.Context, tenant, actor string, req
 	if len(terms.Scope.Permissions) == 0 || terms.Holder == "" || terms.Grantor == terms.Holder {
 		return MandateView{}, kit.Errf(422, "E-API-VALIDATION", "a mandate names a distinct holder and at least one permission")
 	}
-	if !terms.ValidTo.After(time.Now()) {
+	if !terms.ValidTo.After(a.now()) {
 		return MandateView{}, kit.Errf(422, "E-API-VALIDATION", "validTo must be in the future")
 	}
 	if !partyExists(terms.Holder) {

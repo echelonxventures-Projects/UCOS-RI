@@ -24,6 +24,8 @@ to the corpus repository as an amendment.
 
 ## AR-0002: Executable precision for context resolution (CIC-011-001 §1.2, §3, §6)
 
+- **Status: adopted** in corpus 1.4.0 (AMD-0004, annex CIC-011-007, CIC-011-001 1.2.0).
+
 - Raised: 2026-10-05, slice S1 (context runtime)
 - Problem: CR-011-001-01 requires byte-identical Resolutions across implementations in any language.
   CIC-011-001 leaves several details open that change the bytes. `contracts/context-runtime/semantics.md`
@@ -45,6 +47,9 @@ to the corpus repository as an amendment.
   publish the golden vectors (`conformance/context-resolution/`) as the CR-011-001-01 reference.
 
 ## AR-0003: Decidable FULL_TRANSITIVE compatibility and event-registry scope (CIC-006-001 §3, DOM-EVT)
+
+- **Status: adopted** in corpus 1.4.0 (AMD-0004, annex CIC-006-002, CIC-006-001 1.1.0 §3.1; per-event
+  `classification`, default `internal`).
 
 - Raised: 2026-10-05, slice S1 (event registry)
 - Problem: CIC-006-001 requires FULL_TRANSITIVE schema compatibility within a MAJOR (INV-EVT-2) but does not define
@@ -68,6 +73,11 @@ to the corpus repository as an amendment.
   `events` entries, so that VR-EVT-01 can check INV-EVT-4.
 
 ## AR-0004: Decidable DOM-AUTH semantics and governed authority definitions (DOM-AUTH 1.1.0)
+
+- **Status: adopted** in corpus 1.4.0 (AMD-0004: annex CIC-002-003, DOM-AUTH 1.2.0 with ApproveRoleAssignment,
+  RejectRoleAssignment and RecordMandateUsage, CIC-015-001 1.1.0 remote owner protocol). The "not yet covered" items
+  below were implemented in slice S2d (ADR 0010), except per-period delegation limits, which still need a consuming
+  context.
 
 - Raised: 2026-10-06, slice S2c
 - Problem: DOM-AUTH states the rules but leaves choices open that change outcomes. Two implementations could

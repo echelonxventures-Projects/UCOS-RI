@@ -22,7 +22,95 @@ import (
 const (
 	KindSod   = "sod-conflict-set"
 	KindLimit = "authority-limit"
+	KindRole  = "role"
 )
+
+// RoleInput is the DefineRole input (tenant role definitions, CIC-002-003 §12).
+type RoleInput struct {
+	Code         string         `json:"code"`
+	Label        map[string]any `json:"label"`
+	Permissions  []string       `json:"permissions"`
+	Includes     []string       `json:"includes"`
+	Sensitivity  string         `json:"sensitivity"`
+	Assignable   map[string]any `json:"assignable"`
+	ChangeSetRef string         `json:"changeSetRef"`
+}
+
+// DefineRole drafts a tenant role definition (INV-AUTH-1) bound to the caller's draft ChangeSet. Because a role may
+// only include roles that already exist in the catalog, and a published role cannot be changed in place, the include
+// graph stays acyclic by construction.
+func (a *Authority) DefineRole(ctx context.Context, tenant, actor string, in RoleInput) (GovernedDefinition, error) {
+	if !codePattern.MatchString(in.Code) {
+		return GovernedDefinition{}, kit.Errf(422, "E-API-VALIDATION", "code must match %s", codePattern)
+	}
+	catalog, err := a.Roles.Permissions(ctx, tenant)
+	if err != nil {
+		return GovernedDefinition{}, err
+	}
+	if _, taken := catalog[in.Code]; taken {
+		return GovernedDefinition{}, kit.Errf(409, "E-AUTH-ALREADY-DEFINED", "role %s already exists in the catalog", in.Code)
+	}
+	known := knownPermissions(catalog)
+	perms := dedupe(in.Permissions)
+	for _, p := range perms {
+		if !known[p] {
+			return GovernedDefinition{}, kit.Errf(422, "E-AUTH-PERMISSION-UNKNOWN", "%s is not a registered permission (INV-AUTH-1)", p)
+		}
+	}
+	includes := []string{}
+	for _, r := range in.Includes {
+		r = RoleCode(r)
+		if r == in.Code {
+			return GovernedDefinition{}, kit.Errf(422, "E-AUTH-ROLE-CYCLE", "a role cannot include itself (INV-AUTH-1)")
+		}
+		if _, ok := catalog[r]; !ok {
+			return GovernedDefinition{}, kit.Errf(422, "E-AUTH-ROLE-UNKNOWN", "included role %s is not defined", r)
+		}
+		includes = append(includes, r)
+	}
+	if len(perms) == 0 && len(includes) == 0 {
+		return GovernedDefinition{}, kit.Errf(422, "E-API-VALIDATION", "a role grants at least one permission or includes a role")
+	}
+	if in.Sensitivity == "" {
+		in.Sensitivity = "standard"
+	}
+	if in.Sensitivity != "standard" && in.Sensitivity != "privileged" {
+		return GovernedDefinition{}, kit.Errf(422, "E-API-VALIDATION", "sensitivity must be standard or privileged")
+	}
+	assignable := map[string]any{}
+	for _, k := range []string{"byRoles", "approverRoles"} {
+		var rs []string
+		for _, r := range strs(in.Assignable[k]) {
+			r = RoleCode(r)
+			if _, ok := catalog[r]; !ok && r != in.Code {
+				return GovernedDefinition{}, kit.Errf(422, "E-AUTH-ROLE-UNKNOWN", "assignable.%s names undefined role %s", k, r)
+			}
+			rs = append(rs, r)
+		}
+		if len(rs) > 0 {
+			assignable[k] = rs
+		}
+	}
+	if b, ok := in.Assignable["requiresApproval"].(bool); ok {
+		assignable["requiresApproval"] = b
+	}
+	if md, _ := in.Assignable["maxDuration"].(string); md != "" {
+		if _, ok := isoDuration(md); !ok {
+			return GovernedDefinition{}, kit.Errf(422, "E-API-VALIDATION", "assignable.maxDuration must be an ISO 8601 duration")
+		}
+		assignable["maxDuration"] = md
+	}
+	urn := "urn:ucos:" + tenant + ":role:" + in.Code
+	body := map[string]any{"urn": urn, "code": in.Code, "permissions": perms, "includes": includes,
+		"sensitivity": in.Sensitivity, "assignable": assignable}
+	if in.Label != nil {
+		body["label"] = in.Label
+	}
+	raw, _ := json.Marshal(body)
+	var norm map[string]any
+	_ = json.Unmarshal(raw, &norm)
+	return a.draft(ctx, tenant, actor, KindRole, urn, norm, in.ChangeSetRef)
+}
 
 // GovernedDefinition is a definition as exchanged with governance.
 type GovernedDefinition struct {
@@ -193,6 +281,10 @@ func (a *Authority) draft(ctx context.Context, tenant, actor, kind, urn string, 
 		var args []any
 		raw, _ := json.Marshal(body)
 		switch kind {
+		case KindRole:
+			q = `INSERT INTO ucos_party.role_definitions (tenant_id, urn, code, body, state, digest, change_set_ref, revision, created_by, created_at)
+				VALUES (current_setting('ucos.tenant_id')::uuid, $1, $2, $3, 'draft', $4, $5, 1, $6, $7) ON CONFLICT DO NOTHING`
+			args = []any{urn, body["code"], raw, dg, csURN, actor, now}
 		case KindSod:
 			q = `INSERT INTO ucos_party.sod_sets (tenant_id, urn, body, state, digest, change_set_ref, revision, created_by, created_at)
 				VALUES (current_setting('ucos.tenant_id')::uuid, $1, $2, 'draft', $3, $4, 1, $5, $6) ON CONFLICT DO NOTHING`
@@ -221,10 +313,24 @@ func (a *Authority) draft(ctx context.Context, tenant, actor, kind, urn string, 
 }
 
 func kindOf(urn string) string {
-	if strings.Contains(urn, ":sod:") {
+	switch {
+	case strings.Contains(urn, ":sod:"):
 		return KindSod
+	case strings.Contains(urn, ":role:"):
+		return KindRole
 	}
 	return KindLimit
+}
+
+// table returns the table and key column of a governed kind.
+func table(kind string) (string, string) {
+	switch kind {
+	case KindSod:
+		return "sod_sets", "urn"
+	case KindRole:
+		return "role_definitions", "urn"
+	}
+	return "authority_limits", "id"
 }
 
 func facts(kind string) map[string]any {
@@ -232,12 +338,13 @@ func facts(kind string) map[string]any {
 }
 
 const sodCols = `urn, body, state, digest, coalesce(change_set_ref, ''), revision, published_at, existing_violations`
+const roleCols = `urn, body, state, digest, coalesce(change_set_ref, ''), revision, published_at, NULL::jsonb`
 const limitCols = `id, holder, action, measure, limit_value, scope, state, digest, coalesce(change_set_ref, ''), revision, published_at`
 
 func scanGoverned(kind string, row pgx.Row) (GovernedDefinition, error) {
 	d := GovernedDefinition{Kind: kind, Version: "1", Facts: facts(kind)}
 	switch kind {
-	case KindSod:
+	case KindSod, KindRole:
 		var body, viol []byte
 		if err := row.Scan(&d.URN, &body, &d.State, &d.Digest, &d.ChangeSetRef, &d.Revision, &d.PublishedAt, &viol); err != nil {
 			return d, err
@@ -270,9 +377,12 @@ func scanGoverned(kind string, row pgx.Row) (GovernedDefinition, error) {
 func (a *Authority) loadGoverned(ctx context.Context, tx pgx.Tx, urn string) (GovernedDefinition, error) {
 	kind := kindOf(urn)
 	var row pgx.Row
-	if kind == KindSod {
+	switch kind {
+	case KindSod:
 		row = tx.QueryRow(ctx, `SELECT `+sodCols+` FROM ucos_party.sod_sets WHERE tenant_id = current_setting('ucos.tenant_id')::uuid AND urn = $1`, urn)
-	} else {
+	case KindRole:
+		row = tx.QueryRow(ctx, `SELECT `+roleCols+` FROM ucos_party.role_definitions WHERE tenant_id = current_setting('ucos.tenant_id')::uuid AND urn = $1`, urn)
+	default:
 		row = tx.QueryRow(ctx, `SELECT `+limitCols+` FROM ucos_party.authority_limits WHERE tenant_id = current_setting('ucos.tenant_id')::uuid AND id = $1`, urn)
 	}
 	d, err := scanGoverned(kind, row)
@@ -295,6 +405,9 @@ func (a *Authority) GetGoverned(ctx context.Context, tenant, urn string) (Govern
 
 // ListGoverned lists governed definitions, optionally filtered by states (owner protocol List).
 func (a *Authority) ListGoverned(ctx context.Context, tenant string, states []string) ([]GovernedDefinition, error) {
+	if states == nil {
+		states = []string{} // pgx sends a nil slice as NULL; an empty filter means every state
+	}
 	out := []GovernedDefinition{}
 	err := a.DB.InTenantTx(ctx, tenant, func(tx pgx.Tx) error {
 		for _, q := range []struct{ kind, sql string }{
@@ -302,6 +415,8 @@ func (a *Authority) ListGoverned(ctx context.Context, tenant string, states []st
 				AND (cardinality($1::text[]) = 0 OR state = ANY($1)) ORDER BY urn`},
 			{KindLimit, `SELECT ` + limitCols + ` FROM ucos_party.authority_limits WHERE tenant_id = current_setting('ucos.tenant_id')::uuid
 				AND (cardinality($1::text[]) = 0 OR state = ANY($1)) ORDER BY id`},
+			{KindRole, `SELECT ` + roleCols + ` FROM ucos_party.role_definitions WHERE tenant_id = current_setting('ucos.tenant_id')::uuid
+				AND (cardinality($1::text[]) = 0 OR state = ANY($1)) ORDER BY urn`},
 		} {
 			rows, err := tx.Query(ctx, q.sql, states)
 			if err != nil {
@@ -328,6 +443,23 @@ func (a *Authority) ValidateGoverned(ctx context.Context, tenant, urn string) er
 	if err != nil {
 		return err
 	}
+	if d.Kind == KindRole {
+		known := knownPermissions(catalog)
+		for _, p := range strs(d.Body["permissions"]) {
+			if !known[p] {
+				return kit.Errf(422, "E-AUTH-PERMISSION-UNKNOWN", "%s: %s is not a registered permission", urn, p)
+			}
+		}
+		for _, r := range strs(d.Body["includes"]) {
+			if catalog[r] == nil {
+				return kit.Errf(422, "E-AUTH-ROLE-UNKNOWN", "%s: included role %s is no longer defined", urn, r)
+			}
+		}
+		if _, taken := catalog[d.Name]; taken && d.State == "draft" {
+			return kit.Errf(409, "E-AUTH-ALREADY-DEFINED", "role %s already exists in the catalog", d.Name)
+		}
+		return nil
+	}
 	if d.Kind == KindSod {
 		known := knownPermissions(catalog)
 		var s SodSet
@@ -349,6 +481,20 @@ func (a *Authority) ValidateGoverned(ctx context.Context, tenant, urn string) er
 // PublishGoverned publishes a draft bound to changeSetRef. Only governance calls it, after its Gate allowed the
 // publication (owner protocol). Publishing a SoD set computes the existing-violations remediation report.
 func (a *Authority) PublishGoverned(ctx context.Context, tenant, urn, changeSetRef, corr string) error {
+	err := a.publishGoverned(ctx, tenant, urn, changeSetRef, corr)
+	if err == nil && kindOf(urn) == KindRole {
+		a.rolesChanged(tenant)
+	}
+	return err
+}
+
+func (a *Authority) rolesChanged(tenant string) {
+	if a.OnRolesChanged != nil {
+		a.OnRolesChanged(tenant)
+	}
+}
+
+func (a *Authority) publishGoverned(ctx context.Context, tenant, urn, changeSetRef, corr string) error {
 	return a.DB.InTenantTx(ctx, tenant, func(tx pgx.Tx) error {
 		d, err := a.loadGoverned(ctx, tx, urn)
 		if err != nil {
@@ -359,6 +505,15 @@ func (a *Authority) PublishGoverned(ctx context.Context, tenant, urn, changeSetR
 		}
 		if changeSetULID(d.ChangeSetRef) != changeSetULID(changeSetRef) {
 			return kit.Errf(409, "E-GOV-NOT-IN-CHANGESET", "%s was drafted for %s, not %s", urn, d.ChangeSetRef, changeSetRef)
+		}
+		if d.Kind == KindRole {
+			if _, err := tx.Exec(ctx, `UPDATE ucos_party.role_definitions SET state = 'published', published_at = now(), revision = revision + 1
+				WHERE tenant_id = current_setting('ucos.tenant_id')::uuid AND urn = $1`, urn); err != nil {
+				return err
+			}
+			return kit.Append(ctx, tx, a.Source, kit.Event{Schema: Schema, Type: "ucos.party.role.defined.v1",
+				AggregateID: urn, Subject: urn, Principal: "urn:ucos:platform:party:svc-metadata-service", Tenant: tenant,
+				CorrelationID: corr, Payload: map[string]any{"urn": urn, "permissions": d.Body["permissions"]}})
 		}
 		if d.Kind == KindSod {
 			var s SodSet
@@ -416,25 +571,27 @@ func (a *Authority) PublishGoverned(ctx context.Context, tenant, urn, changeSetR
 
 // CompensateGoverned reverts a publication (apply-saga compensation).
 func (a *Authority) CompensateGoverned(ctx context.Context, tenant, urn string) error {
-	return a.DB.InTenantTx(ctx, tenant, func(tx pgx.Tx) error {
-		table, key := "sod_sets", "urn"
-		if kindOf(urn) == KindLimit {
-			table, key = "authority_limits", "id"
-		}
-		_, err := tx.Exec(ctx, `UPDATE ucos_party.`+table+` SET state = 'draft', published_at = NULL, revision = revision + 1
+	err := a.DB.InTenantTx(ctx, tenant, func(tx pgx.Tx) error {
+		tbl, key := table(kindOf(urn))
+		_, err := tx.Exec(ctx, `UPDATE ucos_party.`+tbl+` SET state = 'draft', published_at = NULL, revision = revision + 1
 			WHERE tenant_id = current_setting('ucos.tenant_id')::uuid AND `+key+` = $1`, urn)
 		return err
 	})
+	if err == nil && kindOf(urn) == KindRole {
+		a.rolesChanged(tenant)
+	}
+	return err
 }
 
 // RemoveGoverned deletes a definition (uninstall).
 func (a *Authority) RemoveGoverned(ctx context.Context, tenant, urn string) error {
-	return a.DB.InTenantTx(ctx, tenant, func(tx pgx.Tx) error {
-		table, key := "sod_sets", "urn"
-		if kindOf(urn) == KindLimit {
-			table, key = "authority_limits", "id"
-		}
-		_, err := tx.Exec(ctx, `DELETE FROM ucos_party.`+table+` WHERE tenant_id = current_setting('ucos.tenant_id')::uuid AND `+key+` = $1`, urn)
+	err := a.DB.InTenantTx(ctx, tenant, func(tx pgx.Tx) error {
+		tbl, key := table(kindOf(urn))
+		_, err := tx.Exec(ctx, `DELETE FROM ucos_party.`+tbl+` WHERE tenant_id = current_setting('ucos.tenant_id')::uuid AND `+key+` = $1`, urn)
 		return err
 	})
+	if err == nil && kindOf(urn) == KindRole {
+		a.rolesChanged(tenant)
+	}
+	return err
 }

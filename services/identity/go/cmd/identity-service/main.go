@@ -93,6 +93,7 @@ func run(log *slog.Logger) error {
 	selfActor := &authn.Validator{Issuer: issuer, JWKSURL: self.JWKSURL, Audience: oauth.TokenExchangeAudience}
 	go self.PollRevocations(ctx, "http://127.0.0.1"+env("UCOS_HTTP_ADDR", ":8080")+"/oauth2/revocations", 5*time.Second)
 
+	clock := &adjustableClock{enabled: env("UCOS_CLOCK", "") == "adjustable"}
 	pty := &party.Party{DB: db, Ont: meta, KEK: kek, Source: src}
 	auth := &authority.Authority{DB: db, Roles: meta, Policies: meta, Gov: meta, Evidence: meta, Source: src,
 		CEL: func(expr string, vars map[string]any) (bool, error) {
@@ -100,6 +101,8 @@ func run(log *slog.Logger) error {
 			b, _ := out.(bool)
 			return b, err
 		},
+		Now:            clock.Now,
+		OnRolesChanged: meta.InvalidateRoles,
 		OnNarrowed: func(parties []string, cutoff int64) { // this service's own PEP sees narrowing at once
 			for _, p := range parties {
 				self.RevokeBefore(p, cutoff)
@@ -151,10 +154,18 @@ func run(log *slog.Logger) error {
 		w.WriteHeader(204)
 	})
 
+	idem := &idempotency{db: db, kek: kek, guard: guard, log: log}
 	api := func(pattern string, h handlerFunc) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			corr := kit.ULID()
 			w.Header().Set("UCOS-Correlation-Id", corr)
+			// Commands carrying an Idempotency-Key are replayed (CIC-005-001); queries sent as POST and the
+			// governance owner protocol (platform principal, not a tenant command) are not.
+			if key := r.Header.Get("Idempotency-Key"); key != "" && r.Method == http.MethodPost &&
+				!strings.HasSuffix(r.URL.Path, ":check-signing") && !strings.HasPrefix(r.URL.Path, "/v1/governed-definitions") {
+				idem.serve(w, r, corr, key, h)
+				return
+			}
 			if err := h(w, r, corr); err != nil {
 				kit.WriteProblem(w, r, corr, err, log)
 			}
@@ -284,6 +295,19 @@ func run(log *slog.Logger) error {
 	})
 
 	admin := http.NewServeMux()
+	if clock.enabled {
+		// ucos-lite only: lets suites exercise review intervals (RUL-AUTH-3) without waiting months.
+		admin.HandleFunc("POST /internal/clock", func(w http.ResponseWriter, r *http.Request) {
+			var in struct {
+				AdvanceSeconds int64 `json:"advanceSeconds"`
+			}
+			if err := kit.ReadJSON(r, &in); err != nil || in.AdvanceSeconds < 0 {
+				kit.WriteProblem(w, r, kit.ULID(), kit.Errf(400, "E-API-VALIDATION", "advanceSeconds must be >= 0"), log)
+				return
+			}
+			_ = kit.JSON(w, 200, map[string]any{"now": clock.advance(time.Duration(in.AdvanceSeconds) * time.Second)})
+		})
+	}
 	if env("UCOS_TEST_TOKENS", "") == "enabled" {
 		admin.HandleFunc("POST /internal/test-tokens", func(w http.ResponseWriter, r *http.Request) {
 			var in oauth.TestTokenRequest
@@ -381,4 +405,24 @@ func nonNil(x []string) []string {
 		return []string{}
 	}
 	return x
+}
+
+// adjustableClock is the authority clock: the wall clock plus a forward-only offset that only ucos-lite can move.
+type adjustableClock struct {
+	enabled bool
+	mu      sync.Mutex
+	offset  time.Duration
+}
+
+func (c *adjustableClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().Add(c.offset)
+}
+
+func (c *adjustableClock) advance(d time.Duration) time.Time {
+	c.mu.Lock()
+	c.offset += d
+	c.mu.Unlock()
+	return c.Now()
 }

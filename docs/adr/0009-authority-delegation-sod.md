@@ -43,7 +43,7 @@
 
 ## Consequences
 - 14 S2c black-box tests; the full suite runs on real tokens for both event-platform-service implementations.
-- Not covered yet:
+- Not covered yet (all but per-period limits were implemented in S2d; see ADR 0010):
   - Access reviews and RUL-AUTH-3 are slice S2d.
   - DefineRole and the access-review routes answer `501` behind the PEP.
   - Mandate consumption needs a consuming context (S4).

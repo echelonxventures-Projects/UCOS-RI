@@ -50,15 +50,16 @@ test("party cut-offs revoke older tokens of the subject or an actor", async () =
   const v = new Validator("http://idp", "ucos");
   v.jwksUrl = `http://127.0.0.1:${(srv.address() as any).port}`;
   const now = Math.floor(Date.now() / 1000);
+  const ms = Date.now();
   const tok = (claims: object) => jws(privateKey, { alg: "ES256", typ: "at+jwt", kid: "k1" },
-    { iss: "http://idp", aud: "ucos", sub: "s", exp: now + 300, jti: Math.random().toString(), ...claims });
-  v.revokeBefore("urn:ucos:t:party:a", now);
-  v.revokeBefore("urn:ucos:t:party:a", now - 100);
+    { iss: "http://idp", aud: "ucos", sub: "s", iat: now, exp: now + 300, jti: Math.random().toString(), ...claims });
+  v.revokeBefore("urn:ucos:t:party:a", ms);
+  v.revokeBefore("urn:ucos:t:party:a", ms - 100000);
   try {
-    await assert.rejects(v.verifyToken(tok({ ucos_party: "urn:ucos:t:party:a", iat: now - 5 })), (e: AuthnError) => e.code === "E-IDN-TOKEN-REVOKED");
-    await assert.rejects(v.verifyToken(tok({ ucos_party: "urn:ucos:t:party:b", iat: now - 5, act: { sub: "g", ucos_party: "urn:ucos:t:party:a" } })),
+    await assert.rejects(v.verifyToken(tok({ ucos_party: "urn:ucos:t:party:a", ucos_auth_at: ms - 1 })), (e: AuthnError) => e.code === "E-IDN-TOKEN-REVOKED");
+    await assert.rejects(v.verifyToken(tok({ ucos_party: "urn:ucos:t:party:b", ucos_auth_at: ms - 5000, act: { sub: "g", ucos_party: "urn:ucos:t:party:a" } })),
       (e: AuthnError) => e.code === "E-IDN-TOKEN-REVOKED");
-    const fresh = await v.verifyToken(tok({ ucos_party: "urn:ucos:t:party:a", iat: now + 1, ucos_permission_limit: [] }));
+    const fresh = await v.verifyToken(tok({ ucos_party: "urn:ucos:t:party:a", ucos_auth_at: ms, ucos_permission_limit: [] }));
     assert.deepEqual(fresh.limit, []);
   } finally {
     srv.close();

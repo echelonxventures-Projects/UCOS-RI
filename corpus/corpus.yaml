@@ -1,5 +1,5 @@
 name: UCOS-COM Ω∞ Complete Implementation Corpus
-version: 1.3.0
+version: 1.4.0
 authority: UCOS Constitutional Authority
 note: 'Artifacts are discovered from corpora/; this manifest fixes the corpus set
   and dependency order. Coverage: python3 tools/validate.py --coverage'

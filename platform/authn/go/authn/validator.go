@@ -87,7 +87,7 @@ type Validator struct {
 	fetchedAt time.Time
 	seenJTI   map[string]time.Time // DPoP proof replay cache
 	revoked   map[string]bool      // revoked jti / subjects
-	notBefore map[string]int64     // party URN -> tokens issued at or before this second are stale (ADR 0009)
+	notBefore map[string]int64     // party URN -> tokens whose authority was read before this instant (ms) are stale
 }
 
 func (v *Validator) now() time.Time {
@@ -187,12 +187,12 @@ func (v *Validator) VerifyToken(ctx context.Context, token string) (Principal, e
 	sub, _ := c["sub"].(string)
 	party, _ := c["ucos_party"].(string)
 	act, _ := c["act"].(map[string]any)
-	iat := num(c["iat"])
+	authAt := AuthAtMillis(c)
 	v.mu.Lock()
 	revoked := v.revoked[jti] || v.revoked[sub]
 	for _, pt := range append([]string{party}, actorParties(act)...) {
-		if nb, ok := v.notBefore[pt]; ok && iat <= nb {
-			revoked = true // the party's authority narrowed after this token was issued (CR-AUTH-03)
+		if nb, ok := v.notBefore[pt]; ok && authAt < nb {
+			revoked = true // the party's authority narrowed after this token's authority was read (CR-AUTH-03)
 		}
 	}
 	v.mu.Unlock()
@@ -342,17 +342,25 @@ func (v *Validator) Revoke(keys ...string) {
 	}
 }
 
-// RevokeBefore marks every token whose ucos_party or act-chain party is party and whose iat is at or before
-// unixSeconds as stale (authority narrowed; ADR 0009). Later cut-offs win.
-func (v *Validator) RevokeBefore(party string, unixSeconds int64) {
+// RevokeBefore marks every token whose ucos_party or act-chain party is party and whose authority was read before
+// unixMillis as stale (authority narrowed; ADR 0009/0010). Later cut-offs win.
+func (v *Validator) RevokeBefore(party string, unixMillis int64) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.notBefore == nil {
 		v.notBefore = map[string]int64{}
 	}
-	if unixSeconds > v.notBefore[party] {
-		v.notBefore[party] = unixSeconds
+	if unixMillis > v.notBefore[party] {
+		v.notBefore[party] = unixMillis
 	}
+}
+
+// AuthAtMillis is when the token's authority was read: ucos_auth_at (ms), else iat in ms.
+func AuthAtMillis(claims map[string]any) int64 {
+	if a := num(claims["ucos_auth_at"]); a > 0 {
+		return a
+	}
+	return num(claims["iat"]) * 1000
 }
 
 // PollRevocations fetches {issuer}/oauth2/revocations every interval and applies them (INV-IDN-4 / CR-IDN-02,
@@ -363,7 +371,7 @@ func (v *Validator) PollRevocations(ctx context.Context, url string, interval ti
 		if resp, err := v.client().Do(req); err == nil {
 			var out struct {
 				Revoked   []string         `json:"revoked"`
-				NotBefore map[string]int64 `json:"notBefore"`
+				NotBefore map[string]int64 `json:"notBeforeMs"`
 			}
 			if json.NewDecoder(resp.Body).Decode(&out) == nil {
 				v.Revoke(out.Revoked...)

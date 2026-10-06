@@ -1,7 +1,7 @@
 ---
 id: CIC-006-001
 title: Event Constitution and Event Standards
-version: 1.0.0
+version: 1.1.0
 status: normative
 authority: Chief Platform Architect
 corpus: CORPUS-006
@@ -61,6 +61,15 @@ version used for cache invalidation (CIC-011-003 §2).
    mode FULL_TRANSITIVE within a MAJOR.
 4. Event names are past tense; events never describe intent ("PriceRequested" is a command, not an event).
 
+### 3.1 Executable compatibility semantics (AMD-0004)
+
+FULL_TRANSITIVE compatibility is decided as defined by annex CIC-006-002 (normative): event schemas follow a
+restricted JSON Schema profile, `accepts(reader, writer)` is a structural relation that is exact for that profile,
+and FULL means accepting in both directions against every earlier version within the MAJOR. Consequence: in that
+profile, adding a typed property is a breaking change, so RUL-EVT-1 (a new `.vN+1` type) applies.
+
+Events in DOM `events` entries may declare `classification` (a DataClassification). An event without one is
+`internal` (INV-EVT-4).
 ## 4. Delivery semantics
 
 - Producer: transactional outbox (CIC-003-001 §4) → relay publishes in outbox order per partition key.

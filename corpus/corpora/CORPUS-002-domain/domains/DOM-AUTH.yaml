@@ -1,16 +1,17 @@
 header:
   id: DOM-AUTH
   title: Authority Domain Specification
-  version: 1.1.0
+  version: 1.2.0
   status: normative
   authority: Chief Governance Architect
   corpus: CORPUS-002
-  dependencies: [CIC-009-001, CIC-014-001, CIC-015-001, CIC-002-001]
+  dependencies: [CIC-009-001, CIC-014-001, CIC-015-001, CIC-002-001, CIC-002-003]
   traces: [PRIN-005, PRIN-010, PRIN-011, DOM-IDN, DOM-PTY]
-  certification: [CR-AUTH-01, CR-AUTH-02, CR-AUTH-03]
+  certification: [CR-AUTH-01, CR-AUTH-02, CR-AUTH-03, CR-AUTH-04, CR-AUTH-05]
   validation: [VR-AUTH-01, VR-AUTH-02, VR-AUTH-03, VR-AUTH-04]
 
 purpose: >
+  Decisions follow the executable semantics of CIC-002-003 (AMD-0004).
   Own who may act for whom: role assignments, delegations of authority (including to AI agents),
   signing authority, approval limits, and segregation-of-duties conflict sets — the facts the PDP
   consumes when deciding authorization, approvals, and acceptance.
@@ -53,7 +54,7 @@ capabilities:
   - {id: AUTH-C6, name: Access reviews, description: "Periodic certification of role assignments by managers."}
 
 services:
-  - {name: AuthorityCommandService, kind: application, operations: [DefineRole, AssignRole, RevokeRoleAssignment, GrantDelegation, RevokeDelegation, SetAuthorityLimit, DefineSodConflictSet, RecordMandate, RevokeMandate, StartAccessReview, CertifyAssignment]}
+  - {name: AuthorityCommandService, kind: application, operations: [DefineRole, AssignRole, ApproveRoleAssignment, RejectRoleAssignment, RevokeRoleAssignment, GrantDelegation, RevokeDelegation, SetAuthorityLimit, DefineSodConflictSet, RecordMandate, RecordMandateUsage, RevokeMandate, StartAccessReview, CertifyAssignment]}
   - {name: AuthorityFactsProvider, kind: domain-service, contract: "facts(principalParty, ctx) -> {roles[], limits{}, delegationsFrom[], mandates[], sodConflicts[]}; compiled into PDP bundle data per tenant (version-keyed)"}
   - {name: AuthorityQueryService, kind: application, operations: [GetEffectiveAuthority, FindRoleAssignments, CheckSigningAuthority, GetMandate, GetAccessReview]}
 
@@ -66,7 +67,8 @@ aggregates:
       - {name: label, type: LocalizedText}
       - {name: permissions, type: "string[]"}
       - {name: includes, type: "RoleUrn[]"}
-      - {name: assignable, type: "{byRoles[], requiresApproval: bool, maxDuration?: duration}"}
+      - {name: assignable, type: "{byRoles[], requiresApproval: bool, approverRoles?: RoleUrn[], maxDuration?: duration}"}
+      - {name: sensitivity, type: "standard|privileged (selects the authority.review-interval)"}
   - name: RoleAssignment
     identity: "urn:ucos:<tenant>:role-assignment:<ulid>"
     invariants:
@@ -79,6 +81,8 @@ aggregates:
       - {name: validFrom, type: Instant}
       - {name: validTo, type: "Instant?"}
       - {name: assignedBy, type: PartyUrn}
+      - {name: status, type: "pending-approval|active|rejected|revoked (suspension and end of validity are derived; CIC-002-003 §9-10)"}
+      - {name: approvedBy, type: "PartyUrn?"}
       - {name: lastCertifiedAt, type: "Instant?"}
   - name: Delegation
     identity: "urn:ucos:<tenant>:delegation:<ulid>"
@@ -128,13 +132,16 @@ valueObjects:
 
 commands:
   - {name: DefineRole, input: "RoleDefinition + changeSetRef", emits: [RoleDefined]}
-  - {name: AssignRole, input: "{party, role, scope, validFrom, validTo?}", emits: [RoleAssigned], preconditions: ["INV-AUTH-2,3", "approval if role.assignable.requiresApproval"]}
+  - {name: AssignRole, input: "{party, role, scope, validFrom, validTo?}", emits: [RoleAssigned, RoleAssignmentRequested], preconditions: ["INV-AUTH-2,3", "approval if role.assignable.requiresApproval (then RoleAssignmentRequested, state pending-approval)"]}
+  - {name: ApproveRoleAssignment, input: "{id, comment?}", emits: [RoleAssignmentApproved], preconditions: ["state pending-approval", "approver != assigner and != assignee, acr >= AAL2, holds assignable.approverRoles if set", "INV-AUTH-2 re-checked"]}
+  - {name: RejectRoleAssignment, input: "{id, reason}", emits: [RoleAssignmentRejected], preconditions: ["state pending-approval"]}
   - {name: RevokeRoleAssignment, input: "{id, reason}", emits: [RoleAssignmentRevoked]}
   - {name: GrantDelegation, input: "Delegation", emits: [DelegationGranted], preconditions: ["INV-AUTH-4,5"]}
   - {name: RevokeDelegation, input: "{id, reason}", emits: [DelegationRevoked], note: "Cascades to child delegations"}
   - {name: SetAuthorityLimit, input: "AuthorityLimit + changeSetRef", emits: [AuthorityLimitSet]}
   - {name: DefineSodConflictSet, input: "SodConflictSet + changeSetRef", emits: [SodConflictSetDefined], note: "Reports existing violating assignments for remediation"}
   - {name: RecordMandate, input: "{grantor, holder, purpose, scope, limits, validTo, evidenceRef}", emits: [MandateRecorded]}
+  - {name: RecordMandateUsage, input: "{id, amount: Money, reference}", emits: [MandateUsageRecorded, MandateExhausted], preconditions: ["mandate active", "within perTransaction and remaining total", "idempotent per reference"]}
   - {name: RevokeMandate, input: "{id, reason}", emits: [MandateRevoked]}
   - {name: StartAccessReview, input: "{scope, reviewers, dueAt}", emits: [AccessReviewStarted]}
   - {name: CertifyAssignment, input: "{reviewId, assignmentRef, decision}", emits: [AssignmentCertified, RoleAssignmentRevoked]}
@@ -150,6 +157,8 @@ apis:
   - {style: REST, path: "/v1/authority/roles", methods: {POST: DefineRole}}
   - {style: REST, path: "/v1/authority/role-assignments", methods: {POST: AssignRole, GET: FindRoleAssignments}}
   - {style: REST, path: "/v1/authority/role-assignments/{id}:revoke", methods: {POST: RevokeRoleAssignment}}
+  - {style: REST, path: "/v1/authority/role-assignments/{id}:approve", methods: {POST: ApproveRoleAssignment}}
+  - {style: REST, path: "/v1/authority/role-assignments/{id}:reject", methods: {POST: RejectRoleAssignment}}
   - {style: REST, path: "/v1/authority/delegations", methods: {POST: GrantDelegation}}
   - {style: REST, path: "/v1/authority/delegations/{id}:revoke", methods: {POST: RevokeDelegation}}
   - {style: REST, path: "/v1/authority/limits", methods: {POST: SetAuthorityLimit}}
@@ -157,6 +166,7 @@ apis:
   - {style: REST, path: "/v1/authority/mandates", methods: {POST: RecordMandate}}
   - {style: REST, path: "/v1/authority/mandates/{id}", methods: {GET: GetMandate}}
   - {style: REST, path: "/v1/authority/mandates/{id}:revoke", methods: {POST: RevokeMandate}}
+  - {style: REST, path: "/v1/authority/mandates/{id}/usages", methods: {POST: RecordMandateUsage}}
   - {style: REST, path: "/v1/authority/access-reviews", methods: {POST: StartAccessReview}}
   - {style: REST, path: "/v1/authority/access-reviews/{reviewId}", methods: {GET: GetAccessReview}}
   - {style: REST, path: "/v1/authority/access-reviews/{reviewId}/items:certify", methods: {POST: CertifyAssignment}}
@@ -167,22 +177,37 @@ events:
   - {type: ucos.party.role.defined.v1, payload: "{urn, permissions}"}
   - {type: ucos.party.role.assigned.v1, payload: "{id, party, role, scope, validFrom, validTo}", consumers: [policy bundle builder, identity]}
   - {type: ucos.party.role.assignment-revoked.v1, payload: "{id, reason}"}
+  - {type: ucos.party.role.assignment-requested.v1, payload: "{id, party, role, scope, validFrom, validTo, requestedBy}"}
+  - {type: ucos.party.role.assignment-approved.v1, payload: "{id, approvedBy}"}
+  - {type: ucos.party.role.assignment-rejected.v1, payload: "{id, reason}"}
   - {type: ucos.party.delegation.granted.v1, payload: "{id, delegator, delegate, permissions, validTo}"}
   - {type: ucos.party.delegation.revoked.v1, payload: "{id, cascaded[]}"}
   - {type: ucos.party.authority-limit.set.v1, payload: "{id, holder, action, measure, limit}"}
   - {type: ucos.party.sod.conflict-set-defined.v1, payload: "{urn, existingViolations}"}
   - {type: ucos.party.mandate.recorded.v1, payload: "{id, grantor, holder, purpose, validTo}"}
   - {type: ucos.party.mandate.revoked.v1, payload: "{id}"}
+  - {type: ucos.party.mandate.usage-recorded.v1, payload: "{id, reference, amount, used}"}
+  - {type: ucos.party.mandate.exhausted.v1, payload: "{id, used}"}
   - {type: ucos.party.access-review.started.v1, payload: "{reviewId, items}"}
   - {type: ucos.party.access-review.assignment-certified.v1, payload: "{reviewId, assignmentRef, decision}"}
 
 stateMachines:
+  - name: RoleAssignmentLifecycle
+    initial: pending-approval
+    states: [pending-approval, active, rejected, revoked]
+    terminal: [rejected, revoked]
+    transitions:
+      - {from: pending-approval, to: active, command: ApproveRoleAssignment}
+      - {from: pending-approval, to: rejected, command: RejectRoleAssignment}
+      - {from: active, to: revoked, command: RevokeRoleAssignment}
+      - {from: active, to: revoked, command: CertifyAssignment, note: "decision revoke"}
+    note: "AssignRole of a role without requiresApproval enters active directly. Suspension (RUL-AUTH-3) and end of validity are derived at evaluation (CIC-002-003 §10)."
   - name: MandateLifecycle
     initial: active
     states: [active, exhausted, expired, revoked]
     terminal: [exhausted, expired, revoked]
     transitions:
-      - {from: active, to: exhausted, trigger: "cumulative usage reaches total limit"}
+      - {from: active, to: exhausted, command: RecordMandateUsage, trigger: "cumulative usage reaches total limit"}
       - {from: active, to: expired, trigger: "validTo (timer)"}
       - {from: active, to: revoked, command: RevokeMandate}
 
@@ -236,6 +261,8 @@ certificationCriteria:
   - {id: CR-AUTH-01, rule: "SoD assignment-mode conflicts are rejected 100% in concurrent assignment tests.", level: L1}
   - {id: CR-AUTH-02, rule: "Delegated authority never exceeds delegator's current authority (property test over random grant/revoke sequences).", level: L1}
   - {id: CR-AUTH-03, rule: "Revocation of a role is reflected in PDP decisions within 10s p99.", level: L2}
+  - {id: CR-AUTH-04, rule: "An assignment not certified within authority.review-interval confers no authority until certified (RUL-AUTH-3), including through delegations and in newly issued tokens.", level: L1}
+  - {id: CR-AUTH-05, rule: "Mandate usage never exceeds perTransaction or total, including under concurrent RecordMandateUsage, and repeats of a reference are idempotent.", level: L1}
 validationRules:
   - {id: VR-AUTH-01, rule: "Every role referenced in ucos.std policies (CEL role names) is defined in the ucos.std role registry."}
   - {id: VR-AUTH-02, rule: "Every permission in role definitions matches a permission declared in some DOM spec security.permissions."}

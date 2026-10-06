@@ -1,7 +1,7 @@
 ---
 id: CIC-015-001
 title: Governance Constitution — ChangeSets, Approvals, Controls
-version: 1.0.0
+version: 1.1.0
 status: normative
 authority: Chief Governance Architect
 corpus: CORPUS-015
@@ -21,6 +21,19 @@ Rules, ProjectionMappings, named KG queries, PriceLists (per policy), Catalog de
 publications, Type Packs and Plugins (activation), tenant configuration, and corpus amendments.
 Instance data (orders, parties) is not governed by ChangeSets; it is governed by lifecycle
 transitions, policies, and controls (§5).
+
+**Owners.** Each governed kind has exactly one owning context, which stores drafts and published definitions and
+enforces their invariants. Governance (DOM-GOV) is the only publisher, whichever service hosts the owner. An owner
+hosted outside the governance service implements the *remote owner protocol* (AMD-0004):
+- list and get definitions, with the content digest that approvals bind to (INV-GOV-1) and the risk facts;
+- validate a draft at submit time;
+- publish a draft bound to the applying ChangeSet, idempotently;
+- compensate a publication;
+- remove a definition.
+
+Only governance may call the protocol, with a sender-constrained platform service credential. Governance checks its
+publication Gate before every publish (CR-015-001-01). Drafts are created through the owning context's own API, into
+a draft ChangeSet of their author. Examples: DOM-AUTH SoD conflict sets, authority limits and tenant role definitions.
 
 ## 2. ChangeSet (aggregate, DOM-GOV)
 

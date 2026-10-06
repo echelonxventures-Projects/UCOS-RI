@@ -5,7 +5,8 @@ slice: S2
 domains: [DOM-IDN, DOM-PTY, DOM-AUTH]
 traces: [CIC-014-001, CIC-009-001, CIC-017-001, RUL-IDN-1, RUL-IDN-2, RUL-IDN-3, INV-IDN-1, INV-IDN-3, INV-IDN-4,
          CR-IDN-03, CR-IDN-05, INV-PTY-1, INV-PTY-5, RUL-AUTH-1, RUL-AUTH-2, INV-AUTH-2, INV-AUTH-3, INV-AUTH-4,
-         INV-AUTH-5, INV-AUTH-6, DEC-AUTH-1, DEC-AUTH-2, CR-AUTH-01, CR-AUTH-02, CR-AUTH-03, CR-009-001-02]
+         INV-AUTH-5, INV-AUTH-6, DEC-AUTH-1, DEC-AUTH-2, CR-AUTH-01, CR-AUTH-02, CR-AUTH-03, CR-AUTH-04, CR-AUTH-05,
+         RUL-AUTH-3, INV-AUTH-1, CIC-002-003, CR-009-001-02]
 ports: {consumes: [EventBusPort, ClockPort], provides: [TokenService, PartyApi, AuthorityApi]}
 api: {openapi: contracts/identity/DOM-IDN.openapi.yaml, asyncapi: contracts/identity/DOM-IDN.asyncapi.yaml}
 runtime:

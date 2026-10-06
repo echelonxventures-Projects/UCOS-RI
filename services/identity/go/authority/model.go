@@ -66,6 +66,9 @@ type Assignment struct {
 	From       time.Time          `json:"validFrom"`
 	To         *time.Time         `json:"validTo,omitempty"`
 	AssignedBy string             `json:"assignedBy"`
+	// SuspendAt is when the assignment becomes suspended for want of certification (RUL-AUTH-3): its certification
+	// base plus the review interval of the role's sensitivity. Nil = never.
+	SuspendAt *time.Time `json:"suspendAt,omitempty"`
 }
 
 // Delegation is a DOM-AUTH Delegation.
@@ -206,10 +209,14 @@ func (e *Evaluator) Roles(party string, q Query, h *horizon) ([]Assignment, erro
 	}
 	var out []Assignment
 	for _, a := range all {
+		if a.SuspendAt != nil && !q.AsOf.Before(*a.SuspendAt) {
+			continue // suspended until certified (RUL-AUTH-3)
+		}
 		if activeAt(a.From, a.To, q.AsOf) && e.scopeOK(a.Scope, q) {
 			out = append(out, a)
 			if h != nil {
 				h.see(a.To)
+				h.see(a.SuspendAt)
 			}
 		}
 	}

@@ -1,21 +1,22 @@
 # DOM-AUTH executable semantics (S2c)
 
-Normative for every implementation of the authority context in this RI. It makes DOM-AUTH 1.1.0 decidable where the
-spec leaves room; each clarification is listed in `docs/amendment-requests.md` (AR-0004). Black-box suite:
-`conformance/s2c/test_authority.py`. Design: `docs/adr/0009-authority-delegation-sod.md`.
+Normative for every implementation of the authority context. It makes DOM-AUTH decidable where the spec leaves
+room. Raised as AR-0004 and adopted by the corpus as CIC-002-003 (AMD-0004, DOM-AUTH 1.2.0). Black-box suites:
+`conformance/s2c/test_authority.py`, `conformance/s2d/test_reviews.py`. Design: ADR 0009, ADR 0010.
 
 ## 1. Facts
 
 | Fact | Validity | Notes |
 |------|----------|-------|
-| RoleAssignment | half-open `[validFrom, validTo)`; `validTo` absent = open | Revocation sets `validTo` to the revocation instant (history kept). `validFrom` in the past is clamped to now. |
+| RoleAssignment | half-open `[validFrom, validTo)`; `validTo` absent = open; only `active` assignments count (§9), and not while suspended (§10) | Revocation sets `validTo` to the revocation instant (history kept). `validFrom` in the past is clamped to now. |
 | Delegation | `[validFrom, validTo)`, `validTo` required | Revoked delegations confer nothing. `parentDelegation` makes it a re-delegation. |
 | AuthorityLimit | published only | `holder` is a party URN or a role code. Measures: `amount` (Money), `discountPercent`, `marginPercent` (integer 0..100). |
 | SodConflictSet | published only | Members: `{role}` (role code) or `{action}` (a permission string). Mode `assignment` or `execution`. |
 | Mandate | `active` until `validTo`, then `expired` | Terms are the content of signed evidence (§7). |
 
 A role may be given as RoleUrn `urn:ucos:<ns>:role:<code>` or as its code; it is stored and compared as the code.
-Role permissions come from the tenant's role registry (DOM-META, contributed by packs).
+Role permissions come from the tenant's role catalog: the roles contributed by installed packs (DOM-META registry)
+plus the tenant's own published role definitions (§12), with `includes` flattened.
 
 ## 2. Scope matching
 
@@ -122,14 +123,75 @@ grantor, and that any terms repeated in the request equal the signed ones.
 ## 8. Tokens and propagation (CR-AUTH-03)
 
 - Tokens issued for a party carry `ucos_roles` (coarse roles) and `ucos_delegated` (coarse `∪ confers`), and
-  `exp ≤ horizon`.
+  `exp ≤ horizon`. The horizon also includes the instant each contributing assignment would become suspended (§10).
+- Every token carries `ucos_auth_at`: the instant, in milliseconds, at which the authority it carries was read
+  (taken from the authority store's clock *before* the facts are read). Tokens that carry no tenant authority
+  (test or service tokens) use their issue instant.
 - An agent acting for its accountable owner keeps the subject token's authority. An agent acting for any other party
   `P` needs an active delegation from `P` to the agent party. Its token then carries
   `ucos_permission_limit = ∪ confers(d)` over those delegations, intersected with any limit the subject token already
-  had.
+  had, and `ucos_auth_at` = the earlier of the subject's and the delegation read's.
 - Every PEP computes `(∪ catalog[ucos_roles] ∪ ucos_delegated) ∩ ucos_permission_limit` (`authn.Principal.Permissions`).
-- Narrowing changes (revoking a role assignment; revoking a delegation, including cascades) mark the affected parties
-  stale: the party itself, plus every delegate reachable from it through active re-delegation chains. The revocation
-  feed (`GET /oauth2/revocations`) publishes `notBefore[party] = cutoff`. A token is rejected when its `ucos_party`
-  or any act-chain `ucos_party` has `iat ≤ cutoff`. The cutoff is one second after the change, so tokens computed
-  from pre-commit state are covered; validators poll every 5 s.
+- Narrowing changes mark the affected parties stale: revoking or suspending-by-review a role assignment; revoking a
+  delegation, including cascades; rejecting nothing (a pending assignment never counted). The affected parties are the
+  party itself plus every delegate reachable from it through active re-delegation chains. The cut-off is taken **after
+  the change commits**, in milliseconds. The revocation feed (`GET /oauth2/revocations`) publishes
+  `notBeforeMs[party] = cutoff`.
+- A token is stale when its `ucos_party` or any act-chain `ucos_party` has `ucos_auth_at < cutoff` (`iat·1000` when
+  the claim is absent). A token whose authority was read after the change committed is never rejected.
+- Agent **actor** tokens (audience `urn:ucos:token-exchange`) confer no API authority and are not subject to party
+  cut-offs: the exchange recomputes the agent's authority from current facts.
+
+## 9. Assignment approval (`assignable.requiresApproval`)
+
+Role definitions may declare `assignable: {byRoles[], requiresApproval, approverRoles[], maxDuration}`.
+
+- AssignRole of a role with `requiresApproval` creates the assignment in state `pending-approval`. It confers nothing.
+  INV-AUTH-2 (SoD) and INV-AUTH-3 are checked at request time.
+- ApproveRoleAssignment moves it to `active`. The approver needs permission `authority.role.assign` and acr ≥ AAL2,
+  must differ from the assigner and from the assignee, and must hold one of `approverRoles` when that list is
+  non-empty. SoD is checked again at approval, under the same per-party lock as AssignRole.
+- RejectRoleAssignment moves it to `rejected` (terminal).
+- A pending assignment whose `validTo` passes stays pending but never becomes effective.
+
+`RoleAssignmentLifecycle`: `pending-approval → active | rejected`; `active → revoked`. Suspension (§10) and
+end-of-validity are derived, not stored.
+
+## 10. Access reviews and suspension (AUTH-C6, RUL-AUTH-3)
+
+- The **certification base** of an assignment is the latest of `lastCertifiedAt`, its approval instant, and
+  `validFrom`.
+- Policy `authority.review-interval` gives an interval per role sensitivity (`standard`, `privileged`; a role
+  without a sensitivity is `standard`).
+- An active assignment is **suspended** at `T` when `T ≥ base + interval`. A suspended assignment is excluded from
+  every evaluation (§3), so it also stops conferring through delegations, until it is certified.
+- StartAccessReview `{scope: {roles?[], parties?[], sensitivity?}, reviewers[], dueAt}` snapshots the matching
+  active assignments (suspended ones included) as items. It needs `authority.review.manage`, at least one reviewer,
+  and a `dueAt` in the future. Status `open`, or `overdue` once `dueAt` passes; `completed` when every item is
+  decided.
+- CertifyAssignment `{reviewId, assignmentRef, decision: keep|revoke}` is made by a listed reviewer, who holds
+  `authority.review.manage` and is not the assignee. Each item is decided once.
+  - `keep` sets `lastCertifiedAt = now`, which ends a suspension.
+  - `revoke` revokes the assignment (§8 propagation).
+
+## 11. Mandate usage (MandateLifecycle)
+
+RecordMandateUsage `{amount: Money, reference}` against an active mandate, with permission
+`authority.mandate.manage`:
+
+- It is idempotent per `(mandate, reference)`. Repeating the same reference and amount returns the original result;
+  the same reference with a different amount is `409`.
+- The currency must equal the mandate's limits, and the amount must be within `perTransaction` and the remaining
+  `total`. Otherwise `409 E-AUTH-MANDATE-LIMIT`, and nothing is recorded.
+- When `used` reaches `total` exactly, the mandate becomes `exhausted` (terminal).
+- An expired mandate (`validTo` passed) reads as `expired`.
+
+## 12. Tenant role definitions (DefineRole, INV-AUTH-1)
+
+- A tenant defines roles in its own namespace: `urn:ucos:<tenant>:role:<code>`. The definition is
+  `{code, label?, permissions[], includes[], sensitivity, assignable?}`, drafted into the author's draft ChangeSet and
+  published by governance (as for §5 and §6).
+- `code` must not collide with a role already in the catalog.
+- Every permission must be granted by some role of the catalog (= declared by a DOM spec, VR-AUTH-03).
+- `includes` must name catalog roles, and the include graph must stay acyclic.
+- Published tenant roles join the tenant's catalog with `includes` flattened.

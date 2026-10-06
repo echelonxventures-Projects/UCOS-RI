@@ -29,7 +29,20 @@ type Metadata struct {
 	HTTP   *http.Client
 	mu     sync.Mutex
 	cache  map[string]cached
+	fresh  map[string]time.Time // tenant -> refetch the role catalog on every read until then
 	Engine pdp.Engine
+}
+
+// InvalidateRoles drops the tenant's cached role catalog and bypasses the cache for a few seconds, so a tenant role
+// published through governance is usable at once even if metadata-service still serves a briefly cached catalog.
+func (m *Metadata) InvalidateRoles(tenant string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.cache, tenant+"/v1/registry/roles")
+	if m.fresh == nil {
+		m.fresh = map[string]time.Time{}
+	}
+	m.fresh[tenant] = time.Now().Add(5 * time.Second)
 }
 
 type cached struct {
@@ -41,6 +54,9 @@ func (m *Metadata) get(ctx context.Context, tenant, path string, ttl time.Durati
 	key := tenant + path
 	m.mu.Lock()
 	c, ok := m.cache[key]
+	if path == "/v1/registry/roles" && time.Now().Before(m.fresh[tenant]) {
+		ttl = 0
+	}
 	m.mu.Unlock()
 	if ok && time.Since(c.at) < ttl {
 		raw, _ := json.Marshal(c.val)
@@ -230,11 +246,28 @@ type Guard struct {
 	Meta       *Metadata
 }
 
+type principalKey struct{}
+
+// Authenticate validates the request's token (and DPoP proof, which is single-use) once; Require then reuses the
+// principal from the returned request's context. Used where work precedes authorization (Idempotency-Key replay).
+func (g *Guard) Authenticate(r *http.Request) (authn.Principal, *http.Request, error) {
+	p, err := g.V.Authenticate(r, g.PublicBase+r.URL.RequestURI(), false)
+	if err != nil {
+		return p, r, err
+	}
+	return p, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)), nil
+}
+
 // Require authenticates and authorizes r; it returns the principal, its effective permissions and obligations.
 func (g *Guard) Require(r *http.Request, req Requirement) (authn.Principal, map[string]bool, []map[string]any, error) {
-	p, err := g.V.Authenticate(r, g.PublicBase+r.URL.RequestURI(), req.Write)
-	if err != nil {
-		return p, nil, nil, err
+	p, cached := r.Context().Value(principalKey{}).(authn.Principal)
+	var err error
+	if !cached {
+		if p, err = g.V.Authenticate(r, g.PublicBase+r.URL.RequestURI(), req.Write); err != nil {
+			return p, nil, nil, err
+		}
+	} else if req.Write && p.JKT == "" {
+		return p, nil, nil, kit.Errf(401, "E-IDN-SENDER-CONSTRAINT-REQUIRED", "write operations require a DPoP-bound token (RUL-IDN-1)")
 	}
 	if p.TenantSlug == "" {
 		return p, nil, nil, kit.Errf(401, "E-IDN-TOKEN-INVALID", "token carries no tenant")

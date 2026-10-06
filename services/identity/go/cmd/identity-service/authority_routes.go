@@ -37,11 +37,22 @@ func authorityRoutes(api func(string, handlerFunc), guard *pep.Guard, auth *auth
 	}
 
 	api("POST /v1/authority/roles", func(w http.ResponseWriter, r *http.Request, _ string) error {
-		if _, _, _, err := guard.Require(r, admin("authority.role.define")); err != nil {
+		p, _, _, err := guard.Require(r, admin("authority.role.define"))
+		if err != nil {
 			return err
 		}
-		return kit.Errf(501, "E-API-NOT-IMPLEMENTED",
-			"role definitions are DOM-META registry entries contributed by packs; tenant roles arrive with tenant packs (ADR 0009)")
+		if err := noAgents(p.ActorChain(), "define roles"); err != nil {
+			return err
+		}
+		var in authority.RoleInput
+		if err := kit.ReadJSON(r, &in); err != nil {
+			return err
+		}
+		out, err := auth.DefineRole(r.Context(), p.TenantSlug, p.Party, in)
+		if err != nil {
+			return err
+		}
+		return kit.JSON(w, 201, out)
 	})
 
 	api("POST /v1/authority/role-assignments", func(w http.ResponseWriter, r *http.Request, corr string) error {
@@ -83,20 +94,33 @@ func authorityRoutes(api func(string, handlerFunc), guard *pep.Guard, auth *auth
 		return kit.JSON(w, 200, map[string]any{"items": items, "nextCursor": cursor})
 	})
 	api("POST /v1/authority/role-assignments/{rest}", func(w http.ResponseWriter, r *http.Request, corr string) error {
-		id, ok := strings.CutSuffix(r.PathValue("rest"), ":revoke")
-		if !ok {
+		rest := r.PathValue("rest")
+		i := strings.LastIndex(rest, ":")
+		if i < 0 {
+			return kit.NotFound
+		}
+		id, action := rest[:i], rest[i+1:]
+		if action != "revoke" && action != "approve" && action != "reject" {
 			return kit.NotFound
 		}
 		p, _, _, err := guard.Require(r, admin("authority.role.assign"))
 		if err != nil {
 			return err
 		}
-		if err := noAgents(p.ActorChain(), "revoke roles"); err != nil {
+		if err := noAgents(p.ActorChain(), action+" role assignments"); err != nil {
 			return err
 		}
-		var in struct{ Reason string }
+		var in struct{ Reason, Comment string }
 		_ = kit.ReadJSON(r, &in)
-		out, err := auth.Revoke(r.Context(), p.TenantSlug, p.Party, id, in.Reason, corr)
+		var out authority.AssignmentView
+		switch action {
+		case "revoke":
+			out, err = auth.Revoke(r.Context(), p.TenantSlug, p.Party, id, in.Reason, corr)
+		case "approve":
+			out, err = auth.Approve(r.Context(), p.TenantSlug, p.Party, p.Acr, id, in.Comment, corr)
+		default:
+			out, err = auth.Reject(r.Context(), p.TenantSlug, p.Party, id, in.Reason, corr)
+		}
 		if err != nil {
 			return err
 		}
@@ -210,6 +234,28 @@ func authorityRoutes(api func(string, handlerFunc), guard *pep.Guard, auth *auth
 		}
 		return kit.JSON(w, 200, out)
 	})
+	api("POST /v1/authority/mandates/{id}/usages", func(w http.ResponseWriter, r *http.Request, corr string) error {
+		p, _, _, err := guard.Require(r, write("authority.mandate.manage"))
+		if err != nil {
+			return err
+		}
+		var in struct {
+			Amount    authority.Money `json:"amount"`
+			Reference string          `json:"reference"`
+		}
+		if err := kit.ReadJSON(r, &in); err != nil {
+			return err
+		}
+		out, repeat, err := auth.RecordUsage(r.Context(), p.TenantSlug, p.Party, r.PathValue("id"), in.Amount, in.Reference, corr)
+		if err != nil {
+			return err
+		}
+		status := 201
+		if repeat {
+			status = 200
+		}
+		return kit.JSON(w, status, out)
+	})
 	api("POST /v1/authority/mandates/{rest}", func(w http.ResponseWriter, r *http.Request, corr string) error {
 		id, ok := strings.CutSuffix(r.PathValue("rest"), ":revoke")
 		if !ok {
@@ -244,7 +290,7 @@ func authorityRoutes(api func(string, handlerFunc), guard *pep.Guard, auth *auth
 		if target != p.Party && !perms["authority.read"] {
 			return kit.Errf(403, "E-API-FORBIDDEN", "reading another party's authority requires permission authority.read")
 		}
-		asOf := time.Now().UTC()
+		asOf := auth.Time()
 		if s := q.Get("asOf"); s != "" {
 			if asOf, err = time.Parse(time.RFC3339Nano, s); err != nil {
 				return kit.Errf(400, "E-API-VALIDATION", "asOf must be RFC 3339")
@@ -269,7 +315,7 @@ func authorityRoutes(api func(string, handlerFunc), guard *pep.Guard, auth *auth
 		if err := kit.ReadJSON(r, &in); err != nil {
 			return err
 		}
-		in.AsOf = time.Now().UTC()
+		in.AsOf = auth.Time()
 		if in.At != nil {
 			in.AsOf = in.At.UTC()
 		}
@@ -283,19 +329,54 @@ func authorityRoutes(api func(string, handlerFunc), guard *pep.Guard, auth *auth
 		return kit.JSON(w, 200, out)
 	})
 
-	for _, path := range []string{"POST /v1/authority/access-reviews", "GET /v1/authority/access-reviews/{reviewId}",
-		"POST /v1/authority/access-reviews/{reviewId}/items:certify"} {
-		perm := "authority.review.manage"
-		if strings.HasPrefix(path, "GET") {
-			perm = "authority.read"
+	api("POST /v1/authority/access-reviews", func(w http.ResponseWriter, r *http.Request, corr string) error {
+		p, _, _, err := guard.Require(r, admin("authority.review.manage"))
+		if err != nil {
+			return err
 		}
-		api(path, func(w http.ResponseWriter, r *http.Request, _ string) error {
-			if _, _, _, err := guard.Require(r, pep.Requirement{Write: r.Method != http.MethodGet, Scope: "ucos:party:admin", Permission: perm}); err != nil {
-				return err
-			}
-			return kit.Errf(501, "E-API-NOT-IMPLEMENTED", "access reviews (AUTH-C6, RUL-AUTH-3) arrive with slice S2d")
-		})
-	}
+		var in authority.ReviewInput
+		if err := kit.ReadJSON(r, &in); err != nil {
+			return err
+		}
+		out, err := auth.StartReview(r.Context(), p.TenantSlug, p.Party, in, partyExists(r.Context(), p.TenantSlug), corr)
+		if err != nil {
+			return err
+		}
+		w.Header().Set("Location", "/v1/authority/access-reviews/"+out.ReviewID)
+		return kit.JSON(w, 201, out)
+	})
+	api("GET /v1/authority/access-reviews/{reviewId}", func(w http.ResponseWriter, r *http.Request, _ string) error {
+		p, _, _, err := guard.Require(r, read("authority.read"))
+		if err != nil {
+			return err
+		}
+		out, err := auth.GetReview(r.Context(), p.TenantSlug, r.PathValue("reviewId"))
+		if err != nil {
+			return err
+		}
+		return kit.JSON(w, 200, out)
+	})
+	api("POST /v1/authority/access-reviews/{reviewId}/items:certify", func(w http.ResponseWriter, r *http.Request, corr string) error {
+		p, _, _, err := guard.Require(r, admin("authority.review.manage"))
+		if err != nil {
+			return err
+		}
+		if err := noAgents(p.ActorChain(), "certify assignments"); err != nil {
+			return err
+		}
+		var in struct {
+			AssignmentRef string `json:"assignmentRef"`
+			Decision      string `json:"decision"`
+		}
+		if err := kit.ReadJSON(r, &in); err != nil {
+			return err
+		}
+		out, err := auth.Certify(r.Context(), p.TenantSlug, p.Party, r.PathValue("reviewId"), in.AssignmentRef, in.Decision, corr)
+		if err != nil {
+			return err
+		}
+		return kit.JSON(w, 200, out)
+	})
 
 	// Remote owner protocol (governance only).
 	api("GET /v1/governed-definitions", func(w http.ResponseWriter, r *http.Request, _ string) error {

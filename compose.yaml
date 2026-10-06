@@ -73,7 +73,7 @@ services:
       UCOS_FAULTS: enabled       # ucos-lite only: apply-saga fault injection (CR-015-001-04)
       UCOS_REGION: lite
       # Governed definitions owned by other services (remote owner protocol, ADR 0009) and the governance client
-      UCOS_REMOTE_OWNERS: http://identity:8080=sod-conflict-set,authority-limit
+      UCOS_REMOTE_OWNERS: http://identity:8080=role,sod-conflict-set,authority-limit
       UCOS_SERVICE_CLIENT_ID: metadata-service
       UCOS_SERVICE_CLIENT_SECRET: ${UCOS_METADATA_CLIENT_SECRET:-metadata-client-dev-secret}
     ports: ["127.0.0.1:${UCOS_METADATA_PORT:-18090}:8080"]
@@ -113,6 +113,7 @@ services:
       UCOS_SERVICE_CLIENTS: event-platform-service:${UCOS_EVENTING_CLIENT_SECRET:-eventing-client-dev-secret},metadata-service:${UCOS_METADATA_CLIENT_SECRET:-metadata-client-dev-secret}
       UCOS_GOVERNANCE_CLIENTS: metadata-service   # may obtain ucos:platform:admin (remote owner protocol, ADR 0009)
       UCOS_TEST_TOKENS: enabled   # ucos-lite only: conformance suites mint tokens for arbitrary principals (ADR 0008)
+      UCOS_CLOCK: adjustable      # ucos-lite only: authority clock for review-interval suites (ADR 0010)
     ports: ["127.0.0.1:${UCOS_IDENTITY_PORT:-18110}:8080"]
 
   conformance:

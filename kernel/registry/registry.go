@@ -41,6 +41,58 @@ type Registry struct {
 	Owners   map[string]governed.Owner
 	Gov      Governance
 	Evidence governed.Evidence
+	// TenantRoles lists a tenant's published role definitions owned outside this service (DOM-AUTH DefineRole,
+	// CIC-002-003 §12). They join the tenant's role catalog with includes flattened. Nil = none.
+	TenantRoles func(ctx context.Context, tenantSlug string) ([]map[string]any, error)
+}
+
+// flatten resolves includes: each role's permissions become its own plus those of every role it includes,
+// transitively (INV-AUTH-1 keeps the graph acyclic; a depth bound guards against corrupt data).
+func flatten(defs map[string]map[string]any) map[string][]string {
+	out := map[string][]string{}
+	var visit func(code string, depth int, acc map[string]bool)
+	visit = func(code string, depth int, acc map[string]bool) {
+		d, ok := defs[code]
+		if !ok || depth > 16 {
+			return
+		}
+		for _, p := range governed.Strs(d, "permissions") {
+			acc[p] = true
+		}
+		for _, inc := range governed.Strs(d, "includes") {
+			visit(inc, depth+1, acc)
+		}
+	}
+	for code := range defs {
+		acc := map[string]bool{}
+		visit(code, 0, acc)
+		perms := make([]string, 0, len(acc))
+		for p := range acc {
+			perms = append(perms, p)
+		}
+		sort.Strings(perms)
+		out[code] = perms
+	}
+	return out
+}
+
+// tenantRoleDefs returns the tenant's own role definitions keyed by code (empty when unavailable: the catalog then
+// degrades to pack roles, which can only narrow access).
+func (g *Registry) tenantRoleDefs(ctx context.Context, tenantSlug string) map[string]map[string]any {
+	out := map[string]map[string]any{}
+	if g.TenantRoles == nil || tenantSlug == "platform" {
+		return out
+	}
+	defs, err := g.TenantRoles(ctx, tenantSlug)
+	if err != nil {
+		return out
+	}
+	for _, d := range defs {
+		if code := governed.Str(d, "code"); code != "" {
+			out[code] = d
+		}
+	}
+	return out
 }
 
 // Kinds lists the governed kinds owned here.
@@ -506,24 +558,57 @@ func (g *Registry) Routes(s *platform.Server) {
 					"urn": d.URN, "contributedBy": d.ChangeSetRef})
 			}
 		}
-		if r.PathValue("registry") == "roles" && len(items) == 0 {
-			// No pack installed yet (or the platform tenant): serve the catalog the PEP itself uses.
-			cat, err := g.RoleCatalog(r.Context(), p.TenantSlug)
-			if err != nil {
-				return err
-			}
-			keys := make([]string, 0, len(cat))
-			for k := range cat {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				items = append(items, map[string]any{"key": k, "definition": map[string]any{"code": k, "permissions": cat[k]},
-					"urn": nil, "contributedBy": "platform-catalog"})
-			}
+		if r.PathValue("registry") == "roles" {
+			return g.serveRoles(w, r, p, items)
 		}
 		return platform.JSON(w, 200, map[string]any{"items": items, "nextCursor": nil})
 	})
+}
+
+// serveRoles serves the tenant's role catalog: installed pack roles (or the platform catalog when none is installed)
+// plus the tenant's own published roles, every definition with includes flattened into permissions.
+func (g *Registry) serveRoles(w http.ResponseWriter, r *http.Request, p platform.Principal, items []map[string]any) error {
+	if len(items) == 0 {
+		// No pack installed yet (or the platform tenant): serve the catalog the PEP itself uses.
+		cat, err := g.RoleCatalog(r.Context(), p.TenantSlug)
+		if err != nil {
+			return err
+		}
+		keys := make([]string, 0, len(cat))
+		for k := range cat {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			items = append(items, map[string]any{"key": k, "definition": map[string]any{"code": k, "permissions": cat[k]},
+				"urn": nil, "contributedBy": "platform-catalog"})
+		}
+		return platform.JSON(w, 200, map[string]any{"items": items, "nextCursor": nil})
+	}
+	defs := map[string]map[string]any{}
+	for _, it := range items {
+		d, _ := it["definition"].(map[string]any)
+		defs[it["key"].(string)] = d
+	}
+	for code, d := range g.tenantRoleDefs(r.Context(), p.TenantSlug) {
+		if _, taken := defs[code]; taken {
+			continue // pack roles win; DefineRole refuses taken codes
+		}
+		defs[code] = d
+		items = append(items, map[string]any{"key": code, "definition": d, "urn": d["urn"], "contributedBy": "tenant"})
+	}
+	flat := flatten(defs)
+	for _, it := range items {
+		code := it["key"].(string)
+		d := map[string]any{}
+		for k, v := range defs[code] {
+			d[k] = v
+		}
+		d["permissions"] = flat[code]
+		it["definition"] = d
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i]["key"].(string) < items[j]["key"].(string) })
+	return platform.JSON(w, 200, map[string]any{"items": items, "nextCursor": nil})
 }
 
 // SeedPlatformRoles is the kernel seed (CIC-029-001 §1) used only before any pack has been published: it lets the
@@ -540,14 +625,20 @@ func (g *Registry) RoleCatalog(ctx context.Context, tenantSlug string) (map[stri
 		if err != nil {
 			return nil, err
 		}
+		all := map[string]map[string]any{}
 		for _, d := range defs {
 			if governed.Str(d.Body, "registry") == "roles" {
 				def, _ := d.Body["definition"].(map[string]any)
-				out[governed.Str(d.Body, "key")] = governed.Strs(def, "permissions")
+				all[governed.Str(d.Body, "key")] = def
 			}
 		}
-		if len(out) > 0 {
-			return out, nil
+		if len(all) > 0 {
+			for code, d := range g.tenantRoleDefs(ctx, tenantSlug) {
+				if _, taken := all[code]; !taken {
+					all[code] = d
+				}
+			}
+			return flatten(all), nil
 		}
 	}
 	var raw []byte

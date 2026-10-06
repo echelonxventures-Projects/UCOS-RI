@@ -131,10 +131,10 @@ export class Validator {
     if (Number(claims.exp) < now - 60) throw new AuthnError(401, "E-IDN-TOKEN-EXPIRED", "token expired");
     if (Number(claims.nbf ?? 0) > now + 60) throw new AuthnError(401, "E-IDN-TOKEN-INVALID", "token not yet valid");
     if (this.revoked.has(claims.jti) || this.revoked.has(claims.sub)) throw new AuthnError(401, "E-IDN-TOKEN-REVOKED", "token revoked");
-    const iat = Number(claims.iat ?? 0);
+    const authAt = Number(claims.ucos_auth_at ?? 0) > 0 ? Number(claims.ucos_auth_at) : Number(claims.iat ?? 0) * 1000;
     for (const party of [claims.ucos_party, ...actorParties(claims.act)]) {
       const nb = this.notBefore.get(party);
-      if (nb !== undefined && iat <= nb) throw new AuthnError(401, "E-IDN-TOKEN-REVOKED", "token revoked");
+      if (nb !== undefined && authAt < nb) throw new AuthnError(401, "E-IDN-TOKEN-REVOKED", "token revoked");
     }
     return {
       subject: claims.sub ?? "", party: claims.ucos_party ?? "", tenant: claims.ucos_tenant ?? "",
@@ -183,9 +183,9 @@ export class Validator {
     return p;
   }
 
-  /** Tokens of `party` (as subject or actor) issued at or before `unixSeconds` are stale (ADR 0009). */
-  revokeBefore(party: string, unixSeconds: number) {
-    if (unixSeconds > (this.notBefore.get(party) ?? -Infinity)) this.notBefore.set(party, unixSeconds);
+  /** Tokens of `party` (as subject or actor) whose authority was read before `unixMillis` are stale (ADR 0009/0010). */
+  revokeBefore(party: string, unixMillis: number) {
+    if (unixMillis > (this.notBefore.get(party) ?? -Infinity)) this.notBefore.set(party, unixMillis);
   }
 
   /** Polls the issuer's revocation feed (INV-IDN-4, CR-AUTH-03). */
@@ -193,9 +193,9 @@ export class Validator {
     const tick = async () => {
       try {
         const r = await fetch(`${this.issuer}/oauth2/revocations`, { signal: AbortSignal.timeout(5000) });
-        const feed = (await r.json()) as { revoked: string[]; notBefore?: Record<string, number> };
+        const feed = (await r.json()) as { revoked: string[]; notBeforeMs?: Record<string, number> };
         for (const k of feed.revoked) this.revoked.add(k);
-        for (const [party, nb] of Object.entries(feed.notBefore ?? {})) this.revokeBefore(party, nb);
+        for (const [party, nb] of Object.entries(feed.notBeforeMs ?? {})) this.revokeBefore(party, nb);
       } catch { /* keep last-known revocations */ }
     };
     void tick();

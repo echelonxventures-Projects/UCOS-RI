@@ -30,7 +30,7 @@ const Schema = "ucos_governance"
 
 // kindRank is the apply order of CIC-029-001 §3 rule 3 (registry entries last).
 var kindRank = map[string]int{"attribute": 0, "facet": 1, "reltype": 2, "lifecycle": 3, "type": 4, "dimension": 5,
-	"policy": 6, "rule": 7, "registry-entry": 8, "sod-conflict-set": 9, "authority-limit": 9}
+	"policy": 6, "rule": 7, "registry-entry": 8, "role": 8, "sod-conflict-set": 9, "authority-limit": 9}
 
 // Item is a ChangeSetItem.
 type Item struct {

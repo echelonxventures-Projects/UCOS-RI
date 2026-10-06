@@ -122,20 +122,20 @@ func TestPermissionsUnionDelegatedAndLimit(t *testing.T) {
 
 func TestPartyCutOffRevokesOlderTokensOnly(t *testing.T) {
 	v, ik := setup(t)
-	now := time.Now().Unix()
-	old := token(t, ik, map[string]any{"ucos_party": "urn:ucos:t:party:a", "iat": now - 30, "jti": "o"})
-	viaAgent := token(t, ik, map[string]any{"ucos_party": "urn:ucos:t:party:b", "iat": now - 30, "jti": "g",
+	now := time.Now().UnixMilli()
+	old := token(t, ik, map[string]any{"ucos_party": "urn:ucos:t:party:a", "ucos_auth_at": now - 1, "jti": "o"})
+	viaAgent := token(t, ik, map[string]any{"ucos_party": "urn:ucos:t:party:b", "ucos_auth_at": now - 30000, "jti": "g",
 		"act": map[string]any{"sub": "urn:ucos:t:identity:g", "ucos_party": "urn:ucos:t:party:a"}})
-	fresh := token(t, ik, map[string]any{"ucos_party": "urn:ucos:t:party:a", "iat": now + 1, "jti": "f"})
+	fresh := token(t, ik, map[string]any{"ucos_party": "urn:ucos:t:party:a", "ucos_auth_at": now, "jti": "f"})
 	v.RevokeBefore("urn:ucos:t:party:a", now)
-	v.RevokeBefore("urn:ucos:t:party:a", now-100) // an earlier cut-off never relaxes a later one
+	v.RevokeBefore("urn:ucos:t:party:a", now-100000) // an earlier cut-off never relaxes a later one
 	for name, tok := range map[string]string{"subject": old, "actor": viaAgent} {
 		if _, err := v.VerifyToken(t.Context(), tok); err == nil || err.(*Error).Code != "E-IDN-TOKEN-REVOKED" {
 			t.Fatalf("%s token issued before the cut-off must be revoked: %v", name, err)
 		}
 	}
 	if _, err := v.VerifyToken(t.Context(), fresh); err != nil {
-		t.Fatalf("a token issued after the cut-off stays valid: %v", err)
+		t.Fatalf("a token whose authority was read at or after the cut-off stays valid, even within the same second: %v", err)
 	}
 }
 

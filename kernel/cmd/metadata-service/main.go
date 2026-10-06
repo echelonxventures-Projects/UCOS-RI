@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -79,6 +80,52 @@ func env(k, def string) string {
 		return v
 	}
 	return def
+}
+
+type tenantRolesEntry struct {
+	at   time.Time
+	defs []map[string]any
+}
+
+// tenantRoles caches published tenant role definitions per tenant for 2 s (the role catalog is read on every
+// request); a finished ChangeSet invalidates it.
+type tenantRoles struct {
+	owner *governed.RemoteOwner
+	mu    sync.Mutex
+	cache map[string]tenantRolesEntry
+}
+
+func (t *tenantRoles) list(ctx context.Context, slug string) ([]map[string]any, error) {
+	t.mu.Lock()
+	e, ok := t.cache[slug]
+	t.mu.Unlock()
+	if ok && time.Since(e.at) < 2*time.Second {
+		return e.defs, nil
+	}
+	tid, err := platform.TenantID(slug)
+	if err != nil {
+		return nil, err
+	}
+	defs, err := t.owner.List(ctx, governed.Tenant{ID: tid, Slug: slug}, "published")
+	if err != nil {
+		return nil, err
+	}
+	out := []map[string]any{}
+	for _, d := range defs {
+		if d.Kind == "role" {
+			out = append(out, d.Body)
+		}
+	}
+	t.mu.Lock()
+	t.cache[slug] = tenantRolesEntry{at: time.Now(), defs: out}
+	t.mu.Unlock()
+	return out, nil
+}
+
+func (t *tenantRoles) invalidate(slug string) {
+	t.mu.Lock()
+	delete(t.cache, slug)
+	t.mu.Unlock()
 }
 
 // govAdapter exposes DOM-GOV to the registry's installer port.
@@ -181,6 +228,12 @@ func run(log *slog.Logger) error {
 	ont.Gate, lfc.Gate, ctxr.Gate, pol.Gate, reg.Gate = gov, gov, gov, gov, gov
 	for _, ro := range remotes {
 		ro.Gate = gov
+	}
+	// Tenant role definitions owned by the authority context join each tenant's role catalog (CIC-002-003 §12).
+	if ro, ok := owners["role"].(*governed.RemoteOwner); ok {
+		tr := &tenantRoles{owner: ro, cache: map[string]tenantRolesEntry{}}
+		reg.TenantRoles = tr.list
+		gov.OnApplied = append(gov.OnApplied, func(_ context.Context, t governed.Tenant, _ governance.ChangeSet) { tr.invalidate(t.Slug) })
 	}
 	reg.Owners, reg.Gov = owners, govAdapter{gov}
 	gov.OnApplied = append(gov.OnApplied, func(ctx context.Context, t governed.Tenant, cs governance.ChangeSet) {

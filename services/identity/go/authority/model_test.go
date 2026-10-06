@@ -315,3 +315,18 @@ func TestScopesOverlap(t *testing.T) {
 		}
 	}
 }
+
+func TestSuspendedAssignmentsConferNothing(t *testing.T) {
+	src := &memSource{assign: []Assignment{{ID: "a1", Party: "A", Role: "sales-director", From: t0, SuspendAt: at(90 * 24)}}}
+	e := &Evaluator{Src: src, Catalog: catalog}
+	src.deleg = []Delegation{{ID: "d1", Delegator: "A", Delegate: "B", Permissions: []string{"quote.approve"}, From: t0, To: *at(200 * 24), Depth: 1}}
+	eff, _ := e.EffectiveAuthority("A", Query{AsOf: *at(24)})
+	if len(eff.Permissions) == 0 || eff.Horizon == nil || !eff.Horizon.Equal(*at(90 * 24)) {
+		t.Fatalf("active before suspension, and the horizon stops at it: %+v", eff)
+	}
+	for _, p := range []string{"A", "B"} {
+		if eff, _ := e.EffectiveAuthority(p, Query{AsOf: *at(90 * 24)}); len(eff.Permissions) != 0 {
+			t.Fatalf("%s: a suspended assignment confers nothing, also through delegations: %v", p, eff.Permissions)
+		}
+	}
+}

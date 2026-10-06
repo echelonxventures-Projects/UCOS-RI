@@ -60,7 +60,7 @@ DELEGATOR = {"delegated": ["authority.delegate"]}  # only the PEP permission; de
 
 class Principal:
     """A tenant principal with freshly minted (never cached) DPoP-bound lite test tokens. Authority narrowing makes
-    earlier tokens of the party stale, so every call mints anew and retries briefly across the one-second cut-off."""
+    earlier tokens of the party stale; a token minted after the change is never stale (millisecond cut-offs)."""
 
     def __init__(self, tenant, party, roles=(), scopes=PARTY_SCOPES, acr="AAL2", **claims):
         self.tenant, self.party, self.roles, self.scopes, self.acr, self.claims = tenant, party, roles, scopes, acr, claims
@@ -73,13 +73,8 @@ class Principal:
         assert r.status_code == 200, r.text
         return r.json()["access_token"]
 
-    def call(self, method, path, body=None, base=IDENTITY, retry_stale=True):
-        for _ in range(8):
-            r = call(method, path, self.token(), self.key, body, base=base)
-            if not (retry_stale and r.status_code == 401 and r.json().get("code") == "E-IDN-TOKEN-REVOKED"):
-                return r
-            time.sleep(0.5)  # minted within the narrowing cut-off second
-        return r
+    def call(self, method, path, body=None, base=IDENTITY):
+        return call(method, path, self.token(), self.key, body, base=base)
 
 
 @pytest.fixture(scope="module")
@@ -509,12 +504,13 @@ def test_revocation_reaches_every_service_within_10s(tenant):
     bob = login(tenant["client"], *BOB, "ucos:party:read", Key())["access_token"]
     bob_party = decode(bob)[1]["ucos_party"]
     extra = ok(assign(tenant, bob_party, "buyer"), 201)
-    time.sleep(1.2)
     assert "buyer" in decode(login(tenant["client"], *BOB, "ucos:party:read", Key())["access_token"])[1]["ucos_roles"]
     ok(admin(tenant, "POST", f"/v1/authority/role-assignments/{extra['id']}:revoke", {}))
-    time.sleep(2.1)  # past the cut-off second
-    after = decode(login(tenant["client"], *BOB, "ucos:party:read", Key())["access_token"])[1]
-    assert "buyer" not in after["ucos_roles"]
+    # issued immediately after the revocation: valid, and without the role (millisecond cut-offs, CIC-002-003 §8)
+    key = Key()
+    fresh = login(tenant["client"], *BOB, "ucos:party:read", key)["access_token"]
+    assert "buyer" not in decode(fresh)[1]["ucos_roles"]
+    assert call("GET", "/v1/identity/me", fresh, key).status_code == 200
 
 
 def test_tokens_carry_delegations_and_never_outlive_them(tenant):
@@ -565,12 +561,8 @@ def test_agent_acts_for_non_owner_only_within_delegation(tenant):
     while time.time() < deadline and call("GET", "/v1/identity/me", tok, akey).status_code != 401:
         time.sleep(0.3)
     problem(call("GET", "/v1/identity/me", tok, akey), 401, "E-IDN-TOKEN-REVOKED")
-    time.sleep(2.1)
     bob2 = login(tenant["client"], *BOB, "ucos:party:read ucos:catalog:read", Key())["access_token"]
-    # the agent's own earlier tokens are stale too (its authority narrowed); it re-authenticates
-    problem_oauth = exchange(agent["clientId"], agent["clientSecret"], akey, bob2, actor)
-    assert problem_oauth.status_code == 400 and "revoked" in problem_oauth.json()["error_description"]
-    actor = client_credentials(agent["clientId"], agent["clientSecret"], akey).json()["access_token"]
+    # the agent's actor token confers no API authority and stays valid (CIC-002-003 §8); the exchange itself refuses
     r = exchange(agent["clientId"], agent["clientSecret"], akey, bob2, actor)
     assert r.status_code == 403 and r.json()["error"] == "access_denied", r.text
 
