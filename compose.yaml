@@ -48,7 +48,8 @@ services:
       UCOS_MIGRATE_DB_URL: postgresql://ucos_owner:${UCOS_OWNER_PASSWORD:-owner-dev}@db:5432/ucos
     command: ["python", "tools/migrate.py", "domains/echo", "kernel/ontology", "kernel/lifecycle", "kernel/contextreg",
               "kernel/policy", "kernel/governance", "kernel/evidence", "services/eventing", "services/identity",
-              "services/commerce/commerce-service", "services/commerce/cob", "services/commerce/rel"]
+              "services/commerce/commerce-service", "services/commerce/cob", "services/commerce/rel",
+              "services/commerce/prc"]
 
   echo:
     build: {context: ., dockerfile: domains/echo/Containerfile, target: runtime}

@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-var contexts = []string{"cob", "rel"}
+var contexts = []string{"cob", "rel", "prc"}
 
 func TestContextsAreIsolated(t *testing.T) {
 	for _, c := range contexts {
@@ -54,4 +54,19 @@ func TestNoTypeNameLiterals(t *testing.T) {
 			return nil
 		})
 	}
+}
+
+// TestNoFloatingPointInPricing is CR-011-004-05 / UCOS-L002: pricing code paths use exact rationals only.
+func TestNoFloatingPointInPricing(t *testing.T) {
+	floats := regexp.MustCompile(`\bfloat(32|64)\b`)
+	_ = filepath.WalkDir("prc", func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		src, _ := os.ReadFile(path)
+		if m := floats.Find(src); m != nil {
+			t.Errorf("%s: floating-point type %s in a pricing code path (UCOS-L002)", path, m)
+		}
+		return nil
+	})
 }

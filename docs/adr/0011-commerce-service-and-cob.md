@@ -60,9 +60,26 @@
    - Ending an edge sets `validTo`. Edges are never deleted, and ended edges are immutable.
    - GenerateVariants records `VARIANT_OF` edges through a port wired in the composition root.
 
+10. **DOM-PRC (S3c).**
+    - Amounts are exact rationals (`math/big`); an architecture test forbids float types in `prc/` (UCOS-L002).
+    - Intermediate results are held at `pricing.rounding.intermediateScale` (half-even), then rounded at the
+      component, line or total stage. Differences become explicit `rounding` components, so Σ components = total
+      exactly.
+    - Entries are MVCC rows. `[snapshot_from, snapshot_to)` says in which tenant snapshot versions a row was the
+      published truth. Publishing, superseding and end-dating move to a new snapshot version, and a recorded
+      `pricingSnapshotId` re-prices against its version and `asOf`.
+    - The `scheduled → published` trigger is evaluated at read time, so no scheduler is needed.
+    - Base prices are resolved per charge type through the context runtime under `price-entry.resolution`. An object
+      entry wins over type entries, which are tried nearest type first (RUL-PRC-2). A conflict is `E-PRC-AMBIGUOUS`
+      (RUL-PRC-1).
+    - Formula models return integer minor units, so CEL never produces floats.
+    - Not yet built: adjustment phases (DOM-RUL), tax (DOM-TAX), currency conversion (`pricing.conversion.allowed`
+      is false in ucos.std), and plugin models.
+
 ## Corpus gaps (AR-0005)
 - The ucos.std `commercial-object` activate guard reads `aggregate.launchAt`, but no attribute `launchAt` exists, so
   the guard never fails.
 - Policy `cob.transition` grants `reject` to no role.
 - GenerateVariants and RetypeCommercialObject have no API paths; the RI serves them as `:generate-variants` and
   `:retype`.
+- `pricing.approval` names approver roles that lack `pricing.list.approve`; price adjustments depend on DOM-RUL.

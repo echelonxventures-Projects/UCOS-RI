@@ -23,6 +23,7 @@ import (
 
 	"ucos.dev/ri/authn/authn"
 	"ucos.dev/ri/commerce/cob"
+	"ucos.dev/ri/commerce/prc"
 	"ucos.dev/ri/commerce/rel"
 	"ucos.dev/ri/svckit/svc"
 )
@@ -30,6 +31,7 @@ import (
 // scopeContexts maps a route's first path segment to the bounded context of its coarse scope.
 var scopeContexts = map[string]string{
 	"commercial-objects": "commercial-object",
+	"pricing":            "pricing",
 }
 
 func env(k, def string) string {
@@ -71,7 +73,7 @@ func run(log *slog.Logger) error {
 		ClientID: env("UCOS_SERVICE_CLIENT_ID", "commerce-service"), Secret: os.Getenv("UCOS_SERVICE_CLIENT_SECRET")}
 
 	permissions := map[string]string{}
-	for _, table := range []map[string]string{cob.Permissions, rel.Permissions} {
+	for _, table := range []map[string]string{cob.Permissions, rel.Permissions, prc.Permissions} {
 		for k, v := range table {
 			permissions[k] = v
 		}
@@ -98,8 +100,12 @@ func run(log *slog.Logger) error {
 		Endpoints: endpoints{objects: objects, identity: identityReader, meta: meta,
 			write: map[string]string{"co": "cob.update", "party": "party.update"}}}
 	objects.Variants = variantLinker{rels: relationships, relType: env("UCOS_COB_VARIANT_RELTYPE", "VARIANT_OF")}
+	pricing := &prc.PRC{DB: db, Meta: meta, Clock: clock, Source: src, Objects: pricingObjects{objects: objects},
+		Cfg: prc.Config{EntryResolution: "price-entry.resolution", Rounding: "pricing.rounding", Approval: "pricing.approval",
+			ChargeTypes: []string{"one-time", "recurring", "usage"}}}
 	objects.Routes(srv)
 	relationships.Routes(srv)
+	pricing.Routes(srv)
 
 	srv.Mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
 	srv.Mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, r *http.Request) {
@@ -121,7 +127,7 @@ func run(log *slog.Logger) error {
 		_ = svc.JSON(w, 200, map[string]any{"now": clock.Now()})
 	})
 
-	relay := &svc.Relay{Pool: relayPool, Schemas: []string{"ucos_commerce", cob.Schema, rel.Schema}, Log: log}
+	relay := &svc.Relay{Pool: relayPool, Schemas: []string{"ucos_commerce", cob.Schema, rel.Schema, prc.Schema}, Log: log}
 	go relay.Run(ctx)
 	servers := []*http.Server{
 		{Addr: env("UCOS_HTTP_ADDR", ":8080"), Handler: srv.Wrap(), ReadHeaderTimeout: 5 * time.Second},

@@ -126,6 +126,14 @@ to the corpus repository as an amendment.
 - **G3, missing API paths.** GenerateVariants and RetypeCommercialObject are commands without `apis` entries. RI
   behaviour: `POST /v1/commercial-objects/{id}:generate-variants` and `…:retype`. Proposal: add both paths to
   DOM-COB `apis`.
+- **G5, approver roles without approval permission (S3c).** Policy `pricing.approval` names `commercial-director` and
+  `cfo-office` as approval stages. AMD-0003 gave those roles only `governance.read`, so they cannot call
+  ApprovePriceList (`pricing.list.approve`). Proposal: grant `pricing.list.approve` to the approver roles that
+  `pricing.approval` names, and extend VR-AUTH-04 to check that every approver role holds the permission of the
+  command it approves.
+- **G6, price adjustments need DOM-RUL (S3c).** Adjustment phases CONTRACT to FEES are Rules of fact kind
+  `price-adjustment` (DOM-RUL), which the RI has not built yet. Slice S3 prices the LIST phase only; contract and
+  segment list prices still apply through context resolution (`contract`, `party-segment`).
 - **G4, transition permissions.** DOM-COB declares `cob.approve` but does not say which transitions need it. RI
   behaviour: `approve` and `reject` need `cob.approve`; every other transition needs `cob.transition`. Proposal:
   state it in DOM-COB `security`.

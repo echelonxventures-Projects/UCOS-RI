@@ -65,3 +65,22 @@ func (v variantLinker) LinkVariant(ctx context.Context, p svc.Principal, variant
 		Attributes: map[string]any{"axes": axes}})
 	return err
 }
+
+// pricingObjects serves DOM-PRC's object port from DOM-COB.
+type pricingObjects struct{ objects *cob.COB }
+
+func (o pricingObjects) Lineage(ctx context.Context, p svc.Principal, ref string) (bool, []string, error) {
+	return o.objects.EndpointInfo(ctx, p, ref)
+}
+
+func (o pricingObjects) View(ctx context.Context, p svc.Principal, ref string, explicit map[string]any) (map[string]any, error) {
+	v, err := o.objects.ResolveView(ctx, p, ref, explicit, o.objects.Clock.Now(), nil, false)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{}
+	for k, rv := range v.Resolved {
+		out[k] = rv.Value
+	}
+	return out, nil
+}
