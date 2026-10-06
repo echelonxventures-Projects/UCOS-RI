@@ -49,7 +49,7 @@ services:
     command: ["python", "tools/migrate.py", "domains/echo", "kernel/ontology", "kernel/lifecycle", "kernel/contextreg",
               "kernel/policy", "kernel/governance", "kernel/evidence", "services/eventing", "services/identity",
               "services/commerce/commerce-service", "services/commerce/cob", "services/commerce/rel",
-              "services/commerce/prc"]
+              "services/commerce/prc", "services/commerce/cat", "services/commerce/ofr"]
 
   echo:
     build: {context: ., dockerfile: domains/echo/Containerfile, target: runtime}

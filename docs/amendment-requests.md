@@ -134,6 +134,38 @@ to the corpus repository as an amendment.
 - **G6, price adjustments need DOM-RUL (S3c).** Adjustment phases CONTRACT to FEES are Rules of fact kind
   `price-adjustment` (DOM-RUL), which the RI has not built yet. Slice S3 prices the LIST phase only; contract and
   segment list prices still apply through context resolution (`contract`, `party-segment`).
+- **G7, DOM-RUL rules in catalogs and offers (S3d).** Catalog inclusion/exclusion rules and ordering, offer
+  `constraints`, `eligibilityRules` and transition eligibility rules are RuleUrns of DOM-RUL fact kinds. The RI refuses
+  them (`E-CAT-RULES-UNAVAILABLE`, `E-OFR-RULES-UNAVAILABLE`) until DOM-RUL exists; CIC-030-001 schedules DOM-RUL in no
+  slice before S7 although S3 contexts depend on it. Proposal: move DOM-RUL (fact kinds of the commercial core) into S3
+  or name it as an S3 prerequisite.
+- **G8, approval trigger of catalogs and offers (S3d).** DOM-CAT and DOM-OFR (and the ucos.std `offer` lifecycle) fire
+  `in-review → approved` on `ucos.governance.changeset.approved.v1`, but no governed kind exists for catalogs or offers,
+  and governance plans approvals by risk class (`governance.approval`) while `offer.publish-approval` plans by
+  `maxDiscountVsListPercent`. RI behaviour: a domain command `POST …:approve` `{decision, comment}` (as ApprovePriceList)
+  following `offer.publish-approval` stages, author and submitter excluded; RI events
+  `ucos.catalog.catalog.{approved,rejected,materialization-requested}.v1` and
+  `ucos.offer.offer.{approved,rejected,approval-recorded}.v1`. Proposal: either add ApproveCatalog/ApproveOffer
+  commands and events, or define catalog and offer as governed kinds and let ChangeSet approval plans take a
+  domain approval policy.
+- **G9, roles without the permissions their duties need (S3d).** `catalog-manager` (catalog.author) lacks
+  `catalog.read`; `pricing-manager` and `commercial-director`, which `offer.publish-approval` names as approvers, lack
+  `offer.read`. Proposal: grant `catalog.read` to `catalog-manager` and `offer.read` to the approver roles of
+  `offer.publish-approval` (extends G5's VR-AUTH-04 check).
+- **G10, catalog eligibility inputs (S3d).** `catalog.eligibility` reads `resource.audience` and
+  `resource.contractParty`, which are not Catalog fields. RI behaviour: Catalog carries `audience`
+  (`any|business|contract`, default `any`) and `contractParty`. Proposal: add both fields to DOM-CAT.
+- **G11, editing a published catalog (S3d).** INV-CAT-3 says edits of a published catalog create a new version
+  published by generation swap, but CatalogLifecycle has no edge out of `published` except `materializing` and
+  `retired`. RI behaviour: an edit opens a draft of the next version while the serving version keeps serving.
+  Proposal: model the working version's state separately from the serving version, or add `published → draft`
+  (ReviseCatalog).
+- **G12, under-specified selector and coverage inputs (S3d).** The Selector value object names `object`,
+  `classifications` and `relations` but not their shape; RI: `object = {id, typeRef, lineage, values}`, `relations =
+  {relType: [target URN]}`. INV-OFR-4's scan over "the scope's context lattice" does not say how currency is chosen
+  when the scope does not fix it; RI: the referenced price lists' currencies (all published lists when none). DOM-CAT's
+  CatalogSource has `ref` but no field for the selector expression; RI: `selector`. Proposal: specify these in DOM-CAT
+  and DOM-OFR.
 - **G4, transition permissions.** DOM-COB declares `cob.approve` but does not say which transitions need it. RI
   behaviour: `approve` and `reject` need `cob.approve`; every other transition needs `cob.transition`. Proposal:
   state it in DOM-COB `security`.

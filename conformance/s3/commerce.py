@@ -116,3 +116,50 @@ def fixtures():
 
 def unique(prefix="SKU"):
     return f"{prefix}-{uuid.uuid4().hex[:10].upper()}"
+
+
+def wait_for(fn, timeout=30, interval=0.3):
+    """Poll fn until it returns a truthy value (eventual consistency: relay-delivered materialization)."""
+    import time
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = fn()
+        if last:
+            return last
+        time.sleep(interval)
+    raise AssertionError(f"condition not reached within {timeout}s (last: {str(last)[:300]})")
+
+
+def activate(manager, approver, obj):
+    """draft -> in-review -> approved (approval evidence) -> active, through DOM-COB's lifecycle."""
+    path = f"/v1/commercial-objects/{obj['id']}:transition"
+    o = ok(manager.call("POST", path, {"transition": "submit"}, revision=obj["revision"]))
+    ev = ok(approver.call("POST", "/v1/evidence/items", {"kind": "approval", "content": {"subjectRef": o["id"], "decision": "approve"}},
+                          base=META), 201)["id"]
+    o = ok(approver.call("POST", path, {"transition": "approve", "evidenceRef": ev}, revision=o["revision"]))
+    return ok(manager.call("POST", path, {"transition": "activate"}, revision=o["revision"]))
+
+
+def money(minor, cur="EUR", scale=2):
+    return {"amountMinor": str(minor), "currency": cur, "scale": scale}
+
+
+def publish_list(t, entries, currency="EUR", scope=(), code=None):
+    """A published price list (author != approver, CR-PRC-02); first-version lists need one pricing-manager approval."""
+    author = Principal(t, "pl-author", roles=("pricing-manager", "pricing-operator"))
+    approver = Principal(t, "pl-approver", roles=("pricing-manager",))
+    lst = ok(author.call("POST", "/v1/pricing/price-lists", {"code": code or unique("PL"), "currency": currency, "scope": list(scope)}), 201)
+    lst = ok(author.call("POST", f"/v1/pricing/price-lists/{lst['id']}/entries", {"entries": entries}, revision=lst["revision"]), 201)["list"]
+    ok(author.call("POST", f"/v1/pricing/price-lists/{lst['id']}:submit", {}))
+    lst = ok(approver.call("POST", f"/v1/pricing/price-lists/{lst['id']}:approve", {"decision": "approve"}))
+    assert lst["lifecycleState"] == "approved", lst
+    return ok(author.call("POST", f"/v1/pricing/price-lists/{lst['id']}:publish", {}))
+
+
+def eq(d, v):
+    return {"dimension": d, "op": "eq", "values": [v]}
+
+
+def isin(d, *vs):
+    return {"dimension": d, "op": "in", "values": list(vs)}

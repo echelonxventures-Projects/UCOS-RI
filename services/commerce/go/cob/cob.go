@@ -1047,7 +1047,11 @@ func (c *COB) view(ctx context.Context, p svc.Principal, o Object, explicit map[
 	}
 	ref := "urn:ucos:ucos.std:policy:" + c.Cfg.ResolutionPolicy
 	cfg.ConfigRef = &ref
-	a := ctxrt.Assemble(world, explicit, map[string]any{"tenant": p.TenantSlug, "party": p.Party}, nil, instant(asOf), c.Cfg.CacheGranularityS)
+	principal := map[string]any{"tenant": p.TenantSlug}
+	if p.Party != "" {
+		principal["party"] = p.Party // a system principal (no party) resolves the universal-context view
+	}
+	a := ctxrt.Assemble(world, explicit, principal, nil, instant(asOf), c.Cfg.CacheGranularityS)
 	if a.Status != "ok" {
 		code := "unknown"
 		if a.Code != nil {

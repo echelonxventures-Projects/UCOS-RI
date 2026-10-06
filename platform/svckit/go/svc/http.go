@@ -1,7 +1,9 @@
 package svc
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -280,6 +282,24 @@ func JSON(w http.ResponseWriter, status int, v any) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	return json.NewEncoder(w).Encode(v)
+}
+
+// DecodeContext decodes a UCOS-Context value (base64url canonical JSON object, CIC-011-001 §6); empty is {}.
+func DecodeContext(h string) (map[string]any, error) {
+	out := map[string]any{}
+	if h == "" {
+		return out, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(h, "="))
+	if err != nil {
+		return nil, Errf(400, "E-CTX-INVALID-HEADER", "UCOS-Context must be base64url JSON")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&out); err != nil {
+		return nil, Errf(400, "E-CTX-INVALID-HEADER", "UCOS-Context must be a JSON object")
+	}
+	return out, nil
 }
 
 // Read decodes the request body (≤ 64 MiB) into v.

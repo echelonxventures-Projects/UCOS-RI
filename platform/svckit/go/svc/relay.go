@@ -13,14 +13,18 @@ import (
 )
 
 // Relay publishes every schema's outbox in id order with the dedicated relay role (CIC-006-001 §5) to the
-// CloudEvents HTTP sinks (ucos-lite EventBusPort adapter). With no sinks configured, rows are marked
-// published (nothing subscribes yet), preserving outbox semantics.
+// CloudEvents HTTP sinks (ucos-lite EventBusPort adapter) and to in-process subscribers. With neither configured,
+// rows are marked published (nothing subscribes yet), preserving outbox semantics. A row is marked published only
+// after every sink and subscriber accepted it, so delivery is at least once and in outbox order per schema.
 type Relay struct {
 	Pool    *pgxpool.Pool
 	Schemas []string
 	Sinks   []string
-	Log     *slog.Logger
-	client  *http.Client
+	// Subscribers are consumers composed into the same process (ucos-lite); in the cell profile they sit behind
+	// the bus instead. They must be idempotent (processed_messages) and return an error only for retryable failures.
+	Subscribers []func(ctx context.Context, envelope []byte) error
+	Log         *slog.Logger
+	client      *http.Client
 }
 
 // Run loops until ctx is done.
@@ -94,6 +98,12 @@ func (r *Relay) publish(ctx context.Context, env string) error {
 		resp.Body.Close()
 		if resp.StatusCode/100 != 2 {
 			return fmt.Errorf("sink %s answered %d", sink, resp.StatusCode)
+		}
+	}
+	for _, sub := range r.Subscribers {
+		if err := sub(ctx, []byte(env)); err != nil {
+			r.Log.Warn("subscriber failed; will retry", "error", err.Error())
+			return err
 		}
 	}
 	return nil

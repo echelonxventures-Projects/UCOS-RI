@@ -1,5 +1,5 @@
-// Command commerce-service composes the S3 commercial-core contexts for ucos-lite (CIC-030-001 §2): DOM-COB first
-// (S3a); REL, CAT, PRC and OFR join as their batches land. Each context keeps its own package and schema and talks to
+// Command commerce-service composes the S3 commercial-core contexts for ucos-lite (CIC-030-001 §2): DOM-COB, DOM-REL,
+// DOM-PRC, DOM-CAT and DOM-OFR. Each context keeps its own package and schema and talks to
 // the others only through ports wired here, so the cell profile can split them without code change (CR-030-001-02).
 //
 // Environment: UCOS_COMMERCE_DB_URL, UCOS_COMMERCE_RELAY_DB_URL, UCOS_TOKEN_ISSUER, UCOS_PUBLIC_URL, UCOS_METADATA_URL,
@@ -22,7 +22,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ucos.dev/ri/authn/authn"
+	"ucos.dev/ri/commerce/cat"
 	"ucos.dev/ri/commerce/cob"
+	"ucos.dev/ri/commerce/ofr"
 	"ucos.dev/ri/commerce/prc"
 	"ucos.dev/ri/commerce/rel"
 	"ucos.dev/ri/svckit/svc"
@@ -73,7 +75,7 @@ func run(log *slog.Logger) error {
 		ClientID: env("UCOS_SERVICE_CLIENT_ID", "commerce-service"), Secret: os.Getenv("UCOS_SERVICE_CLIENT_SECRET")}
 
 	permissions := map[string]string{}
-	for _, table := range []map[string]string{cob.Permissions, rel.Permissions, prc.Permissions} {
+	for _, table := range []map[string]string{cob.Permissions, rel.Permissions, prc.Permissions, cat.Permissions, ofr.Permissions} {
 		for k, v := range table {
 			permissions[k] = v
 		}
@@ -103,9 +105,16 @@ func run(log *slog.Logger) error {
 	pricing := &prc.PRC{DB: db, Meta: meta, Clock: clock, Source: src, Objects: pricingObjects{objects: objects},
 		Cfg: prc.Config{EntryResolution: "price-entry.resolution", Rounding: "pricing.rounding", Approval: "pricing.approval",
 			ChargeTypes: []string{"one-time", "recurring", "usage"}}}
+	catalogs := &cat.CAT{DB: db, Meta: meta, Clock: clock, Source: src, Objects: catalogObjects{objects: objects},
+		Graph: catalogGraph{rels: relationships}, Prices: catalogPrices{pricing: pricing},
+		Cfg: cat.Config{Resolution: "catalog.resolution", VisibleStates: "catalog.visible-states", DefaultEligibility: "catalog.eligibility"}}
+	offers := &ofr.OFR{DB: db, Meta: meta, Clock: clock, Source: src, Objects: offerObjects{objects: objects},
+		Pricing: offerPricing{pricing: pricing}, Cfg: ofr.Config{Lifecycle: "offer", Resolution: "offer.resolution", Approval: "offer.publish-approval"}}
 	objects.Routes(srv)
 	relationships.Routes(srv)
 	pricing.Routes(srv)
+	catalogs.Routes(srv)
+	offers.Routes(srv)
 
 	srv.Mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
 	srv.Mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +136,10 @@ func run(log *slog.Logger) error {
 		_ = svc.JSON(w, 200, map[string]any{"now": clock.Now()})
 	})
 
-	relay := &svc.Relay{Pool: relayPool, Schemas: []string{"ucos_commerce", cob.Schema, rel.Schema, prc.Schema}, Log: log}
+	// DOM-CAT consumes object, relationship and its own materialization events through the outbox relay (in-process
+	// subscriber in ucos-lite; a bus consumer in the cell profile).
+	relay := &svc.Relay{Pool: relayPool, Schemas: []string{"ucos_commerce", cob.Schema, rel.Schema, prc.Schema, cat.Schema, ofr.Schema},
+		Subscribers: []func(context.Context, []byte) error{catalogs.Consume}, Log: log}
 	go relay.Run(ctx)
 	servers := []*http.Server{
 		{Addr: env("UCOS_HTTP_ADDR", ":8080"), Handler: srv.Wrap(), ReadHeaderTimeout: 5 * time.Second},

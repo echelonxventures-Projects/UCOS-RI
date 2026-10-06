@@ -13,7 +13,7 @@ COPY services/commerce/go /src/services/commerce/go
 RUN go build -trimpath -ldflags="-s -w" -o /out/commerce-service ./cmd/commerce-service
 
 FROM build AS test
-RUN go vet ./... && go test -count=1 ./... && cd /src/platform/lifecycle/go && go test -count=1 ./...
+RUN go vet ./... && go test -count=1 ./... && cd /src/platform/lifecycle/go && go test -count=1 ./... && cd /src/platform/pdp/go && go test -count=1 ./...
 
 FROM gcr.io/distroless/static-debian12@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS runtime
 COPY --from=build /out/commerce-service /commerce-service
