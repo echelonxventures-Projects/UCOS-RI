@@ -49,6 +49,17 @@
    `cob.transition`; then policy `cob.transition` decides. The `approve` requirement for evidence is met by an
    `approval` evidence item that the approver captured and that references the object.
 
+9. **DOM-REL (S3b).**
+   - Endpoints are resolved through a port: commercial objects in-process, parties through identity-service. Doing
+     so needed identity's PEP to implement ADR 0008's platform-service read on behalf of `UCOS-Tenant`, which it
+     lacked.
+   - Constraint checks run under advisory locks: the whole type for acyclic types (cycles span any endpoints),
+     otherwise the two endpoint keys.
+   - The closure table of a hierarchical type is rebuilt from its edges inside the same transaction, so it always
+     equals the recomputed closure.
+   - Ending an edge sets `validTo`. Edges are never deleted, and ended edges are immutable.
+   - GenerateVariants records `VARIANT_OF` edges through a port wired in the composition root.
+
 ## Corpus gaps (AR-0005)
 - The ucos.std `commercial-object` activate guard reads `aggregate.launchAt`, but no attribute `launchAt` exists, so
   the guard never fails.

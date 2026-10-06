@@ -24,26 +24,74 @@ import (
 
 // Config is composition-root configuration: names come from metadata, never from code (UCOS-L001).
 type Config struct {
-	RootType          string // the kernel aggregate type every commercial object type descends from
-	CreatePolicy      string // authorization policy of CreateCommercialObject
-	TransitionPolicy  string // authorization policy of TransitionLifecycle (CIC-007-001 default <context>.transition)
-	ResolutionPolicy  string // ResolutionConfig of fact kind attribute-value
-	SubmitTransition  string // transition whose actor is the policy input resource.submittedBy
+	RootType         string // the kernel aggregate type every commercial object type descends from
+	CreatePolicy     string // authorization policy of CreateCommercialObject
+	TransitionPolicy string // authorization policy of TransitionLifecycle (CIC-007-001 default <context>.transition)
+	ResolutionPolicy string // ResolutionConfig of fact kind attribute-value
+	SubmitTransition string // transition whose actor is the policy input resource.submittedBy
 	// TransitionPermissions maps transitions that need a permission other than DefaultTransitionPermission
 	// (e.g. approve -> cob.approve).
 	TransitionPermissions       map[string]string
 	DefaultTransitionPermission string
-	HomeRegion        string
-	CacheGranularityS int64
+	HomeRegion                  string
+	CacheGranularityS           int64
+}
+
+// VariantLinker records a variant's VARIANT_OF relationship in DOM-REL (port wired by the composition root).
+type VariantLinker interface {
+	LinkVariant(ctx context.Context, p svc.Principal, variantURN, masterURN string, axes map[string]any) error
 }
 
 // COB implements DOM-COB.
 type COB struct {
-	DB     *svc.DB
-	Meta   *svc.Metadata
-	Clock  *svc.Clock
-	Source string
-	Cfg    Config
+	DB       *svc.DB
+	Meta     *svc.Metadata
+	Clock    *svc.Clock
+	Source   string
+	Cfg      Config
+	Variants VariantLinker
+}
+
+// EndpointInfo serves DOM-REL's endpoint resolution: whether an object exists and its type linearization.
+func (c *COB) EndpointInfo(ctx context.Context, p svc.Principal, ref string) (bool, []string, error) {
+	var lineage []string
+	err := c.DB.InTenantTx(ctx, p.TenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT type_lineage FROM ucos_cob.commercial_objects
+			WHERE tenant_id = current_setting('ucos.tenant_id')::uuid AND id = $1`, idOf(ref)).Scan(&lineage)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil, nil
+	}
+	return err == nil, lineage, err
+}
+
+// RequiredComponent answers DOM-REL RUL-REL-1: child is a mandatory component (minQty > 0, not optional) of parent's
+// composition while parent is in an active-category state.
+func (c *COB) RequiredComponent(ctx context.Context, p svc.Principal, parent, child string) (bool, error) {
+	o, err := c.Get(ctx, p, parent)
+	if err == svc.ErrNotFound {
+		return false, nil
+	}
+	if err != nil || o.Composition == nil {
+		return false, err
+	}
+	ti, err := c.typeInfo(ctx, p.TenantSlug, o.TypeRef)
+	if err != nil {
+		return false, err
+	}
+	if ti.model.Category(o.LifecycleState) != "active" {
+		return false, nil
+	}
+	for _, s := range o.Composition.Components {
+		if s.MinQty > 0 && !s.Optional {
+			for _, m := range s.AllowedObjects {
+				if m == idOf(child) {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
 }
 
 // Object is a CommercialObject as served by GetCommercialObject.
@@ -869,6 +917,11 @@ func (c *COB) GenerateVariants(ctx context.Context, p svc.Principal, ref string,
 			FacetsConfig: master.FacetsConfig, OwningParty: master.OwningParty, variantOf: master.ID})
 		if err != nil {
 			return out, err
+		}
+		if c.Variants != nil {
+			if err := c.Variants.LinkVariant(ctx, p, v.URN, master.URN, combo); err != nil {
+				return out, err
+			}
 		}
 		out = append(out, v)
 	}

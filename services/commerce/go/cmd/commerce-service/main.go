@@ -23,6 +23,7 @@ import (
 
 	"ucos.dev/ri/authn/authn"
 	"ucos.dev/ri/commerce/cob"
+	"ucos.dev/ri/commerce/rel"
 	"ucos.dev/ri/svckit/svc"
 )
 
@@ -70,8 +71,10 @@ func run(log *slog.Logger) error {
 		ClientID: env("UCOS_SERVICE_CLIENT_ID", "commerce-service"), Secret: os.Getenv("UCOS_SERVICE_CLIENT_SECRET")}
 
 	permissions := map[string]string{}
-	for k, v := range cob.Permissions {
-		permissions[k] = v
+	for _, table := range []map[string]string{cob.Permissions, rel.Permissions} {
+		for k, v := range table {
+			permissions[k] = v
+		}
 	}
 	sec := &svc.Security{Validator: validator, PublicBase: strings.TrimSuffix(env("UCOS_PUBLIC_URL", "http://commerce:8080"), "/"),
 		Permissions: permissions, Roles: meta.Roles, ScopeContext: func(path string) string {
@@ -89,7 +92,14 @@ func run(log *slog.Logger) error {
 		ResolutionPolicy: "cob.contextual-precedence", SubmitTransition: "submit", HomeRegion: env("UCOS_REGION", "lite"),
 		DefaultTransitionPermission: "cob.transition", TransitionPermissions: map[string]string{"approve": "cob.approve", "reject": "cob.approve"},
 		CacheGranularityS: 60}}
+	identityReader := &svc.Metadata{Base: env("UCOS_IDENTITY_URL", issuer), Issuer: issuer, ClientID: meta.ClientID, Secret: meta.Secret}
+	relationships := &rel.REL{DB: db, Meta: meta, Clock: clock, Source: src, Components: objects,
+		CreatePolicy: "rel.create", LimitsPolicy: "rel.traversal-limits",
+		Endpoints: endpoints{objects: objects, identity: identityReader, meta: meta,
+			write: map[string]string{"co": "cob.update", "party": "party.update"}}}
+	objects.Variants = variantLinker{rels: relationships, relType: env("UCOS_COB_VARIANT_RELTYPE", "VARIANT_OF")}
 	objects.Routes(srv)
+	relationships.Routes(srv)
 
 	srv.Mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
 	srv.Mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +121,7 @@ func run(log *slog.Logger) error {
 		_ = svc.JSON(w, 200, map[string]any{"now": clock.Now()})
 	})
 
-	relay := &svc.Relay{Pool: relayPool, Schemas: []string{"ucos_commerce", cob.Schema}, Log: log}
+	relay := &svc.Relay{Pool: relayPool, Schemas: []string{"ucos_commerce", cob.Schema, rel.Schema}, Log: log}
 	go relay.Run(ctx)
 	servers := []*http.Server{
 		{Addr: env("UCOS_HTTP_ADDR", ":8080"), Handler: srv.Wrap(), ReadHeaderTimeout: 5 * time.Second},

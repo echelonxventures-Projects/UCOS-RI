@@ -272,6 +272,17 @@ func (g *Guard) Require(r *http.Request, req Requirement) (authn.Principal, map[
 	if p.TenantSlug == "" {
 		return p, nil, nil, kit.Errf(401, "E-IDN-TOKEN-INVALID", "token carries no tenant")
 	}
+	// ADR 0008: a platform service (role platform-service in tenant platform, scope ucos:platform:read) may read on
+	// behalf of the tenant named by UCOS-Tenant; it never writes for a tenant and holds no tenant permissions.
+	if p.TenantSlug == "platform" && p.HasRole("platform-service") && !req.Write && r.Method == http.MethodGet {
+		if t := r.Header.Get("UCOS-Tenant"); t != "" && t != "platform" {
+			if !p.HasScope("ucos:platform:read") {
+				return p, nil, nil, kit.Errf(403, "E-API-INSUFFICIENT-SCOPE", "platform services need ucos:platform:read")
+			}
+			p.TenantSlug = t
+			return p, map[string]bool{}, nil, nil
+		}
+	}
 	if req.Scope != "" && !p.HasScope(req.Scope) {
 		return p, nil, nil, kit.Errf(403, "E-API-INSUFFICIENT-SCOPE", "operation requires scope %s", req.Scope)
 	}

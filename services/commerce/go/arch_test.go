@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-var contexts = []string{"cob"}
+var contexts = []string{"cob", "rel"}
 
 func TestContextsAreIsolated(t *testing.T) {
 	for _, c := range contexts {

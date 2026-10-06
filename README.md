@@ -96,7 +96,8 @@ lifecycle-bearing aggregates in S3. Next is **S2, identity and party**.
 | Batch | State |
 |-------|-------|
 | S3a commercial objects | Done (ADR 0011, AR-0005). New shared modules: `platform/svckit/go` (route-table PEP, metadata client, relay, Idempotency-Key replay) and `platform/lifecycle/go` (lifecycle-instance runtime per CIC-007-001 §2.1). `commerce-service` composes the commercial core for ucos-lite, with DOM-COB first. Every concrete ucos.std commercial type instantiates from metadata alone, and the full lifecycle runs with SoD, approval evidence and policy (CR-COB-01). Resolution is checked against an independent oracle on 1,000 random contexts (CR-COB-02), and concurrent overlapping writes never overlap (mutation-checked). Composition, variants, find with CEL filter, and idempotent create are implemented. **13 black-box tests.** |
-| S3b | Next: DOM-REL relationships (VARIANT_OF, COMPOSED_OF, REQUIRES …) |
+| S3b relationships | Done (ADR 0011 §9). DOM-REL adds typed, time-bounded, scoped edges with subtype-aware endpoint types, resolved in their owning contexts (COB in-process, parties through identity-service). Cardinality over time, acyclicity and closure tables for hierarchical types (DOM-HIER) are enforced. Concurrent cycle-forming edges never both commit (CR-REL-01, mutation-checked), and the closure table equals a recomputed closure after random operations (CR-REL-02). Also: RUL-REL-1 required components, bounded traversal with context and CEL filters, atomic and non-atomic bulk operations, and VARIANT_OF edges for generated variants. **10 more black-box tests (23 in S3).** |
+| S3c | Next: DOM-CAT catalogs and DOM-PRC pricing |
 
 Remaining for S1 (metadata kernel: ONT, CTX, POL, LFC, EVT registry, EVD, GOV ChangeSets). Its exit criteria are
 that `ucos.std` installs via ChangeSet and the context-resolution conformance suite is green.

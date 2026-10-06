@@ -48,7 +48,7 @@ services:
       UCOS_MIGRATE_DB_URL: postgresql://ucos_owner:${UCOS_OWNER_PASSWORD:-owner-dev}@db:5432/ucos
     command: ["python", "tools/migrate.py", "domains/echo", "kernel/ontology", "kernel/lifecycle", "kernel/contextreg",
               "kernel/policy", "kernel/governance", "kernel/evidence", "services/eventing", "services/identity",
-              "services/commerce/commerce-service", "services/commerce/cob"]
+              "services/commerce/commerce-service", "services/commerce/cob", "services/commerce/rel"]
 
   echo:
     build: {context: ., dockerfile: domains/echo/Containerfile, target: runtime}
@@ -132,6 +132,7 @@ services:
       UCOS_METADATA_URL: http://metadata:8080
       UCOS_SERVICE_CLIENT_ID: commerce-service
       UCOS_SERVICE_CLIENT_SECRET: ${UCOS_COMMERCE_CLIENT_SECRET:-commerce-client-dev-secret}
+      UCOS_IDENTITY_URL: http://identity:8080
       UCOS_CLOCK: adjustable     # ucos-lite only
       UCOS_REGION: lite
     ports: ["127.0.0.1:${UCOS_COMMERCE_PORT:-18120}:8080"]
