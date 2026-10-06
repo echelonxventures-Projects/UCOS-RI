@@ -3,6 +3,7 @@ FROM golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84
 ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly
 COPY platform/authn/go /src/platform/authn/go
 COPY platform/pdp/go /src/platform/pdp/go
+COPY platform/context-runtime/go /src/platform/context-runtime/go
 COPY services/identity/go/go.mod services/identity/go/go.sum /src/services/identity/go/
 WORKDIR /src/services/identity/go
 RUN go mod download && go mod verify

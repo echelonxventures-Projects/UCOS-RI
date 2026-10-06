@@ -3,7 +3,7 @@ import { STATUS_CODES, createServer, type IncomingMessage, type ServerResponse }
 import pg from "pg";
 import { canonical } from "../../../../platform/context-runtime/typescript/src/jcs.ts";
 import { Problem, Service, parseExact, ulid } from "./service.ts";
-import { AuthnError, Validator, type Principal } from "../../../../platform/authn/typescript/src/authn.ts";
+import { AuthnError, Validator, grants as holds, type Principal } from "../../../../platform/authn/typescript/src/authn.ts";
 
 const issuer = (process.env.UCOS_TOKEN_ISSUER ?? "http://identity:8080").replace(/\/$/, "");
 const publicBase = (process.env.UCOS_PUBLIC_URL ?? "http://eventing:8080").replace(/\/$/, "");
@@ -33,7 +33,7 @@ async function grants(p: Principal, permission: string): Promise<boolean> {
     const page = (await r.json()) as { items: { key: string; definition: { permissions?: string[] } }[] };
     catalog = { roles: new Map(page.items.map((i) => [i.key, i.definition.permissions ?? []])), at: Date.now() };
   }
-  return p.roles.some((role) => (catalog.roles.get(role) ?? []).includes(permission));
+  return holds(p, catalog.roles, permission); // roles ∪ delegated, capped by the permission limit (ADR 0009)
 }
 
 

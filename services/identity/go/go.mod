@@ -6,6 +6,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.1
 	ucos.dev/ri/authn v0.0.0
+	ucos.dev/ri/contextruntime v0.0.0
 	ucos.dev/ri/pdp v0.0.0
 )
 
@@ -28,5 +29,6 @@ require (
 
 replace (
 	ucos.dev/ri/authn => ../../../platform/authn/go
+	ucos.dev/ri/contextruntime => ../../../platform/context-runtime/go
 	ucos.dev/ri/pdp => ../../../platform/pdp/go
 )

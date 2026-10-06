@@ -28,3 +28,39 @@ test("bearer writes are rejected before any key lookup", async () => {
   const v = new Validator("http://idp", "ucos");
   await assert.rejects(v.authenticate({}, "POST", "http://svc/x", true), (e: AuthnError) => e.code === "E-IDN-AUTHENTICATION-REQUIRED");
 });
+
+test("effective permissions: roles plus delegated, capped by the limit", async () => {
+  const { permissions } = await import("../src/authn.ts");
+  const catalog = new Map([["buyer", ["catalog.read", "order.place"]], ["sales-rep", ["quote.create"]]]);
+  const p = { subject: "s", party: "p", tenant: "t", roles: ["buyer"], scopes: [], acr: "AAL1", act: null, jkt: "",
+    delegated: ["quote.approve"], limit: null as string[] | null, claims: {} };
+  assert.deepEqual([...permissions(p, catalog)].sort(), ["catalog.read", "order.place", "quote.approve"]);
+  p.limit = ["order.place", "quote.create"];
+  assert.deepEqual([...permissions(p, catalog)], ["order.place"]);
+  p.limit = [];
+  assert.equal(permissions(p, catalog).size, 0);
+});
+
+test("party cut-offs revoke older tokens of the subject or an actor", async () => {
+  const { createServer } = await import("node:http");
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const jwk = publicKey.export({ format: "jwk" }) as any;
+  const srv = createServer((_q, res) => res.end(JSON.stringify({ keys: [{ kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y, kid: "k1" }] })));
+  await new Promise<void>((r) => srv.listen(0, r));
+  const v = new Validator("http://idp", "ucos");
+  v.jwksUrl = `http://127.0.0.1:${(srv.address() as any).port}`;
+  const now = Math.floor(Date.now() / 1000);
+  const tok = (claims: object) => jws(privateKey, { alg: "ES256", typ: "at+jwt", kid: "k1" },
+    { iss: "http://idp", aud: "ucos", sub: "s", exp: now + 300, jti: Math.random().toString(), ...claims });
+  v.revokeBefore("urn:ucos:t:party:a", now);
+  v.revokeBefore("urn:ucos:t:party:a", now - 100);
+  try {
+    await assert.rejects(v.verifyToken(tok({ ucos_party: "urn:ucos:t:party:a", iat: now - 5 })), (e: AuthnError) => e.code === "E-IDN-TOKEN-REVOKED");
+    await assert.rejects(v.verifyToken(tok({ ucos_party: "urn:ucos:t:party:b", iat: now - 5, act: { sub: "g", ucos_party: "urn:ucos:t:party:a" } })),
+      (e: AuthnError) => e.code === "E-IDN-TOKEN-REVOKED");
+    const fresh = await v.verifyToken(tok({ ucos_party: "urn:ucos:t:party:a", iat: now + 1, ucos_permission_limit: [] }));
+    assert.deepEqual(fresh.limit, []);
+  } finally {
+    srv.close();
+  }
+});

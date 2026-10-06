@@ -12,10 +12,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"ucos.dev/ri/authn/authn"
+	"ucos.dev/ri/identity/authority"
 	"ucos.dev/ri/identity/kit"
 	"ucos.dev/ri/pdp/pdp"
 )
@@ -108,6 +110,55 @@ func (m *Metadata) Permissions(ctx context.Context, tenant string) (map[string][
 	return out, nil
 }
 
+// RoleDefinitions returns role code → definition (permissions, assignable, sensitivity) from the tenant's registry.
+func (m *Metadata) RoleDefinitions(ctx context.Context, tenant string) (map[string]map[string]any, error) {
+	var page struct {
+		Items []struct {
+			Key        string         `json:"key"`
+			Definition map[string]any `json:"definition"`
+		} `json:"items"`
+	}
+	if err := m.get(ctx, tenant, "/v1/registry/roles", 30*time.Second, &page); err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]any{}
+	for _, it := range page.Items {
+		out[it.Key] = it.Definition
+	}
+	return out, nil
+}
+
+// DraftChangeSet verifies that ref is a draft ChangeSet of tenant authored by author (DOM-GOV) and returns its URN:
+// governed authority definitions are drafted into the author's own open ChangeSet.
+func (m *Metadata) DraftChangeSet(ctx context.Context, tenant, ref, author string) (string, error) {
+	id := ref
+	if i := strings.LastIndex(ref, ":"); i >= 0 {
+		id = ref[i+1:]
+	}
+	var cs struct {
+		ID     string `json:"id"`
+		State  string `json:"state"`
+		Author string `json:"author"`
+	}
+	if err := m.get(ctx, tenant, "/v1/governance/changesets/"+url.PathEscape(id), 0, &cs); err != nil {
+		if err == kit.NotFound {
+			return "", kit.Errf(422, "E-GOV-CHANGESET-REQUIRED", "ChangeSet %s does not exist", ref)
+		}
+		return "", err
+	}
+	if cs.State != "draft" || cs.Author != author {
+		return "", kit.Errf(409, "E-GOV-STATE-CONFLICT", "definitions can only be drafted into your own draft ChangeSet (%s is %s)", cs.ID, cs.State)
+	}
+	return cs.ID, nil
+}
+
+// Get reads an evidence item (authority.Evidence).
+func (m *Metadata) Get(ctx context.Context, tenant, id string) (authority.EvidenceItem, error) {
+	var ev authority.EvidenceItem
+	err := m.get(ctx, tenant, "/v1/evidence/items/"+url.PathEscape(id), 0, &ev)
+	return ev, err
+}
+
 // Decide evaluates the tenant's published policy `name` with the embedded PDP.
 func (m *Metadata) Decide(ctx context.Context, tenant, name string, input map[string]any) (any, error) {
 	var bundle struct {
@@ -195,12 +246,7 @@ func (g *Guard) Require(r *http.Request, req Requirement) (authn.Principal, map[
 	if err != nil {
 		return p, nil, nil, err
 	}
-	perms := map[string]bool{}
-	for _, role := range p.Roles {
-		for _, x := range roles[role] {
-			perms[x] = true
-		}
-	}
+	perms := p.Permissions(roles) // roles ∪ delegated, capped by the permission limit (ADR 0009)
 	if req.Permission != "" && !perms[req.Permission] {
 		return p, perms, nil, kit.Errf(403, "E-API-FORBIDDEN", "operation requires permission %s", req.Permission)
 	}
@@ -220,6 +266,24 @@ func (g *Guard) Require(r *http.Request, req Requirement) (authn.Principal, map[
 		obligations = d.Obligations
 	}
 	return p, perms, obligations, nil
+}
+
+// RequireGovernance authenticates a remote owner protocol call (ADR 0009): a sender-constrained platform service
+// token (tenant platform, role platform-service) with scope ucos:platform:admin. It returns the target tenant
+// from UCOS-Tenant. Only governance (metadata-service) is configured to obtain that scope.
+func (g *Guard) RequireGovernance(r *http.Request) (string, error) {
+	p, err := g.V.Authenticate(r, g.PublicBase+r.URL.RequestURI(), true)
+	if err != nil {
+		return "", err
+	}
+	if p.TenantSlug != "platform" || !p.HasRole("platform-service") || !p.HasScope("ucos:platform:admin") || p.JKT == "" {
+		return "", kit.Errf(403, "E-API-FORBIDDEN", "governed-definition protocol calls are reserved to governance")
+	}
+	tenant := r.Header.Get("UCOS-Tenant")
+	if tenant == "" || tenant == "platform" {
+		return "", kit.Errf(400, "E-API-VALIDATION", "UCOS-Tenant names the tenant whose definitions are governed")
+	}
+	return tenant, nil
 }
 
 // AsProblem adapts authn errors to problems.

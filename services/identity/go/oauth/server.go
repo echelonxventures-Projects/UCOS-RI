@@ -36,7 +36,11 @@ type Parties interface {
 
 // Roles is the DOM-AUTH port.
 type Roles interface {
-	Effective(ctx context.Context, tenant, party string) ([]string, error)
+	// TokenAuthority is the coarse authority a token for party carries: role codes, permissions received through
+	// delegations, and the instant any of it expires (RUL-AUTH-1, ADR 0009).
+	TokenAuthority(ctx context.Context, tenant, party string) (roles, delegated []string, horizon *time.Time, err error)
+	// AgentLimit is what an agent party may exercise for delegator through DOM-AUTH delegations (empty = nothing).
+	AgentLimit(ctx context.Context, tenant, delegator, agentParty string) ([]string, *time.Time, error)
 	Redeem(ctx context.Context, tenant, email, party, corr string) error
 }
 
@@ -528,7 +532,8 @@ func isoMinutes(v any) (time.Duration, bool) {
 
 type tokenSpec struct {
 	tenant, identity, party, clientID, acr, jkt string
-	amr, roles, scope                           []string
+	amr, roles, scope, delegated                []string
+	limit                                       []string // nil = no permission limit
 	aud                                         any
 	act                                         map[string]any
 	extra                                       map[string]any
@@ -536,17 +541,45 @@ type tokenSpec struct {
 	notAfter                                    int64
 }
 
+// horizonUnix is the token's latest exp given the authority horizon (0 = none).
+func horizonUnix(h *time.Time) int64 {
+	if h == nil {
+		return 0
+	}
+	return h.Unix()
+}
+
+// minPositive returns the smaller positive bound (0 = unbounded).
+func minPositive(a, b int64) int64 {
+	switch {
+	case a <= 0:
+		return b
+	case b <= 0 || a < b:
+		return a
+	}
+	return b
+}
+
 func (s *Server) issue(t tokenSpec) (map[string]any, error) {
 	now := time.Now()
 	exp := now.Add(t.lifetime).Unix()
 	if t.notAfter > 0 && exp > t.notAfter {
-		exp = t.notAfter // exchanged tokens never outlive the subject token
+		exp = t.notAfter // never outlive the subject token or the authority the token carries
+	}
+	if exp <= now.Unix() {
+		return nil, oerr(400, "invalid_grant", "the authority this token would carry has already expired")
 	}
 	claims := map[string]any{"iss": s.Issuer, "sub": t.identity, "aud": t.aud, "iat": now.Unix(), "nbf": now.Unix(),
 		"exp": exp, "jti": kit.ULID(), "client_id": t.clientID, "scope": strings.Join(t.scope, " "),
 		"ucos_tenant": t.tenant, "ucos_party": t.party, "ucos_roles": nonNil(t.roles), "acr": t.acr, "amr": nonNil(t.amr)}
 	for k, v := range t.extra {
 		claims[k] = v
+	}
+	if len(t.delegated) > 0 {
+		claims["ucos_delegated"] = t.delegated
+	}
+	if t.limit != nil {
+		claims["ucos_permission_limit"] = t.limit
 	}
 	if t.act != nil {
 		claims["act"] = t.act
@@ -600,12 +633,13 @@ func (s *Server) grantCode(r *http.Request) (map[string]any, error) {
 	if err != nil || ident.Status != "active" {
 		return nil, oerr(400, "invalid_grant", "identity is not active")
 	}
-	roles, err := s.Roles.Effective(ctx, tenant, ident.PartyRef)
+	roles, delegated, horizon, err := s.Roles.TokenAuthority(ctx, tenant, ident.PartyRef)
 	if err != nil {
 		return nil, err
 	}
 	return s.issue(tokenSpec{tenant: tenant, identity: identity, party: ident.PartyRef, clientID: c.ID, acr: acr, amr: amr,
-		roles: roles, scope: strings.Fields(scope), aud: APIAudience, jkt: jkt, lifetime: s.lifetime(ctx, tenant)})
+		roles: roles, delegated: delegated, scope: strings.Fields(scope), aud: APIAudience, jkt: jkt,
+		lifetime: s.lifetime(ctx, tenant), notAfter: horizonUnix(horizon)})
 }
 
 func (s *Server) grantClientCredentials(r *http.Request) (map[string]any, error) {
@@ -628,16 +662,38 @@ func (s *Server) grantClientCredentials(r *http.Request) (map[string]any, error)
 			amr: []string{"client-secret"}, aud: TokenExchangeAudience, jkt: jkt, lifetime: 5 * time.Minute,
 			extra: map[string]any{"ucos_owner_party": ident.AgentProfile["ownerParty"]}})
 	}
-	roles, err := s.Roles.Effective(ctx, c.Tenant, ident.PartyRef)
+	if c.Tenant == "platform" && ident.Kind == "service" {
+		// Cross-tenant read principal of platform services (ADR 0008); governance clients may also hold
+		// ucos:platform:admin for the remote owner protocol (ADR 0009). Never tenant authority.
+		return s.issue(tokenSpec{tenant: c.Tenant, identity: ident.ID, party: ident.PartyRef, clientID: c.ID, acr: "AAL2",
+			amr: []string{"client-secret"}, roles: []string{"platform-service"}, scope: intersect(r.PostForm.Get("scope"), c.AllowedScopes),
+			aud: APIAudience, jkt: jkt, lifetime: s.lifetime(ctx, c.Tenant)})
+	}
+	roles, delegated, horizon, err := s.Roles.TokenAuthority(ctx, c.Tenant, ident.PartyRef)
 	if err != nil {
 		return nil, err
 	}
-	if c.Tenant == "platform" && ident.Kind == "service" {
-		roles = []string{"platform-service"} // cross-tenant read principal of platform services (ADR 0008)
-	}
 	return s.issue(tokenSpec{tenant: c.Tenant, identity: ident.ID, party: ident.PartyRef, clientID: c.ID, acr: "AAL2",
-		amr: []string{"client-secret"}, roles: roles, scope: intersect(r.PostForm.Get("scope"), c.AllowedScopes),
-		aud: APIAudience, jkt: jkt, lifetime: s.lifetime(ctx, c.Tenant)})
+		amr: []string{"client-secret"}, roles: roles, delegated: delegated, scope: intersect(r.PostForm.Get("scope"), c.AllowedScopes),
+		aud: APIAudience, jkt: jkt, lifetime: s.lifetime(ctx, c.Tenant), notAfter: horizonUnix(horizon)})
+}
+
+// narrowLimit intersects an existing permission limit (nil = none) with perms: exchange only ever narrows.
+func narrowLimit(limit, perms []string) []string {
+	if limit == nil {
+		return append([]string{}, perms...)
+	}
+	allowed := map[string]bool{}
+	for _, p := range perms {
+		allowed[p] = true
+	}
+	out := []string{}
+	for _, p := range limit {
+		if allowed[p] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func depth(act map[string]any) int {
@@ -707,8 +763,20 @@ func (s *Server) grantExchange(r *http.Request) (map[string]any, error) {
 	if err != nil || agent.Status != "active" || agent.Kind != "agent" {
 		return nil, oerr(400, "invalid_grant", "agent identity is not active")
 	}
+	// The agent acts for its accountable owner with the subject token's authority, or for another party only within
+	// what that party delegated to the agent through DOM-AUTH (re-validated now; RUL-AUTH-1, ADR 0009).
+	limit := subj.Limit
+	notAfter := int64(intNum(subj.Claims["exp"], 0))
 	if owner, _ := agent.AgentProfile["ownerParty"].(string); owner != subj.Party {
-		return nil, oerr(403, "access_denied", "the agent may act only for its accountable owner party (DOM-AUTH delegations arrive in S2b)")
+		perms, horizon, err := s.Roles.AgentLimit(ctx, subj.TenantSlug, subj.Party, agent.PartyRef)
+		if err != nil {
+			return nil, err
+		}
+		if len(perms) == 0 {
+			return nil, oerr(403, "access_denied", "the agent may act only for its accountable owner or within an active DOM-AUTH delegation")
+		}
+		limit = narrowLimit(limit, perms)
+		notAfter = minPositive(notAfter, horizonUnix(horizon))
 	}
 	policy, _ := s.Policies.Decide(ctx, c.Tenant, "identity.agent-delegation", map[string]any{})
 	pm, _ := policy.(map[string]any)
@@ -745,10 +813,9 @@ func (s *Server) grantExchange(r *http.Request) (map[string]any, error) {
 	if subj.Act != nil {
 		act["act"] = subj.Act
 	}
-	exp := intNum(subj.Claims["exp"], 0)
 	out, err := s.issue(tokenSpec{tenant: subj.TenantSlug, identity: subj.Subject, party: subj.Party, clientID: c.ID,
-		acr: subj.Acr, amr: []string{"delegated"}, roles: subj.Roles, scope: scope, aud: APIAudience, jkt: jkt, act: act,
-		lifetime: s.lifetime(ctx, subj.TenantSlug), notAfter: int64(exp)})
+		acr: subj.Acr, amr: []string{"delegated"}, roles: subj.Roles, delegated: subj.Delegated, limit: limit, scope: scope,
+		aud: APIAudience, jkt: jkt, act: act, lifetime: s.lifetime(ctx, subj.TenantSlug), notAfter: notAfter})
 	if err != nil {
 		return nil, err
 	}
@@ -766,16 +833,25 @@ func (s *Server) verifyOwn(ctx context.Context, token, aud string) (authn.Princi
 	if err != nil {
 		return p, err
 	}
-	if s.revoked(ctx, p.Claims["jti"], p.Subject) {
+	if s.revoked(ctx, p.Claims) {
 		return p, errors.New("token revoked")
 	}
 	return p, nil
 }
 
-func (s *Server) revoked(ctx context.Context, jti any, sub string) bool {
-	j, _ := jti.(string)
+// revoked reports whether a token is revoked by jti or subject, or stale because the authority of its party or of a
+// party in its act chain narrowed after it was issued (ADR 0009).
+func (s *Server) revoked(ctx context.Context, claims map[string]any) bool {
+	j, _ := claims["jti"].(string)
+	sub, _ := claims["sub"].(string)
+	party, _ := claims["ucos_party"].(string)
+	act, _ := claims["act"].(map[string]any)
+	parties := append([]string{party}, authn.Principal{Act: act}.ActorParties()...)
 	var n int
-	_ = s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM ucos_identity.revocations WHERE key = $1 OR key = $2`, j, sub).Scan(&n)
+	_ = s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM ucos_identity.revocations
+		WHERE (kind IN ('jti','sub') AND (key = $1 OR key = $2))
+		   OR (kind = 'party' AND key = ANY($3) AND floor(extract(epoch FROM revoked_at))::bigint >= $4)`,
+		j, sub, parties, int64(intNum(claims["iat"], 0))).Scan(&n)
 	return n > 0
 }
 
@@ -807,7 +883,7 @@ func (s *Server) Introspect(w http.ResponseWriter, r *http.Request) {
 	}
 	sub, _ := claims["sub"].(string)
 	tenant, _ := claims["ucos_tenant"].(string)
-	if !ok || int64(intNum(claims["exp"], 0)) < time.Now().Unix() || s.revoked(r.Context(), claims["jti"], sub) {
+	if !ok || int64(intNum(claims["exp"], 0)) < time.Now().Unix() || s.revoked(r.Context(), claims) {
 		_ = kit.JSON(w, 200, inactive)
 		return
 	}
@@ -841,18 +917,30 @@ func (s *Server) Revoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 }
 
-// Revocations lists revoked jti/subject keys of the last 24 h for resource-server validators (CR-IDN-02).
+// Revocations is the feed resource-server validators poll (CR-IDN-02, CR-AUTH-03): revoked jti/subject keys of the
+// last 24 h, and per-party cut-offs (unix seconds) at or before which tokens of that party are stale (ADR 0009).
 func (s *Server) Revocations(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Pool.Query(r.Context(), `SELECT key FROM ucos_identity.revocations WHERE revoked_at > now() - interval '24 hours'`)
+	rows, err := s.DB.Pool.Query(r.Context(), `SELECT key, kind, floor(extract(epoch FROM revoked_at))::bigint
+		FROM ucos_identity.revocations WHERE revoked_at > now() - interval '24 hours'`)
 	if err != nil {
 		http.Error(w, "unavailable", 503)
 		return
 	}
-	keys, _ := pgx.CollectRows(rows, pgx.RowTo[string])
-	if keys == nil {
-		keys = []string{}
+	keys, notBefore := []string{}, map[string]int64{}
+	for rows.Next() {
+		var key, kind string
+		var at int64
+		if rows.Scan(&key, &kind, &at) != nil {
+			continue
+		}
+		if kind == "party" {
+			notBefore[key] = at
+		} else {
+			keys = append(keys, key)
+		}
 	}
-	_ = kit.JSON(w, 200, map[string]any{"revoked": keys})
+	rows.Close()
+	_ = kit.JSON(w, 200, map[string]any{"revoked": keys, "notBefore": notBefore})
 }
 
 // ---------------------------------------------------------------- identity commands (PEP applied by caller)
@@ -1015,8 +1103,8 @@ func (s *Server) MintTest(in TestTokenRequest) (map[string]any, error) {
 		in.Audience = APIAudience
 	}
 	return s.issue(tokenSpec{tenant: in.Tenant, identity: in.Subject, party: in.Party, clientID: "lite-test-tokens",
-		acr: in.Acr, amr: []string{"test"}, roles: in.Roles, scope: in.Scopes, aud: in.Audience, jkt: in.JKT,
-		lifetime: 10 * time.Minute})
+		acr: in.Acr, amr: []string{"test"}, roles: in.Roles, delegated: in.Delegated, limit: in.Limit, scope: in.Scopes,
+		aud: in.Audience, jkt: in.JKT, act: in.Act, lifetime: 10 * time.Minute})
 }
 
 // TestTokenRequest is the lite test-token input.
@@ -1029,6 +1117,10 @@ type TestTokenRequest struct {
 	Acr      string   `json:"acr"`
 	JKT      string   `json:"jkt"`
 	Audience string   `json:"audience"`
+	// Delegated, Limit and Act let suites exercise delegation claims on every PEP (ADR 0009).
+	Delegated []string       `json:"delegated"`
+	Limit     []string       `json:"limit"`
+	Act       map[string]any `json:"act"`
 }
 
 // ServiceToken mints this service's own platform service token (no network hop: it is the issuer).
@@ -1044,7 +1136,8 @@ func (s *Server) ServiceToken(service string) (string, error) {
 
 // RegisterServiceClients upserts confidential platform clients for other services (lite: from configuration;
 // production: workload identity, DOM-IDN spiffeId). Their tokens carry role platform-service in tenant platform.
-func (s *Server) RegisterServiceClients(ctx context.Context, spec string) error {
+// Clients listed in governance may also request ucos:platform:admin (remote owner protocol, ADR 0009).
+func (s *Server) RegisterServiceClients(ctx context.Context, spec string, governance []string) error {
 	for _, entry := range strings.Split(spec, ",") {
 		id, secret, ok := strings.Cut(strings.TrimSpace(entry), ":")
 		if !ok || id == "" || secret == "" {
@@ -1060,9 +1153,16 @@ func (s *Server) RegisterServiceClients(ctx context.Context, spec string) error 
 		if err != nil {
 			return err
 		}
+		scopes := []string{"ucos:platform:read"}
+		for _, g := range governance {
+			if g == id {
+				scopes = append(scopes, "ucos:platform:admin")
+			}
+		}
 		if _, err := s.DB.Pool.Exec(ctx, `INSERT INTO ucos_identity.oauth_clients (client_id, tenant, kind, secret_hash, redirect_uris,
-			allowed_scopes, identity_ref, created_at) VALUES ($1, 'platform', 'confidential', $2, '{}', '{ucos:platform:read}', $3, now())
-			ON CONFLICT (client_id) DO UPDATE SET secret_hash = EXCLUDED.secret_hash`, id, kit.Hash(secret), identity); err != nil {
+			allowed_scopes, identity_ref, created_at) VALUES ($1, 'platform', 'confidential', $2, '{}', $4, $3, now())
+			ON CONFLICT (client_id) DO UPDATE SET secret_hash = EXCLUDED.secret_hash, allowed_scopes = EXCLUDED.allowed_scopes`,
+			id, kit.Hash(secret), identity, scopes); err != nil {
 			return err
 		}
 	}

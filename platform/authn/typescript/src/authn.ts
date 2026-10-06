@@ -22,8 +22,41 @@ export interface Principal {
   acr: string;
   act: Record<string, unknown> | null;
   jkt: string;
+  /** ucos_delegated: permissions received through DOM-AUTH delegations (ADR 0009). */
+  delegated: string[];
+  /** ucos_permission_limit: ceiling on effective permissions; null = none (ADR 0009). */
+  limit: string[] | null;
   claims: Record<string, unknown>;
 }
+
+const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+
+/** Parties of the act chain, immediate actor first. */
+export function actorParties(act: unknown): string[] {
+  const out: string[] = [];
+  let a = act as Record<string, unknown> | null | undefined;
+  for (let depth = 0; a && depth < 16; depth++) {
+    if (typeof a.ucos_party === "string") out.push(a.ucos_party);
+    a = a.act as Record<string, unknown> | undefined;
+  }
+  return out;
+}
+
+/**
+ * Effective permissions: roles' permissions from the tenant catalog plus delegated permissions, capped by the
+ * permission limit (RUL-AUTH-1, ADR 0009). Mirrors Principal.Permissions in platform/authn/go.
+ */
+export function permissions(p: Principal, catalog: Map<string, string[]>): Set<string> {
+  const out = new Set<string>(p.delegated);
+  for (const r of p.roles) for (const x of catalog.get(r) ?? []) out.add(x);
+  if (p.limit) {
+    const allowed = new Set(p.limit);
+    for (const x of [...out]) if (!allowed.has(x)) out.delete(x);
+  }
+  return out;
+}
+
+export const grants = (p: Principal, catalog: Map<string, string[]>, permission: string) => permissions(p, catalog).has(permission);
 
 export interface Jwk { kty: string; crv?: string; x?: string; y?: string; kid?: string }
 
@@ -63,6 +96,7 @@ export class Validator {
   private fetchedAt = 0;
   private seen = new Map<string, number>();
   private revoked = new Set<string>();
+  private notBefore = new Map<string, number>();
 
   constructor(issuer: string, audience: string) {
     this.issuer = issuer;
@@ -97,10 +131,17 @@ export class Validator {
     if (Number(claims.exp) < now - 60) throw new AuthnError(401, "E-IDN-TOKEN-EXPIRED", "token expired");
     if (Number(claims.nbf ?? 0) > now + 60) throw new AuthnError(401, "E-IDN-TOKEN-INVALID", "token not yet valid");
     if (this.revoked.has(claims.jti) || this.revoked.has(claims.sub)) throw new AuthnError(401, "E-IDN-TOKEN-REVOKED", "token revoked");
+    const iat = Number(claims.iat ?? 0);
+    for (const party of [claims.ucos_party, ...actorParties(claims.act)]) {
+      const nb = this.notBefore.get(party);
+      if (nb !== undefined && iat <= nb) throw new AuthnError(401, "E-IDN-TOKEN-REVOKED", "token revoked");
+    }
     return {
       subject: claims.sub ?? "", party: claims.ucos_party ?? "", tenant: claims.ucos_tenant ?? "",
-      roles: Array.isArray(claims.ucos_roles) ? claims.ucos_roles : [], scopes: String(claims.scope ?? "").split(" ").filter(Boolean),
-      acr: claims.acr ?? "", act: claims.act ?? null, jkt: claims.cnf?.jkt ?? "", claims,
+      roles: strings(claims.ucos_roles), scopes: String(claims.scope ?? "").split(" ").filter(Boolean),
+      acr: claims.acr ?? "", act: claims.act ?? null, jkt: claims.cnf?.jkt ?? "",
+      delegated: strings(claims.ucos_delegated),
+      limit: Array.isArray(claims.ucos_permission_limit) ? strings(claims.ucos_permission_limit) : null, claims,
     };
   }
 
@@ -142,12 +183,19 @@ export class Validator {
     return p;
   }
 
-  /** Polls the issuer's revocation feed (INV-IDN-4). */
+  /** Tokens of `party` (as subject or actor) issued at or before `unixSeconds` are stale (ADR 0009). */
+  revokeBefore(party: string, unixSeconds: number) {
+    if (unixSeconds > (this.notBefore.get(party) ?? -Infinity)) this.notBefore.set(party, unixSeconds);
+  }
+
+  /** Polls the issuer's revocation feed (INV-IDN-4, CR-AUTH-03). */
   pollRevocations(intervalMs = 5000): NodeJS.Timeout {
     const tick = async () => {
       try {
         const r = await fetch(`${this.issuer}/oauth2/revocations`, { signal: AbortSignal.timeout(5000) });
-        for (const k of ((await r.json()) as { revoked: string[] }).revoked) this.revoked.add(k);
+        const feed = (await r.json()) as { revoked: string[]; notBefore?: Record<string, number> };
+        for (const k of feed.revoked) this.revoked.add(k);
+        for (const [party, nb] of Object.entries(feed.notBefore ?? {})) this.revokeBefore(party, nb);
       } catch { /* keep last-known revocations */ }
     };
     void tick();

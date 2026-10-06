@@ -72,6 +72,10 @@ services:
       UCOS_CLOCK: adjustable     # ucos-lite only: lets suites exercise cool-off and freeze windows
       UCOS_FAULTS: enabled       # ucos-lite only: apply-saga fault injection (CR-015-001-04)
       UCOS_REGION: lite
+      # Governed definitions owned by other services (remote owner protocol, ADR 0009) and the governance client
+      UCOS_REMOTE_OWNERS: http://identity:8080=sod-conflict-set,authority-limit
+      UCOS_SERVICE_CLIENT_ID: metadata-service
+      UCOS_SERVICE_CLIENT_SECRET: ${UCOS_METADATA_CLIENT_SECRET:-metadata-client-dev-secret}
     ports: ["127.0.0.1:${UCOS_METADATA_PORT:-18090}:8080"]
 
   # DOM-EVT event registry. Two implementations of one contract and schema (CR-030-001-05); select with
@@ -106,7 +110,8 @@ services:
       UCOS_IDENTITY_KEK: ${UCOS_IDENTITY_KEK:-6c6974652d6f6e6c792d6465762d6b656b2d6e6f742d666f722d70726f642121}  # lite only; KMS in production
       UCOS_PUBLIC_URL: http://identity:8080
       UCOS_METADATA_URL: http://metadata:8080
-      UCOS_SERVICE_CLIENTS: event-platform-service:${UCOS_EVENTING_CLIENT_SECRET:-eventing-client-dev-secret}
+      UCOS_SERVICE_CLIENTS: event-platform-service:${UCOS_EVENTING_CLIENT_SECRET:-eventing-client-dev-secret},metadata-service:${UCOS_METADATA_CLIENT_SECRET:-metadata-client-dev-secret}
+      UCOS_GOVERNANCE_CLIENTS: metadata-service   # may obtain ucos:platform:admin (remote owner protocol, ADR 0009)
       UCOS_TEST_TOKENS: enabled   # ucos-lite only: conformance suites mint tokens for arbitrary principals (ADR 0008)
     ports: ["127.0.0.1:${UCOS_IDENTITY_PORT:-18110}:8080"]
 

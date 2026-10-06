@@ -292,12 +292,5 @@ func (c *roleCatalog) grants(ctx context.Context, p authn.Principal, perm string
 		}
 		c.fetched = time.Now()
 	}
-	for _, r := range p.Roles {
-		for _, x := range c.roles[r] {
-			if x == perm {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
+	return p.Grants(c.roles, perm), nil // roles ∪ delegated, capped by the permission limit (ADR 0009)
 }

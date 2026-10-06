@@ -96,3 +96,64 @@ func TestRejectsForgedAndConfusedTokens(t *testing.T) {
 		t.Fatal("alg=none must be rejected")
 	}
 }
+
+func TestPermissionsUnionDelegatedAndLimit(t *testing.T) {
+	catalog := map[string][]string{"buyer": {"catalog.read", "order.place"}, "sales-rep": {"quote.create"}}
+	p := Principal{Roles: []string{"buyer"}, Delegated: []string{"quote.approve"}}
+	got := p.Permissions(catalog)
+	for _, want := range []string{"catalog.read", "order.place", "quote.approve"} {
+		if !got[want] {
+			t.Fatalf("missing %s in %v", want, got)
+		}
+	}
+	if got["quote.create"] {
+		t.Fatal("a role the principal does not hold must not grant")
+	}
+	p.Limit = []string{"order.place", "quote.create"}
+	got = p.Permissions(catalog)
+	if len(got) != 1 || !got["order.place"] {
+		t.Fatalf("limit must only narrow: %v", got)
+	}
+	p.Limit = []string{}
+	if len(p.Permissions(catalog)) != 0 {
+		t.Fatal("an empty limit grants nothing")
+	}
+}
+
+func TestPartyCutOffRevokesOlderTokensOnly(t *testing.T) {
+	v, ik := setup(t)
+	now := time.Now().Unix()
+	old := token(t, ik, map[string]any{"ucos_party": "urn:ucos:t:party:a", "iat": now - 30, "jti": "o"})
+	viaAgent := token(t, ik, map[string]any{"ucos_party": "urn:ucos:t:party:b", "iat": now - 30, "jti": "g",
+		"act": map[string]any{"sub": "urn:ucos:t:identity:g", "ucos_party": "urn:ucos:t:party:a"}})
+	fresh := token(t, ik, map[string]any{"ucos_party": "urn:ucos:t:party:a", "iat": now + 1, "jti": "f"})
+	v.RevokeBefore("urn:ucos:t:party:a", now)
+	v.RevokeBefore("urn:ucos:t:party:a", now-100) // an earlier cut-off never relaxes a later one
+	for name, tok := range map[string]string{"subject": old, "actor": viaAgent} {
+		if _, err := v.VerifyToken(t.Context(), tok); err == nil || err.(*Error).Code != "E-IDN-TOKEN-REVOKED" {
+			t.Fatalf("%s token issued before the cut-off must be revoked: %v", name, err)
+		}
+	}
+	if _, err := v.VerifyToken(t.Context(), fresh); err != nil {
+		t.Fatalf("a token issued after the cut-off stays valid: %v", err)
+	}
+}
+
+func TestDPoPKeyProofVerifies(t *testing.T) {
+	v, ik := setup(t)
+	k, err := NewDPoPKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := token(t, ik, map[string]any{"cnf": map[string]any{"jkt": k.Thumbprint()}, "jti": "d"})
+	pr, err := k.Proof("POST", "http://svc/v1/x?q=1", tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "http://svc/v1/x", nil)
+	r.Header.Set("Authorization", "DPoP "+tok)
+	r.Header.Set("DPoP", pr)
+	if _, err := v.Authenticate(r, "http://svc/v1/x", true); err != nil {
+		t.Fatal(err)
+	}
+}

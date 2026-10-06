@@ -66,3 +66,39 @@ to the corpus repository as an amendment.
   until each event's classification is specified.
 - Proposed amendment: annex the semantics to CIC-006-001 (1.1.0). Add per-event `classification` to the DOM
   `events` entries, so that VR-EVT-01 can check INV-EVT-4.
+
+## AR-0004: Decidable DOM-AUTH semantics and governed authority definitions (DOM-AUTH 1.1.0)
+
+- Raised: 2026-10-06, slice S2c
+- Problem: DOM-AUTH states the rules but leaves choices open that change outcomes. Two implementations could
+  disagree on who may act, or on whether an assignment violates segregation of duties.
+- RI behaviour (`contracts/authority/semantics.md`):
+  - **A1, delegation base.** A root delegation passes on only the delegator's own role authority. Delegated authority
+    is passed on only by an explicit re-delegation (`parentDelegation`). This makes depth exact (INV-AUTH-5) and
+    keeps cycles harmless.
+  - **A2, coarse tokens.** Access tokens carry roles and delegated permissions without scope (DOM-IDN says roles are
+    "coarse"). Scoped decisions go through GetEffectiveAuthority and CheckSigningAuthority with a context. Tokens never
+    outlive the earliest `validTo` of the authority they carry.
+  - **A3, SoD scope overlap.** Overlap is conservative: scopes are disjoint only when finite value sets (`eq`/`in`,
+    or `not-in`) exclude each other. SoD members of kind `action` are permission strings; a role "holds" an action
+    when it grants that permission.
+  - **A4, action → permission.** AuthorityLimit actions map to the permissions that perform them (semantics §6).
+    The spec names actions but not permissions.
+  - **A5, CheckSigningAuthority.** Defined with three bases (limit, delegation, mandate). The context gains
+    `organization = representedParty`. Money never compares across currencies. Percent measures are facts only.
+  - **A6, mandates.** Terms are the content of `attestation` evidence, signed by the grantor with the key its token
+    was bound to. "Holds authority at signing" is evaluated at the evidence's `capturedAt`.
+  - **A7, propagation.** Narrowing changes publish per-party cut-offs in the revocation feed; the party's own tokens
+    and those of its downstream delegates are rejected when `iat ≤ cutoff`. This meets CR-AUTH-03 (10 s) with 5 s
+    polling.
+  - **A8, governed definitions across services.** "Via ChangeSet" for SoD sets and limits is implemented with a
+    remote owner protocol (`contracts/governance/remote-owner.openapi.yaml`). DOM-GOV stays the only publisher; drafts
+    reference the author's own draft ChangeSet.
+- **Not yet covered:**
+  - Mandate consumption (`used`, `exhausted`) needs a consuming context (S4).
+  - Access reviews and RUL-AUTH-3 auto-suspension are S2d.
+  - DefineRole: roles come from packs; tenant roles arrive with tenant packs.
+  - Per-period delegation limits are stored and served but not enforced until consumption exists.
+- Proposed amendment: annex the semantics to DOM-AUTH (1.2.0). Add the action → permission mapping to the
+  AuthorityLimit definition. State in CIC-015-001 §1 that governed definitions may be owned by any context through
+  the remote owner protocol.

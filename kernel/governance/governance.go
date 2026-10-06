@@ -30,7 +30,7 @@ const Schema = "ucos_governance"
 
 // kindRank is the apply order of CIC-029-001 §3 rule 3 (registry entries last).
 var kindRank = map[string]int{"attribute": 0, "facet": 1, "reltype": 2, "lifecycle": 3, "type": 4, "dimension": 5,
-	"policy": 6, "rule": 7, "registry-entry": 8}
+	"policy": 6, "rule": 7, "registry-entry": 8, "sod-conflict-set": 9, "authority-limit": 9}
 
 // Item is a ChangeSetItem.
 type Item struct {
@@ -373,7 +373,7 @@ func (g *Governance) impact(cs ChangeSet, defs []governed.Definition) (map[strin
 		facts = append(facts, f)
 		n, _ := byKind[d.Kind].(int)
 		byKind[d.Kind] = n + 1
-		if f["policyKind"] == "authorization" {
+		if f["policyKind"] == "authorization" || f["security"] == true { // authority definitions are security-relevant
 			security++
 		}
 		if f["regulated"] == true {

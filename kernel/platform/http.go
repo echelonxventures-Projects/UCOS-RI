@@ -24,6 +24,7 @@ type Principal struct {
 	Roles      []string
 	Acr        string
 	Actors     []string
+	JKT        string // cnf.jkt of a sender-constrained token (the key that proves possession)
 }
 
 // HasRole reports whether the principal holds role.
@@ -158,7 +159,7 @@ func (s *Server) authorize(pattern string, platformOnly bool, r *http.Request) (
 		return Principal{}, err
 	}
 	p := Principal{TenantSlug: ap.TenantSlug, Party: ap.Party, Identity: ap.Subject, Roles: ap.Roles, Acr: ap.Acr,
-		Actors: ap.ActorChain()}
+		Actors: ap.ActorChain(), JKT: ap.JKT}
 	service := p.TenantSlug == "platform" && p.HasRole("platform-service")
 	if service && !write && !platformOnly {
 		if t := r.Header.Get("UCOS-Tenant"); t != "" {
@@ -195,12 +196,8 @@ func (s *Server) authorize(pattern string, platformOnly bool, r *http.Request) (
 	if err != nil {
 		return p, err
 	}
-	for _, role := range p.Roles {
-		for _, x := range catalog[role] {
-			if x == perm {
-				return p, nil
-			}
-		}
+	if ap.Grants(catalog, perm) { // roles ∪ delegated, capped by the permission limit (ADR 0009)
+		return p, nil
 	}
 	return p, Errf(403, "E-API-FORBIDDEN", "operation requires permission %s", perm)
 }

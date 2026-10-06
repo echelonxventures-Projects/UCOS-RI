@@ -54,6 +54,7 @@ var routePermissions = map[string]string{
 	"GET /v1/policy/policies/{urn}":                 "policy.read",
 	"GET /v1/policy/bundles/{tenant}":               "policy.read",
 	"POST /v1/policy:decide":                        "policy.read",
+	"POST /v1/evidence/items":                       "evidence.capture",
 	"GET /v1/evidence/items/{id}":                   "evidence.read",
 	"GET /v1/evidence/items/{id}/inclusion-proof":   "evidence.read",
 	"POST /v1/evidence/items/{rest}:verify":         "evidence.read",
@@ -157,10 +158,30 @@ func run(log *slog.Logger) error {
 			owners[k] = o
 		}
 	}
+	// Owners of governed definitions in other services (remote owner protocol, ADR 0009):
+	// UCOS_REMOTE_OWNERS="<base-url>=<kind>,<kind>;…", called with a DPoP-bound ucos:platform:admin service token.
+	var remotes []*governed.RemoteOwner
+	svcTok := &governed.ServiceToken{Issuer: strings.TrimSuffix(env("UCOS_TOKEN_ISSUER", "http://identity:8080"), "/"),
+		ClientID: env("UCOS_SERVICE_CLIENT_ID", "metadata-service"), Secret: os.Getenv("UCOS_SERVICE_CLIENT_SECRET"),
+		Scope: "ucos:platform:read ucos:platform:admin"}
+	for _, spec := range strings.Split(os.Getenv("UCOS_REMOTE_OWNERS"), ";") {
+		base, kinds, ok := strings.Cut(strings.TrimSpace(spec), "=")
+		if !ok {
+			continue
+		}
+		ro := &governed.RemoteOwner{Base: base, OwnedKinds: strings.Split(kinds, ","), Tokens: svcTok}
+		remotes = append(remotes, ro)
+		for _, k := range ro.OwnedKinds {
+			owners[k] = ro
+		}
+	}
 	faults := &governance.Faults{Enabled: env("UCOS_FAULTS", "") == "enabled"}
 	gov := &governance.Governance{DB: db, Clock: clock, Source: src, Owners: owners, Decider: pol, Evidence: evd,
 		Faults: faults, Log: log}
 	ont.Gate, lfc.Gate, ctxr.Gate, pol.Gate, reg.Gate = gov, gov, gov, gov, gov
+	for _, ro := range remotes {
+		ro.Gate = gov
+	}
 	reg.Owners, reg.Gov = owners, govAdapter{gov}
 	gov.OnApplied = append(gov.OnApplied, func(ctx context.Context, t governed.Tenant, cs governance.ChangeSet) {
 		reg.OnChangeSetFinished(ctx, t, cs.ID, cs.State)

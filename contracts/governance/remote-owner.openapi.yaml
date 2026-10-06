@@ -1,0 +1,148 @@
+# Hand-authored platform contract (ADR 0009): the remote owner protocol between DOM-GOV (governance, in
+# metadata-service) and a service that owns governed definitions (CIC-015-001 §1: "contexts that own governed
+# definitions"). Governance stays the only publisher: every call carries a sender-constrained platform service token
+# with scope ucos:platform:admin (only governance obtains it), the target tenant in UCOS-Tenant, and governance checks
+# its publication Gate (CR-015-001-01) before calling :publish. Drafts are created through the owning context's own
+# API, bound to the author's draft ChangeSet; this protocol never creates content.
+openapi: 3.1.0
+info:
+  title: Governed-definition remote owner protocol
+  version: 1.0.0
+  description: >
+    Implemented by every service that owns governed definitions outside metadata-service (S2c: identity-service owns
+    `sod-conflict-set` and `authority-limit`). Governance reads definitions (with their content digest, which binds
+    approvals, INV-GOV-1, and risk facts), asks the owner to validate drafts at submit, publishes them while the
+    ChangeSet applies, compensates on saga failure, and removes them on uninstall. Publish is idempotent.
+x-ucos-source: {id: GOV-REMOTE-OWNER, version: 1.0.0, boundedContext: governance, service: any-owning-service, traces: [CIC-015-001, DOM-GOV, CR-015-001-01, INV-GOV-1]}
+servers: [{url: /}]
+paths:
+  /v1/governed-definitions:
+    get:
+      operationId: listGovernedDefinitions
+      summary: List definitions owned by this service for the tenant
+      x-ucos-kind: owner-protocol
+      x-ucos-permission: platform.govern
+      parameters:
+        - {name: state, in: query, required: false, schema: {type: array, items: {type: string, enum: [draft, published]}}, style: form, explode: true}
+        - $ref: '#/components/parameters/UcosTenant'
+        - $ref: '#/components/parameters/Dpop'
+      responses:
+        '200':
+          description: Definitions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/GovernedDefinition'}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/governed-definitions/{urn}:
+    get:
+      operationId: getGovernedDefinition
+      summary: Get one definition with its digest and risk facts
+      x-ucos-kind: owner-protocol
+      x-ucos-permission: platform.govern
+      parameters:
+        - $ref: '#/components/parameters/Urn'
+        - $ref: '#/components/parameters/UcosTenant'
+        - $ref: '#/components/parameters/Dpop'
+      responses:
+        '200':
+          description: The definition
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/GovernedDefinition'}
+        default: {$ref: '#/components/responses/Problem'}
+    delete:
+      operationId: removeGovernedDefinition
+      summary: Remove a definition (uninstall)
+      x-ucos-kind: owner-protocol
+      x-ucos-permission: platform.govern
+      parameters:
+        - $ref: '#/components/parameters/Urn'
+        - $ref: '#/components/parameters/UcosTenant'
+        - $ref: '#/components/parameters/Dpop'
+      responses:
+        '204': {description: Removed}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/governed-definitions/{urn}:validate:
+    post:
+      operationId: validateGovernedDefinition
+      summary: Validate a draft against the owner's invariants (ChangeSet submit)
+      x-ucos-kind: owner-protocol
+      x-ucos-permission: platform.govern
+      parameters:
+        - $ref: '#/components/parameters/Urn'
+        - $ref: '#/components/parameters/UcosTenant'
+        - $ref: '#/components/parameters/Dpop'
+      requestBody: {required: false, content: {application/json: {schema: {type: object}}}}
+      responses:
+        '204': {description: Valid}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/governed-definitions/{urn}:publish:
+    post:
+      operationId: publishGovernedDefinition
+      summary: Publish a draft bound to the applying ChangeSet (after governance's Gate allowed it); idempotent
+      x-ucos-kind: owner-protocol
+      x-ucos-permission: platform.govern
+      parameters:
+        - $ref: '#/components/parameters/Urn'
+        - $ref: '#/components/parameters/UcosTenant'
+        - $ref: '#/components/parameters/Dpop'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [changeSetRef]
+              properties:
+                changeSetRef: {$ref: ../kernel/urn.schema.json}
+      responses:
+        '204': {description: Published (or already published)}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/governed-definitions/{urn}:compensate:
+    post:
+      operationId: compensateGovernedDefinition
+      summary: Undo a publication (apply-saga compensation, CIC-015-001 §6)
+      x-ucos-kind: owner-protocol
+      x-ucos-permission: platform.govern
+      parameters:
+        - $ref: '#/components/parameters/Urn'
+        - $ref: '#/components/parameters/UcosTenant'
+        - $ref: '#/components/parameters/Dpop'
+      requestBody: {required: false, content: {application/json: {schema: {type: object}}}}
+      responses:
+        '204': {description: Compensated}
+        default: {$ref: '#/components/responses/Problem'}
+components:
+  schemas:
+    GovernedDefinition:
+      type: object
+      required: [urn, kind, namespace, name, version, state, body, digest, revision, facts]
+      properties:
+        urn: {$ref: ../kernel/urn.schema.json}
+        kind: {type: string, description: Governed kind (e.g. sod-conflict-set, authority-limit)}
+        namespace: {type: string}
+        name: {type: string}
+        version: {type: string}
+        state: {type: string, enum: [draft, published]}
+        body: {type: object, description: The definition content; the digest covers exactly this}
+        digest: {type: string, description: Content digest that approvals bind to (INV-GOV-1)}
+        changeSetRef: {type: string, description: ChangeSet the draft belongs to}
+        revision: {type: integer, minimum: 1}
+        publishedAt: {type: [string, 'null'], format: date-time}
+        facts:
+          type: object
+          description: Risk-classification facts (subjectKind, layer, compatibility, security, regulated)
+  parameters:
+    Urn: {name: urn, in: path, required: true, schema: {$ref: ../kernel/urn.schema.json}}
+    UcosTenant: {name: UCOS-Tenant, in: header, required: true, schema: {type: string, pattern: '^[a-z][a-z0-9-]{1,62}$'}}
+    Dpop: {name: DPoP, in: header, required: true, schema: {type: string}, description: DPoP proof bound to the governance service token (RFC 9449)}
+  responses:
+    Problem:
+      description: RFC 9457 problem
+      content:
+        application/problem+json:
+          schema: {$ref: ../kernel/problem.schema.json}

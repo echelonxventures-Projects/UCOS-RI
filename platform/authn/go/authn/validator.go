@@ -35,6 +35,8 @@ type Principal struct {
 	ClientID   string         // client_id
 	Act        map[string]any // RFC 8693 act chain (nil when not delegated)
 	JKT        string         // cnf.jkt when sender-constrained
+	Delegated  []string       // ucos_delegated: permissions received through DOM-AUTH delegations (ADR 0009)
+	Limit      []string       // ucos_permission_limit: ceiling on effective permissions (nil = none; ADR 0009)
 	Claims     map[string]any // all claims
 }
 
@@ -85,6 +87,7 @@ type Validator struct {
 	fetchedAt time.Time
 	seenJTI   map[string]time.Time // DPoP proof replay cache
 	revoked   map[string]bool      // revoked jti / subjects
+	notBefore map[string]int64     // party URN -> tokens issued at or before this second are stale (ADR 0009)
 }
 
 func (v *Validator) now() time.Time {
@@ -182,8 +185,16 @@ func (v *Validator) VerifyToken(ctx context.Context, token string) (Principal, e
 	}
 	jti, _ := c["jti"].(string)
 	sub, _ := c["sub"].(string)
+	party, _ := c["ucos_party"].(string)
+	act, _ := c["act"].(map[string]any)
+	iat := num(c["iat"])
 	v.mu.Lock()
 	revoked := v.revoked[jti] || v.revoked[sub]
+	for _, pt := range append([]string{party}, actorParties(act)...) {
+		if nb, ok := v.notBefore[pt]; ok && iat <= nb {
+			revoked = true // the party's authority narrowed after this token was issued (CR-AUTH-03)
+		}
+	}
 	v.mu.Unlock()
 	if revoked {
 		return Principal{}, fail(401, "E-IDN-TOKEN-REVOKED", "token revoked")
@@ -203,7 +214,11 @@ func (v *Validator) VerifyToken(ctx context.Context, token string) (Principal, e
 			}
 		}
 	}
-	p.Act, _ = c["act"].(map[string]any)
+	p.Act = act
+	p.Delegated = strs(c["ucos_delegated"])
+	if l, ok := c["ucos_permission_limit"].([]any); ok {
+		p.Limit = append([]string{}, strs(l)...)
+	}
 	if cnf, ok := c["cnf"].(map[string]any); ok {
 		p.JKT, _ = cnf["jkt"].(string)
 	}
@@ -327,16 +342,34 @@ func (v *Validator) Revoke(keys ...string) {
 	}
 }
 
-// PollRevocations fetches {issuer}/oauth2/revocations every interval and applies them (INV-IDN-4 / CR-IDN-02).
+// RevokeBefore marks every token whose ucos_party or act-chain party is party and whose iat is at or before
+// unixSeconds as stale (authority narrowed; ADR 0009). Later cut-offs win.
+func (v *Validator) RevokeBefore(party string, unixSeconds int64) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.notBefore == nil {
+		v.notBefore = map[string]int64{}
+	}
+	if unixSeconds > v.notBefore[party] {
+		v.notBefore[party] = unixSeconds
+	}
+}
+
+// PollRevocations fetches {issuer}/oauth2/revocations every interval and applies them (INV-IDN-4 / CR-IDN-02,
+// CR-AUTH-03).
 func (v *Validator) PollRevocations(ctx context.Context, url string, interval time.Duration) {
 	for ctx.Err() == nil {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if resp, err := v.client().Do(req); err == nil {
 			var out struct {
-				Revoked []string `json:"revoked"`
+				Revoked   []string         `json:"revoked"`
+				NotBefore map[string]int64 `json:"notBefore"`
 			}
 			if json.NewDecoder(resp.Body).Decode(&out) == nil {
 				v.Revoke(out.Revoked...)
+				for party, nb := range out.NotBefore {
+					v.RevokeBefore(party, nb)
+				}
 			}
 			resp.Body.Close()
 		}

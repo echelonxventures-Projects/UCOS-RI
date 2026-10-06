@@ -37,6 +37,8 @@ contracts/              language-neutral contracts
   echo/                 hand-authored S0 echo contracts
   persistence/          standard tables + tenancy contract (CIC-003-001 §4–5)
   context-runtime/      executable semantics of CIC-011-001 + runner protocol (semantics.md)
+  authority/            executable semantics of DOM-AUTH (semantics.md)
+  governance/           remote owner protocol for governed definitions owned outside metadata-service
 conformance/            black-box suites (HTTP, CloudEvents, SQL only; never import implementation code)
   context-resolution/   golden vectors + fixture hierarchies for the context runtime
 platform/context-runtime/{go,typescript}   two independent ucos-context-runtime implementations
@@ -84,7 +86,8 @@ lifecycle-bearing aggregates in S3. Next is **S2, identity and party**.
 |-------|-------|
 | S2a identity-service | Done (ADR 0007). Federated login through dex: authorization code with PKCE, plus id_token verification. ES256 `at+jwt` tokens are DPoP-bound, and bearer tokens cannot write. Agents get API access only through RFC 8693 exchange, which always carries the act chain and only ever narrows. Party creation is PDP-guarded and ontology-validated, with personal attributes encrypted under a per-party key. The embedded PDP evaluates the tenant policy bundle. **All four S2 exit criteria are demonstrated by 11 black-box tests.** |
 | S2b tokens everywhere | Done (ADR 0008). echo, metadata and eventing (Go and TypeScript) validate DPoP-bound tokens and enforce the PEP: scope, then permission from a route table that refuses to start with an uncovered route, checked against the role catalog. Service-to-service reads use platform service tokens. Corpus 1.3.0 (AMD-0003) grants every declared permission through some role. **70 conformance tests run on real tokens**, including the deny-all PEP coverage test. |
-| S2c | Next: DOM-AUTH delegations (INV-AUTH-4/5), SoD conflict sets (CR-AUTH-01), authority limits, mandates; agent delegation through AUTH |
+| S2c authority | Done (ADR 0009, AR-0004). DOM-AUTH is specified as executable semantics. Role assignments carry scope and validity and are checked for SoD under a per-party lock: 25 concurrent conflicting pairs give exactly one winner each (CR-AUTH-01). Delegations only narrow, are re-validated at use, are depth- and cycle-bounded, and revoke in cascade; a property test runs random grant/revoke sequences (CR-AUTH-02). Revocation reaches every service within 10 s through per-party cut-offs in the revocation feed (CR-AUTH-03). SoD sets and authority limits change only through governed ChangeSets via a remote owner protocol. Mandates are backed by signed evidence (INV-AUTH-6). CheckSigningAuthority decides over limits, delegations and mandates. Agents act for non-owners only within a delegation. **14 black-box tests.** |
+| S2d | Next: access reviews (AUTH-C6, RUL-AUTH-3), assignment approval workflows, Idempotency-Key replay on identity-service commands |
 
 Remaining for S1 (metadata kernel: ONT, CTX, POL, LFC, EVT registry, EVD, GOV ChangeSets). Its exit criteria are
 that `ucos.std` installs via ChangeSet and the context-resolution conformance suite is green.

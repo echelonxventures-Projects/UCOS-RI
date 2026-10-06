@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -93,11 +94,22 @@ func run(log *slog.Logger) error {
 	go self.PollRevocations(ctx, "http://127.0.0.1"+env("UCOS_HTTP_ADDR", ":8080")+"/oauth2/revocations", 5*time.Second)
 
 	pty := &party.Party{DB: db, Ont: meta, KEK: kek, Source: src}
-	auth := &authority.Authority{DB: db, Roles: meta, Source: src}
+	auth := &authority.Authority{DB: db, Roles: meta, Policies: meta, Gov: meta, Evidence: meta, Source: src,
+		CEL: func(expr string, vars map[string]any) (bool, error) {
+			out, err := meta.Engine.EvalCEL(expr, vars)
+			b, _ := out.(bool)
+			return b, err
+		},
+		OnNarrowed: func(parties []string, cutoff int64) { // this service's own PEP sees narrowing at once
+			for _, p := range parties {
+				self.RevokeBefore(p, cutoff)
+			}
+		}}
 	srv := &oauth.Server{DB: db, KEK: kek, Keys: keys, Issuer: issuer, Parties: partyAdapter{pty, meta}, Roles: auth,
 		Policies: meta, Self: self, SelfActor: selfActor, Log: log, Source: src}
 	srv.Init()
-	if err := srv.RegisterServiceClients(ctx, os.Getenv("UCOS_SERVICE_CLIENTS")); err != nil {
+	if err := srv.RegisterServiceClients(ctx, os.Getenv("UCOS_SERVICE_CLIENTS"),
+		strings.Split(os.Getenv("UCOS_GOVERNANCE_CLIENTS"), ",")); err != nil {
 		return err
 	}
 	var svcTok struct {
@@ -139,8 +151,7 @@ func run(log *slog.Logger) error {
 		w.WriteHeader(204)
 	})
 
-	type handler func(w http.ResponseWriter, r *http.Request, corr string) error
-	api := func(pattern string, h handler) {
+	api := func(pattern string, h handlerFunc) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			corr := kit.ULID()
 			w.Header().Set("UCOS-Correlation-Id", corr)
@@ -158,8 +169,10 @@ func run(log *slog.Logger) error {
 		for k := range perms {
 			list = append(list, k)
 		}
+		sort.Strings(list)
 		return kit.JSON(w, 200, map[string]any{"subject": p.Subject, "party": p.Party, "tenant": p.TenantSlug, "roles": p.Roles,
-			"scopes": p.Scopes, "acr": p.Acr, "actorChain": p.ActorChain(), "senderConstrained": p.JKT != "", "permissions": list})
+			"scopes": p.Scopes, "acr": p.Acr, "actorChain": p.ActorChain(), "senderConstrained": p.JKT != "", "permissions": list,
+			"delegatedPermissions": nonNil(p.Delegated), "permissionLimit": p.Limit})
 	})
 	api("POST /v1/party/parties", func(w http.ResponseWriter, r *http.Request, corr string) error {
 		p, _, _, err := guard.Require(r, pep.Requirement{Write: true, Scope: "ucos:party:write", Permission: "party.create"})
@@ -196,24 +209,10 @@ func run(log *slog.Logger) error {
 		}
 		return kit.JSON(w, 200, v)
 	})
-	api("POST /v1/authority/role-assignments", func(w http.ResponseWriter, r *http.Request, corr string) error {
-		p, _, _, err := guard.Require(r, pep.Requirement{Write: true, Scope: "ucos:party:admin", Permission: "authority.role.assign"})
-		if err != nil {
-			return err
-		}
-		var in struct{ Party, Role string }
-		if err := kit.ReadJSON(r, &in); err != nil {
-			return err
-		}
-		if _, err := pty.Get(r.Context(), p.TenantSlug, in.Party, false); err != nil {
-			return kit.Errf(422, "E-AUTH-UNKNOWN-PARTY", "party %s does not exist", in.Party)
-		}
-		out, err := auth.Assign(r.Context(), p.TenantSlug, p.Party, in.Party, in.Role, corr)
-		if err != nil {
-			return err
-		}
-		return kit.JSON(w, 201, out)
-	})
+	partyExists := func(ctx context.Context, tenant string) func(string) bool {
+		return func(urn string) bool { _, err := pty.Get(ctx, tenant, urn, false); return err == nil }
+	}
+	authorityRoutes(api, guard, auth, partyExists)
 	api("POST /v1/identity/agents", func(w http.ResponseWriter, r *http.Request, corr string) error {
 		p, _, _, err := guard.Require(r, pep.Requirement{Write: true, Scope: "ucos:identity:write", Permission: "identity.agent.create"})
 		if err != nil {
@@ -375,4 +374,11 @@ func relay(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) {
 			}
 		}
 	}
+}
+
+func nonNil(x []string) []string {
+	if x == nil {
+		return []string{}
+	}
+	return x
 }
