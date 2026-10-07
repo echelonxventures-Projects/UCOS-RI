@@ -1,0 +1,22 @@
+# supply-service (Go) — context = repository root (.dockerignore).
+FROM golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS build
+ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly
+COPY platform/authn/go /src/platform/authn/go
+COPY platform/pdp/go /src/platform/pdp/go
+COPY platform/context-runtime/go /src/platform/context-runtime/go
+COPY platform/lifecycle/go /src/platform/lifecycle/go
+COPY platform/svckit/go /src/platform/svckit/go
+COPY services/supply/go/go.mod services/supply/go/go.sum /src/services/supply/go/
+WORKDIR /src/services/supply/go
+RUN go mod download && go mod verify
+COPY services/supply/go /src/services/supply/go
+RUN go build -trimpath -ldflags="-s -w" -o /out/supply-service ./cmd/supply-service
+
+FROM build AS test
+RUN go vet ./... && go test -count=1 ./...
+
+FROM gcr.io/distroless/static-debian12@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS runtime
+COPY --from=build /out/supply-service /supply-service
+USER nonroot:nonroot
+EXPOSE 8080 8081
+ENTRYPOINT ["/supply-service"]

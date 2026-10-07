@@ -64,7 +64,7 @@ case "$cmd" in
       ctx="$m"; grep -q "^buildContext: \." "$m/ucos-module.yaml" && ctx=.
       echo "== test $m"; "$OCI" build --target test -f "$m/Containerfile" "$ctx"
     done ;;
-  up) compose --profile tools build && compose up -d echo metadata eventing identity commerce ;;
+  up) compose --profile tools build && compose up -d echo metadata eventing identity commerce supply ;;
   down) compose --profile test down -v --remove-orphans ;;
   conformance)
     # The full black-box suite runs once per event-platform-service implementation, each swapped into a fresh

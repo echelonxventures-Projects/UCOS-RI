@@ -1,0 +1,15 @@
+# Build manifest (CIC-001-001 §6): supply contexts (S4), composed for ucos-lite: DOM-INV (S4a); DOM-AVL follows.
+module: supply-service
+context: supply
+slice: S4
+domains: [DOM-INV]
+traces: [DOM-INV, INV-INV-1, INV-INV-2, INV-INV-3, INV-INV-4, INV-INV-5, RUL-INV-1, RUL-INV-2, RUL-INV-3, RUL-INV-4,
+         DEC-INV-1, DEC-INV-2, CR-INV-01, CR-INV-02, CR-INV-03, CIC-011-006, CR-011-006-01]
+ports: {consumes: [EventBusPort, ClockPort, MetadataPort], provides: [InventoryApi]}
+api: {openapi: contracts/supply/DOM-INV.openapi.yaml, asyncapi: contracts/supply/DOM-INV.asyncapi.yaml}
+runtime:
+  language: go
+  image: "golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"   # golang:1.25-alpine
+migrations: [services/supply/supply-service, services/supply/inv]
+buildContext: .
+certificationLevel: L1
