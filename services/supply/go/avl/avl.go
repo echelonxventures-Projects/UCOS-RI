@@ -1077,7 +1077,7 @@ type option struct {
 // (2^n <= 256 for n <= 8, CR-AVL-02) and greedy mode consolidates from the full set otherwise. Ties break on
 // the lexicographically smaller node set, so the result is deterministic.
 func optimize(lines []SourcingLine, candidates map[string]CandidateNode, w ObjectiveWeights, splitPolicy string,
-	atp func(string) *big.Rat, promise func(string) time.Time) SourcingPlan {
+	atp func(objectRef, nodeRef string) *big.Rat, promise func(string) time.Time) SourcingPlan {
 	nodeIDs := make([]string, 0, len(candidates))
 	for id := range candidates {
 		nodeIDs = append(nodeIDs, id)
@@ -1090,9 +1090,9 @@ func optimize(lines []SourcingLine, candidates map[string]CandidateNode, w Objec
 		if q == nil || q.Sign() <= 0 {
 			q = big.NewRat(1, 1)
 		}
-		avail := atp(l.ObjectRef)
 		for _, id := range nodeIDs {
-			if avail.Cmp(q) < 0 {
+			// ATP is per node: a node is feasible for a line only when that node alone can cover it.
+			if atp(l.ObjectRef, id).Cmp(q) < 0 {
 				continue // RUL-AVL-2: availability is advisory; sourcing only proposes nodes that can cover
 			}
 			cost, _ := parseSQ(candidates[id].Cost)
