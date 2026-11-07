@@ -27,3 +27,22 @@ func (n nodeReader) Kind(ctx context.Context, tenant, nodeRef string) (string, e
 	}
 	return svc.Str(obj.Values, "nodeKind"), nil
 }
+
+// objectReader serves DOM-AVL's Objects port from DOM-COB through commerce-service: resolved values and the
+// type ref (the type lineage is resolved from governed metadata, so sellability rules keyed on an object or
+// any of its types apply — RUL-AVL-1).
+type objectReader struct {
+	commerce *svc.Metadata
+}
+
+// View implements avl.Objects.
+func (o objectReader) View(tenant, ref string) (map[string]any, string, bool) {
+	var obj struct {
+		TypeRef string         `json:"typeRef"`
+		Values  map[string]any `json:"values"`
+	}
+	if err := o.commerce.Get(context.Background(), tenant, "/v1/commercial-objects/"+ref, 5*time.Minute, &obj); err != nil {
+		return nil, "", false
+	}
+	return obj.Values, obj.TypeRef, true
+}

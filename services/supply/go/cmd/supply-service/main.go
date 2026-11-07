@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ucos.dev/ri/authn/authn"
+	"ucos.dev/ri/supply/avl"
 	"ucos.dev/ri/supply/inv"
 	"ucos.dev/ri/svckit/svc"
 )
@@ -69,6 +70,9 @@ func run(log *slog.Logger) error {
 	for k, v := range inv.Permissions {
 		permissions[k] = v
 	}
+	for k, v := range avl.Permissions {
+		permissions[k] = v
+	}
 	sec := &svc.Security{Validator: validator, PublicBase: strings.TrimSuffix(env("UCOS_PUBLIC_URL", "http://supply:8080"), "/"),
 		Permissions: permissions, Roles: meta.Roles, ScopeContext: func(path string) string { return "supply" }}
 	srv := svc.NewServer(log, sec)
@@ -79,7 +83,14 @@ func run(log *slog.Logger) error {
 			ClientID: meta.ClientID, Secret: meta.Secret}},
 		Cfg: inv.Config{OversellPolicy: "inventory.oversell", PartialPolicy: "inventory.partial-reservation",
 			TTLPolicy: "inventory.reservation-ttl", NegativeKinds: env("UCOS_INV_NEGATIVE_KINDS", "virtual,drop-ship")}}
+	availability := &avl.AVL{DB: db, Meta: meta, Clock: clock, Source: src,
+		Objects: objectReader{commerce: &svc.Metadata{Base: env("UCOS_COMMERCE_URL", "http://commerce:8080"),
+			Issuer: issuer, ClientID: meta.ClientID, Secret: meta.Secret}},
+		Cfg: avl.Config{SellabilityResolution: "sellability-rule.resolution", Thresholds: "availability.thresholds",
+			Backorder: "availability.backorder", Preorder: "availability.preorder",
+			SourcingObjective: "availability.sourcing-objective"}}
 	inventory.Routes(srv)
+	availability.Routes(srv)
 
 	srv.Mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
 	srv.Mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, r *http.Request) {
@@ -101,9 +112,11 @@ func run(log *slog.Logger) error {
 		_ = svc.JSON(w, 200, map[string]any{"now": clock.Now()})
 	})
 
-	// The relay publishes the supply context's outbox (ATP projections and availability status consume it;
-	// no in-process subscribers yet — DOM-AVL arrives with the next batch).
-	relay := &svc.Relay{Pool: relayPool, Schemas: []string{"ucos_supply", "ucos_supply_service"}, Log: log}
+	// The relay publishes the supply context's outbox. DOM-AVL's AtpProjector subscribes in-process to keep
+	// the ATP projection current from inventory events (CIC-011-006 §2); in the cell profile it sits behind the
+	// bus instead.
+	relay := &svc.Relay{Pool: relayPool, Schemas: []string{"ucos_supply", "ucos_supply_service"},
+		Subscribers: []func(context.Context, []byte) error{availability.Consume}, Log: log}
 	go relay.Run(ctx)
 	servers := []*http.Server{
 		{Addr: env("UCOS_HTTP_ADDR", ":8080"), Handler: srv.Wrap(), ReadHeaderTimeout: 5 * time.Second},
