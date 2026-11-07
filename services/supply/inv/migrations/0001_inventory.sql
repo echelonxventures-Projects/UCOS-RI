@@ -13,7 +13,7 @@ CREATE TABLE ucos_supply.positions (
 );
 CREATE INDEX ON ucos_supply.positions (tenant_id, object_ref, node_ref);
 -- Fast "below safety stock" scan for FindPositions.
-CREATE INDEX ON ucos_supply.positions (tenant_id, on_hand - reserved - safety_stock) WHERE on_hand - reserved - safety_stock < 0;
+CREATE INDEX ON ucos_supply.positions (tenant_id, (on_hand - reserved - safety_stock)) WHERE on_hand - reserved - safety_stock < 0;
 
 -- Append-only ledger (INV-INV-3). Idempotent on the derived key (sourceDocument, lineRef, type): RUL-INV-2.
 CREATE TABLE ucos_supply.movements (
